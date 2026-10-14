@@ -104,7 +104,7 @@ struct InferenceJob {
 enum InferenceCommand {
     Reload(TranscriptionSelection),
     Transcribe(Box<InferenceJob>),
-    Segment(Box<SpeculativeSegment>),
+    Segment(SpeculativeSegment),
     /// Sent after queued work because segment sinks keep the channel open.
     Shutdown,
 }
@@ -138,10 +138,10 @@ impl SegmentSink {
         }
         let flight = SegmentFlight(self.in_flight.clone());
         self.jobs
-            .try_send(InferenceCommand::Segment(Box::new(SpeculativeSegment {
+            .try_send(InferenceCommand::Segment(SpeculativeSegment {
                 segment,
                 _flight: flight,
-            })))
+            }))
             .is_ok()
     }
 }
@@ -233,9 +233,7 @@ impl SpeculativeTranscript {
         selection: &TranscriptionSelection,
         voice_capture: bool,
     ) -> IncrementalPlan {
-        let state = if clip.capture_generation().is_some()
-            && self.capture_generation == clip.capture_generation()
-        {
+        let state = if self.capture_generation == clip.capture_generation() {
             std::mem::take(self)
         } else {
             Self::default()
@@ -247,7 +245,7 @@ impl SpeculativeTranscript {
             "voice-capture"
         } else if let Some(reason) = state.broken {
             reason
-        } else if state.capture_generation.is_none() || state.pieces.len() < clip.cuts().len() {
+        } else if state.pieces.len() < clip.cuts().len() {
             "missing-pieces"
         } else if state.selection.as_ref() != Some(selection) {
             "model-changed"
@@ -263,16 +261,16 @@ impl SpeculativeTranscript {
 /// Transcribes only the tail when every earlier piece already has a result;
 /// otherwise transcribes the whole clip exactly as without segmentation.
 fn transcribe_clip(
-    samples: Vec<f32>,
+    mut samples: Vec<f32>,
     plan: IncrementalPlan,
     protocol: Option<&DictationProtocol>,
     transcribe: impl FnOnce(Vec<f32>, Option<&DictationProtocol>) -> Result<String>,
 ) -> Result<String> {
     match plan {
         IncrementalPlan::Join { prefix, tail_start } => {
-            let tail = samples[tail_start..].to_vec();
-            let tail_ms = tail.len() / TRANSCRIPTION_SAMPLES_PER_MS;
-            let text = transcribe(tail, None)?;
+            samples.drain(..tail_start);
+            let tail_ms = samples.len() / TRANSCRIPTION_SAMPLES_PER_MS;
+            let text = transcribe(samples, None)?;
             tracing::info!(
                 pieces = prefix.len(),
                 tail_ms,
@@ -869,7 +867,7 @@ fn run_inference_worker(
                 // Pieces never load a model; a switch makes the final job fall back.
                 let (_, selection) = crate::app_settings::transcription_selection();
                 let active = transcriber.active_for(&selection);
-                speculative.transcribe_piece(*piece, selection, |samples| match active {
+                speculative.transcribe_piece(piece, selection, |samples| match active {
                     Some(transcriber) => transcriber
                         .transcribe(samples)
                         .map_err(|error| error.to_string()),
@@ -2162,7 +2160,7 @@ mod tests {
             panic!("expected queued piece");
         };
         let mut speculative = SpeculativeTranscript::default();
-        speculative.transcribe_piece(*running, TranscriptionSelection::default(), |_| {
+        speculative.transcribe_piece(running, TranscriptionSelection::default(), |_| {
             assert!(
                 !sink.offer(piece(1, 1)),
                 "a running piece must not admit another piece before inference finishes"

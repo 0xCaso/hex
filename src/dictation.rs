@@ -411,8 +411,6 @@ struct Recording {
     recorded_through: Option<CaptureInstant>,
     input_buffer: Vec<f32>,
     resampler: Option<Fft<f32>>,
-    /// Leading resampler output that `finish` discards.
-    output_delay: usize,
     segments: Option<Segments>,
     #[cfg(target_os = "macos")]
     environment: RecordingEnvironmentState,
@@ -467,9 +465,6 @@ impl Recording {
                 .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let output_delay = resampler
-            .as_ref()
-            .map_or(0, |resampler| resampler.output_delay());
         Ok(Self {
             started_at,
             intentional: false,
@@ -482,7 +477,6 @@ impl Recording {
             recorded_through: None,
             input_buffer: Vec::with_capacity(Self::CHUNK_SIZE),
             resampler,
-            output_delay,
             segments: None,
             #[cfg(target_os = "macos")]
             environment: RecordingEnvironmentState::Disabled,
@@ -522,14 +516,15 @@ impl Recording {
         let Self {
             intentional: true,
             samples,
-            output_delay,
+            resampler,
             segments: Some(segments),
             ..
         } = self
         else {
             return;
         };
-        let available = &samples[(*output_delay).min(samples.len())..];
+        let output_delay = resampler.as_ref().map_or(0, Fft::output_delay);
+        let available = &samples[output_delay.min(samples.len())..];
         let scanned = segments.segmenter.consumed();
         if available.len() <= scanned {
             return;
@@ -563,7 +558,7 @@ impl Recording {
                 self.samples
                     .extend(resample_chunk(resampler, &self.input_buffer, true));
             }
-            let output_delay = self.output_delay;
+            let output_delay = resampler.output_delay();
             for _ in 0..8 {
                 if self.samples.len() >= expected_samples + output_delay {
                     break;

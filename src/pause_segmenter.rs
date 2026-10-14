@@ -20,6 +20,7 @@ const PAUSE: Duration = Duration::from_millis(600);
 const LONG_PIECE: Duration = Duration::from_secs(8);
 const LONG_PIECE_PAUSE: Duration = Duration::from_millis(300);
 
+#[derive(Default)]
 pub struct PauseSegmenter {
     floor_db: Option<f32>,
     frame: Vec<f32>,
@@ -27,19 +28,6 @@ pub struct PauseSegmenter {
     piece_start: usize,
     silent_frames: usize,
     heard_speech: bool,
-}
-
-impl Default for PauseSegmenter {
-    fn default() -> Self {
-        Self {
-            floor_db: None,
-            frame: Vec::with_capacity(FRAME_SAMPLES),
-            position: 0,
-            piece_start: 0,
-            silent_frames: 0,
-            heard_speech: false,
-        }
-    }
 }
 
 impl PauseSegmenter {
@@ -210,35 +198,6 @@ pub(crate) mod tests {
         assert_eq!(found.len(), 3, "{found:?}");
         assert_eq!(ms(found[0]), 4_300);
         assert_eq!(ms(found[1]), 9_300);
-    }
-
-    #[test]
-    #[ignore = "requires HEX_SEGMENTER_WAV, a 16 kHz mono float recording"]
-    fn reports_cuts_for_a_recording() {
-        let path = std::env::var("HEX_SEGMENTER_WAV").unwrap();
-        let mut audio = hound::WavReader::open(path)
-            .unwrap()
-            .samples::<f32>()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        if let Some(level_db) = std::env::var("HEX_SEGMENTER_NOISE_DB")
-            .ok()
-            .and_then(|level| level.parse::<f32>().ok())
-        {
-            let mut seed = 12_345;
-            let noise = noise(audio.len() * 1_000 / SAMPLE_RATE + 1, level_db, &mut seed);
-            audio
-                .iter_mut()
-                .zip(noise)
-                .for_each(|(sample, noise)| *sample += noise);
-        }
-        let found = cuts(&audio, 480);
-        let seconds = |samples: usize| format!("{:.2}", samples as f32 / SAMPLE_RATE as f32);
-        println!(
-            "cuts={:?} tail_s={}",
-            found.iter().map(|&cut| seconds(cut)).collect::<Vec<_>>(),
-            seconds(audio.len() - found.last().copied().unwrap_or(0))
-        );
     }
 
     #[test]

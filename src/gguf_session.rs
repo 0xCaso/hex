@@ -45,16 +45,15 @@ pub(crate) fn validate_gguf_artifact(
 
 // On GPU devices only the per-token decoder runs on CPU; extra spin-waiting ggml
 // workers (default up to 8) stall it under load, so keep it on the calling thread.
-const GPU_DECODER_THREADS: i32 = 1;
-
 fn session_options(device_type: transcribe_cpp::DeviceType) -> transcribe_cpp::SessionOptions {
-    let n_threads = match device_type {
-        transcribe_cpp::DeviceType::Gpu | transcribe_cpp::DeviceType::Igpu => GPU_DECODER_THREADS,
-        _ => transcribe_cpp::SessionOptions::default().n_threads,
-    };
-    transcribe_cpp::SessionOptions {
-        n_threads,
-        ..Default::default()
+    match device_type {
+        transcribe_cpp::DeviceType::Gpu | transcribe_cpp::DeviceType::Igpu => {
+            transcribe_cpp::SessionOptions {
+                n_threads: 1,
+                ..Default::default()
+            }
+        }
+        _ => transcribe_cpp::SessionOptions::default(),
     }
 }
 
