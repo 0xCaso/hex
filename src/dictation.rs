@@ -20,7 +20,7 @@ const PARAKEET_SAMPLE_RATE: u32 = 16_000;
 /// empty rather than transcribed, because models hallucinate closing phrases
 /// such as "thank you" on silence. Deliberately conservative: whispered speech
 /// sits well above it, so only a quiet room's noise floor is discarded.
-pub const SILENCE_THRESHOLD_DBFS: f32 = -50.0;
+const SILENCE_THRESHOLD_DBFS: f32 = -50.0;
 const SILENCE_WINDOW_SAMPLES: usize = 480;
 
 use crate::spoken_text::normalize;
@@ -340,12 +340,36 @@ impl DictationClip {
 
     /// The loudest 30 ms window's DC-removed RMS level in dBFS, over the
     /// captured audio only (before any model padding).
-    pub fn loudest_window_dbfs(&self) -> f32 {
-        loudest_window_dbfs(&self.samples)
+    fn loudest_window_dbfs(&self) -> f32 {
+        let loudest = self
+            .samples
+            .chunks(SILENCE_WINDOW_SAMPLES)
+            .map(|window| {
+                let count = window.len() as f64;
+                let mean = window.iter().map(|&sample| f64::from(sample)).sum::<f64>() / count;
+                let variance = window
+                    .iter()
+                    .map(|&sample| (f64::from(sample) - mean).powi(2))
+                    .sum::<f64>()
+                    / count;
+                variance.sqrt()
+            })
+            .fold(0.0, f64::max);
+        (20.0 * loudest.max(1e-6).log10()) as f32
     }
 
     pub fn is_near_silent(&self) -> bool {
-        self.loudest_window_dbfs() < SILENCE_THRESHOLD_DBFS
+        let level_dbfs = self.loudest_window_dbfs();
+        let silent = level_dbfs < SILENCE_THRESHOLD_DBFS;
+        if silent {
+            tracing::info!(
+                level_dbfs,
+                threshold_dbfs = SILENCE_THRESHOLD_DBFS,
+                audio_ms = self.duration_ms(),
+                "discarded near-silent dictation without transcribing it"
+            );
+        }
+        silent
     }
 
     #[cfg(any(test, target_os = "linux"))]
@@ -358,23 +382,6 @@ impl DictationClip {
     pub fn into_transcription_samples(self) -> Vec<f32> {
         self.samples
     }
-}
-
-fn loudest_window_dbfs(samples: &[f32]) -> f32 {
-    let loudest = samples
-        .chunks(SILENCE_WINDOW_SAMPLES)
-        .map(|window| {
-            let count = window.len() as f64;
-            let mean = window.iter().map(|&sample| f64::from(sample)).sum::<f64>() / count;
-            let variance = window
-                .iter()
-                .map(|&sample| (f64::from(sample) - mean).powi(2))
-                .sum::<f64>()
-                / count;
-            variance.sqrt()
-        })
-        .fold(0.0, f64::max);
-    (20.0 * loudest.max(1e-6).log10()).max(-120.0) as f32
 }
 
 pub(crate) fn pad_for_parakeet(samples: &mut Vec<f32>) {

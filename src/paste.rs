@@ -467,7 +467,7 @@ fn write_clipboard_text(clipboard: &NSPasteboard, text: &str) -> Result<()> {
         return Err(eyre!("could not prepare the transcript for the clipboard"));
     }
     clipboard.clearContents();
-    write_items(clipboard, vec![item])
+    write_items(clipboard, &[item])
 }
 
 fn restore_clipboard(clipboard: &NSPasteboard, snapshot: &ClipboardSnapshot) -> Result<()> {
@@ -509,7 +509,7 @@ fn restore_clipboard(clipboard: &NSPasteboard, snapshot: &ClipboardSnapshot) -> 
     Ok(())
 }
 
-fn write_items(clipboard: &NSPasteboard, items: Vec<Retained<NSPasteboardItem>>) -> Result<()> {
+fn write_items(clipboard: &NSPasteboard, items: &[Retained<NSPasteboardItem>]) -> Result<()> {
     let objects = items
         .iter()
         .map(|item| ProtocolObject::from_ref(&**item))
@@ -890,8 +890,8 @@ mod tests {
                 }
                 item
             })
-            .collect();
-        write_items(&clipboard, items).unwrap();
+            .collect::<Vec<_>>();
+        write_items(&clipboard, &items).unwrap();
         let snapshot = capture_clipboard(&clipboard).unwrap();
 
         clipboard.clearContents();
@@ -910,7 +910,7 @@ mod tests {
             &NSString::from_str("com.hex.fixture.first")
         ));
         clipboard.clearContents();
-        write_items(&clipboard, vec![item]).unwrap();
+        write_items(&clipboard, &[item]).unwrap();
         let mut paster = Paster {
             clipboard: clipboard.clone(),
             activity: InputActivity::default(),
@@ -927,7 +927,7 @@ mod tests {
             &NSString::from_str("com.hex.fixture.second")
         ));
         clipboard.clearContents();
-        write_items(&clipboard, vec![item]).unwrap();
+        write_items(&clipboard, &[item]).unwrap();
         paster.prepare();
         let prepared = paster.prepared_clipboard.as_ref().unwrap();
 
@@ -977,7 +977,7 @@ mod tests {
             &NSString::from_str("public.png")
         ));
         clipboard.clearContents();
-        write_items(&clipboard, vec![item]).unwrap();
+        write_items(&clipboard, &[item]).unwrap();
 
         let snapshot = capture_clipboard(&clipboard).unwrap();
         assert_eq!(

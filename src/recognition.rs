@@ -2073,26 +2073,19 @@ fn finish_dictation(
     events: &mut EventLog,
     indicator: Option<&DictationIndicatorSender>,
 ) -> Result<FinishResult> {
-    let Finish::Transcribe(clip) = capture.finish(ended_at)? else {
-        events.dictation(DictationPhase::Discarded, "")?;
-        if let Some(indicator) = indicator {
-            indicator.send(DictationIndicatorEvent::Discarded);
+    let clip = match capture.finish(ended_at)? {
+        Finish::Transcribe(clip) if !clip.is_near_silent() => clip,
+        finish => {
+            events.dictation(DictationPhase::Discarded, "")?;
+            if let Some(indicator) = indicator {
+                indicator.send(DictationIndicatorEvent::Discarded);
+            }
+            return Ok(match finish {
+                Finish::Discard => FinishResult::Discarded,
+                Finish::Transcribe(_) => FinishResult::Silent,
+            });
         }
-        return Ok(FinishResult::Discarded);
     };
-    if clip.is_near_silent() {
-        tracing::info!(
-            level_dbfs = clip.loudest_window_dbfs(),
-            threshold_dbfs = crate::dictation::SILENCE_THRESHOLD_DBFS,
-            audio_ms = clip.duration_ms(),
-            "discarded near-silent dictation without transcribing it"
-        );
-        events.dictation(DictationPhase::Discarded, "")?;
-        if let Some(indicator) = indicator {
-            indicator.send(DictationIndicatorEvent::Discarded);
-        }
-        return Ok(FinishResult::Silent);
-    }
     feedback::play(Tone::DictationStop);
     events.emit(&VoiceEvent::State {
         timestamp_ms: now_ms(),

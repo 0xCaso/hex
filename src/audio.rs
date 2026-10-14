@@ -802,7 +802,10 @@ fn mono<T>(samples: &[T], channels: usize, convert: impl Fn(&T) -> f32) -> Vec<f
 }
 
 fn report_stream_error(sender: &SyncSender<String>, error: cpal::Error) {
-    if !stream_error_is_fatal(error.kind()) {
+    if matches!(
+        error.kind(),
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
+    ) {
         // CoreAudio reports processor overloads, common while a cold device
         // starts, without stopping the stream. Real sample gaps still surface as
         // capture discontinuities.
@@ -811,13 +814,6 @@ fn report_stream_error(sender: &SyncSender<String>, error: cpal::Error) {
     }
     tracing::error!(%error, "microphone stream failed");
     let _ = sender.try_send(error.to_string());
-}
-
-fn stream_error_is_fatal(kind: cpal::ErrorKind) -> bool {
-    !matches!(
-        kind,
-        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
-    )
 }
 
 fn build_stream<T: SizedSample>(

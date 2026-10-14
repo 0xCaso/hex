@@ -158,17 +158,11 @@ fn resolve_key_code(character: char, command: bool) -> Result<u16> {
         .flatten()
         .or_else(|| find(NO_MODIFIER_STATE));
     drop(source);
-    if let Some(key_code) = result {
-        return Ok(key_code);
-    }
     // Non-Latin layouts produce no ASCII letters with an empty modifier state;
     // resolve those against the ASCII-capable layout like AppKit does.
-    if let Some(key_code) = ascii_capable_key_code(character) {
-        return Ok(key_code);
-    }
-    Err(eyre!(
-        "current keyboard layout has no key for {character:?}"
-    ))
+    result
+        .or_else(|| ascii_capable_key_code(character))
+        .ok_or_else(|| eyre!("current keyboard layout has no key for {character:?}"))
 }
 
 /// GUI startup must build this snapshot on the main thread before starting workers.
