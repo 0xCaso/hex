@@ -49,6 +49,8 @@ substitute for source inspection or a second roadmap.
 - `keyboard`: active-layout key resolution and balanced synthetic shortcuts.
 - `dictation`: warm pre-roll, growable capture, and 16 kHz
   local-transcription resampling.
+- `pause_segmenter`: pure 16 kHz pause detection that cuts intentional hotkey
+  captures into pieces for incremental transcription.
 - `dictation_audio`: the authoritative microphone timeline, lazy stream
   lifecycle, recording owner, exact shortcut boundaries, recovery handoff, and
   disposable bounded command audio projection.
@@ -233,6 +235,11 @@ CoreAudio formats, AppleScript details, or event serialization.
   its backlog is bounded by duration, and pressure invalidates the generation,
   discards stale audio and updates, and resets Moonshine without touching the
   active recording.
+- Incremental transcription is speculative: pieces cut at pauses are handed to
+  the inference worker without blocking capture, at most one at a time, and never
+  paste. The final job joins piece transcripts with the tail only when every kept
+  cut has a transcript from the same model; otherwise it transcribes the full clip.
+  Output, history, and last-result effects happen once on the final text.
 - Starting a new capture never cancels accepted dictation work. Pending jobs
   preserve submission-order output while capture remains immediately available.
 - Completing or pasting an older job must not reconcile or finish a newer

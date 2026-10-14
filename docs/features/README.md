@@ -289,6 +289,7 @@ Settings                                 // settings
 ├── While dictating -> Mute / Pause media / Do nothing
 │   ├── Intentional capture only, not ordinary shortcut chords
 │   └── Pause/resume only players already reported running by macOS
+├── Transcribe during pauses -> On by default; next hotkey capture // dictate.incremental
 └── Sound volume -> Immediate feedback setting; zero suppresses tones
 
 Intentional recording                    // recording.environment
