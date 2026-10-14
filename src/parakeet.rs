@@ -181,6 +181,18 @@ enum IncrementalPlan {
 }
 
 impl SpeculativeTranscript {
+    /// Transcribes `piece` while holding its flight guard so no second piece
+    /// can be admitted until inference and bookkeeping finish.
+    fn transcribe_piece(
+        &mut self,
+        mut piece: SpeculativeSegment,
+        selection: TranscriptionSelection,
+        transcribe: impl FnOnce(Vec<f32>) -> Result<String, String>,
+    ) {
+        let result = transcribe(std::mem::take(&mut piece.segment.samples));
+        self.record(&piece.segment, selection, result);
+    }
+
     fn record(
         &mut self,
         segment: &CaptureSegment,
@@ -297,16 +309,17 @@ fn join_segments<'a>(pieces: impl IntoIterator<Item = &'a str>) -> String {
         let mut characters = piece.chars();
         let first = characters.next().expect("piece is nonempty");
         let first_word = piece.split_whitespace().next().unwrap_or_default();
-        let keeps_case = first_word == "I"
-            || first_word.starts_with("I'")
-            || first_word.starts_with("I\u{2019}")
+        let keeps_case = (first == 'I'
+            && !first_word.chars().nth(1).is_some_and(char::is_alphabetic))
             || (first_word.chars().filter(|c| c.is_alphabetic()).count() > 1
                 && first_word
                     .chars()
                     .filter(|c| c.is_alphabetic())
                     .all(char::is_uppercase));
         let mid_clause = matches!(previous, ',' | ';' | ':' | '-' | '\u{2013}' | '\u{2014}');
+        let spaceless = is_spaceless_script(previous) || is_spaceless_script(first);
         if !mid_clause
+            && !spaceless
             && first.is_uppercase()
             && !matches!(
                 previous,
@@ -315,7 +328,7 @@ fn join_segments<'a>(pieces: impl IntoIterator<Item = &'a str>) -> String {
         {
             joined.push('.');
         }
-        if !(is_spaceless_script(previous) || is_spaceless_script(first)) {
+        if !spaceless {
             joined.push(' ');
         }
         if mid_clause && !keeps_case {
@@ -853,16 +866,15 @@ fn run_inference_worker(
                 continue;
             }
             InferenceCommand::Segment(piece) => {
-                let SpeculativeSegment { mut segment, .. } = *piece;
                 // Pieces never load a model; a switch makes the final job fall back.
                 let (_, selection) = crate::app_settings::transcription_selection();
-                let result = match transcriber.active_for(&selection) {
+                let active = transcriber.active_for(&selection);
+                speculative.transcribe_piece(*piece, selection, |samples| match active {
                     Some(transcriber) => transcriber
-                        .transcribe(std::mem::take(&mut segment.samples))
+                        .transcribe(samples)
                         .map_err(|error| error.to_string()),
                     None => Err("the selected model is not active".into()),
-                };
-                speculative.record(&segment, selection, result);
+                });
                 continue;
             }
             InferenceCommand::Transcribe(job) => *job,
@@ -1903,7 +1915,15 @@ mod tests {
             "First part, I think so."
         );
         assert_eq!(
-            join(&["First part -", "I'm sure."]),
+            join(&["First part,", "I, for one, agree."]),
+            "First part, I, for one, agree."
+        );
+        assert_eq!(
+            join(&["First part,", "In fact, yes."]),
+            "First part, in fact, yes."
+        );
+        assert_eq!(
+            join(&[" First part -", "I'm sure."]),
             "First part - I'm sure."
         );
         assert_eq!(join(&["We need;", "NASA data"]), "We need; NASA data");
@@ -1915,6 +1935,7 @@ mod tests {
         assert_eq!(join(&["still going", "and more"]), "still going and more");
         assert_eq!(join(&["  ", " Only. ", ""]), "Only.");
         assert_eq!(join(&["你好。", "我们走吧。"]), "你好。我们走吧。");
+        assert_eq!(join(&["你好。", "Apple"]), "你好。Apple");
         assert_eq!(join(&[]), "");
     }
 
@@ -2135,12 +2156,19 @@ mod tests {
         assert!(submit().is_ok());
         assert!(submit().is_ok());
 
-        // Processing the piece admits the next one, but a full queue refuses it
-        // without leaving the sink stuck.
-        assert!(matches!(
-            inference_receiver.try_recv(),
-            Ok(InferenceCommand::Segment(_))
-        ));
+        // A running piece keeps the sink busy until transcription finishes,
+        // and a full queue refuses the next piece without leaving the sink stuck.
+        let Ok(InferenceCommand::Segment(running)) = inference_receiver.try_recv() else {
+            panic!("expected queued piece");
+        };
+        let mut speculative = SpeculativeTranscript::default();
+        speculative.transcribe_piece(*running, TranscriptionSelection::default(), |_| {
+            assert!(
+                !sink.offer(piece(1, 1)),
+                "a running piece must not admit another piece before inference finishes"
+            );
+            Ok("First.".into())
+        });
         assert!(submit().is_ok());
         assert!(!sink.offer(piece(1, 1)));
         assert!(matches!(
