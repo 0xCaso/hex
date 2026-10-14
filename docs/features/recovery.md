@@ -314,8 +314,14 @@ did not verify the new visible warning or bare-Escape fallback.
 GUI startup -> require OS main thread -> initialize_layout // recover.keyboard-layout
   -> publish complete snapshot BEFORE settings/workers/GPUI
      ├── cached character -> keycode
-     └── missing ASCII character -> filled from ASCII-capable layout
+     ├── missing ASCII character -> filled from ASCII-capable layout
+     └── Command layer (UCKeyTranslate with cmdKey) -> separate map
                                      // no worker-side TIS/TSM query
+
+Synthetic shortcut with Command (⌘V)
+  ├── Command layer has the character -> that keycode // "Dvorak – QWERTY ⌘"
+  └── otherwise -> plain snapshot as above
+Shortcuts without Command and recorded hotkeys -> plain snapshot only
 
 Headless lookup without snapshot -> shared native lock -> current layout query
   -> current layout misses ASCII character -> ASCII-capable fallback
@@ -338,6 +344,15 @@ characters keep the lowest key code, just like the current-layout snapshot.
 `non_latin_snapshot_gets_shortcut_letters_without_replacing_active_keys` covers
 the merge policy with Cyrillic/Hebrew fixtures; native layout and physical paste
 verification remain separate.
+
+Layouts can also switch arrangement while Command is held. "Dvorak – QWERTY ⌘"
+types `v` from keycode 47, but ⌘+47 is ⌘. there; ⌘V is keycode 9. Resolving ⌘V
+from the plain layer posted ⌘. and the target beeped (kitlangton/Hex#162). The
+snapshot and headless lookups now resolve Command shortcuts from the layout's
+Command layer first. Ordinary layouts map letters identically on both layers.
+`command_shortcuts_resolve_against_the_command_layer` covers the selection and
+fallback with Dvorak-QWERTY⌘, QWERTY, and non-Latin fixtures; it does not query
+a real Dvorak layout or post a paste.
 
 **Executed September 1, 2026:** [keyboard_layout.rs](../../tests/keyboard_layout.rs)
 includes the production module and runs four scenarios in fresh child processes,

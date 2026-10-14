@@ -41,6 +41,9 @@ type EventRef = *mut c_void;
 
 const KEY_ACTION_DISPLAY: u16 = 3;
 const NO_DEAD_KEYS: isize = 0;
+const NO_MODIFIER_STATE: u32 = 0;
+/// Carbon `cmdKey >> 8`, the UCKeyTranslate modifier state for the Command layer.
+const COMMAND_MODIFIER_STATE: u32 = 1;
 const HID_EVENT_TAP: u32 = 0;
 const COMMAND_KEY_CODE: u16 = 55;
 const COMMAND_FLAG: u64 = 1 << 20;
@@ -52,7 +55,7 @@ const CONTROL_KEY_CODE: u16 = 59;
 const CONTROL_FLAG: u64 = 1 << 18;
 const EVENT_SOURCE_USER_DATA: u32 = 42;
 pub const SYNTHETIC_EVENT_MARKER: i64 = 0x0056_4f49_4345;
-static KEY_CODES: OnceLock<HashMap<char, u16>> = OnceLock::new();
+static KEY_CODES: OnceLock<LayoutCodes> = OnceLock::new();
 static LAYOUT_ACCESS: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 pub(crate) static INPUT_SOURCE_QUERIES: std::sync::atomic::AtomicUsize =
@@ -97,12 +100,35 @@ unsafe extern "C" {
     fn CGEventPost(tap: u32, event: EventRef);
 }
 
+/// Character key codes for the active layout's plain and Command layers.
+/// Layouts such as "Dvorak – QWERTY ⌘" switch to a different arrangement while
+/// Command is held, so Command shortcuts must resolve against that layer.
+struct LayoutCodes {
+    plain: HashMap<char, u16>,
+    command: HashMap<char, u16>,
+}
+
+impl LayoutCodes {
+    fn key_code(&self, character: char, command: bool) -> Option<u16> {
+        let character = character.to_ascii_lowercase();
+        command
+            .then(|| self.command.get(&character))
+            .flatten()
+            .or_else(|| self.plain.get(&character))
+            .copied()
+    }
+}
+
+/// The key that produces `character` on the active layout's plain layer.
 pub fn key_code_for(character: char) -> Result<u16> {
+    resolve_key_code(character, false)
+}
+
+fn resolve_key_code(character: char, command: bool) -> Result<u16> {
     let cached = || {
         KEY_CODES.get().map(|codes| {
             codes
-                .get(&character.to_ascii_lowercase())
-                .copied()
+                .key_code(character, command)
                 .ok_or_else(|| eyre!("current keyboard layout has no key for {character:?}"))
         })
     };
@@ -121,10 +147,16 @@ pub fn key_code_for(character: char) -> Result<u16> {
     let layout = source.layout_bytes()?;
     let mut target = [0; 4];
     let target = character.encode_utf8(&mut target);
-    let result = (0..128).find(|&key_code| {
-        translate(layout, key_code)
-            .is_some_and(|translated| translated.eq_ignore_ascii_case(target))
-    });
+    let find = |modifier_state| {
+        (0..128).find(|&key_code| {
+            translate(layout, key_code, modifier_state)
+                .is_some_and(|translated| translated.eq_ignore_ascii_case(target))
+        })
+    };
+    let result = command
+        .then(|| find(COMMAND_MODIFIER_STATE))
+        .flatten()
+        .or_else(|| find(NO_MODIFIER_STATE));
     drop(source);
     if let Some(key_code) = result {
         return Ok(key_code);
@@ -151,7 +183,10 @@ pub fn initialize_layout() -> Result<()> {
     if KEY_CODES.get().is_some() {
         return Ok(());
     }
-    let mut codes = collect_layout_codes(LayoutSource::current()?)?;
+    let source = LayoutSource::current()?;
+    let mut codes = collect_layout_codes(&source, NO_MODIFIER_STATE)?;
+    let command = collect_layout_codes(&source, COMMAND_MODIFIER_STATE).unwrap_or_default();
+    drop(source);
     // Non-Latin layouts (Russian, Hebrew, …) produce no ASCII letters with an
     // empty modifier state, so shortcuts like Cmd+V would miss. Appkit resolves
     // those against the ASCII-capable layout; mirror that here by filling the
@@ -161,13 +196,16 @@ pub fn initialize_layout() -> Result<()> {
     {
         fill_missing_ascii_letters(&mut codes, ascii_codes);
     }
-    let _ = KEY_CODES.set(codes);
+    let _ = KEY_CODES.set(LayoutCodes {
+        plain: codes,
+        command,
+    });
     Ok(())
 }
 
 fn ascii_capable_key_codes() -> Option<HashMap<char, u16>> {
     // Called only while LAYOUT_ACCESS is held, before the GUI snapshot is published.
-    collect_layout_codes(LayoutSource::ascii_capable()?).ok()
+    collect_layout_codes(&LayoutSource::ascii_capable()?, NO_MODIFIER_STATE).ok()
 }
 
 fn fill_missing_ascii_letters(codes: &mut HashMap<char, u16>, fallback: HashMap<char, u16>) {
@@ -189,10 +227,10 @@ fn ascii_capable_key_code(character: char) -> Option<u16> {
         .copied()
 }
 
-fn collect_layout_codes(source: LayoutSource) -> Result<HashMap<char, u16>> {
+fn collect_layout_codes(source: &LayoutSource, modifier_state: u32) -> Result<HashMap<char, u16>> {
     let layout = source.layout_bytes()?;
     Ok(collect_key_codes((0..128).filter_map(|key_code| {
-        let translated = translate(layout, key_code)?;
+        let translated = translate(layout, key_code, modifier_state)?;
         let character = translated.chars().next()?.to_ascii_lowercase();
         Some((character, key_code))
     })))
@@ -238,7 +276,9 @@ pub fn post_repeated_shortcut(key: Key, modifiers: Modifiers, count: u8) -> Resu
         return Ok(());
     }
     let key_code = match key {
-        Key::Character(character) => key_code_for(character)?,
+        Key::Character(character) => {
+            resolve_key_code(character, modifiers.contains(Modifiers::COMMAND))?
+        }
         Key::Home => 115,
         Key::End => 119,
         Key::Up => 126,
@@ -366,7 +406,7 @@ impl Drop for LayoutSource {
     }
 }
 
-fn translate(layout: *const u8, key_code: u16) -> Option<String> {
+fn translate(layout: *const u8, key_code: u16, modifier_state: u32) -> Option<String> {
     let mut dead_key_state = 0;
     let mut output = [0_u16; 4];
     let mut length = 0;
@@ -376,7 +416,7 @@ fn translate(layout: *const u8, key_code: u16) -> Option<String> {
             layout,
             key_code,
             KEY_ACTION_DISPLAY,
-            0,
+            modifier_state,
             LMGetKbdType().into(),
             NO_DEAD_KEYS,
             &mut dead_key_state,
@@ -408,6 +448,34 @@ mod tests {
         fill_missing_ascii_letters(&mut non_latin, collect_key_codes([('v', 9)]));
         assert_eq!(non_latin.get(&'v'), Some(&9));
         assert_eq!(non_latin.get(&'מ'), Some(&9));
+    }
+
+    #[test]
+    fn command_shortcuts_resolve_against_the_command_layer() {
+        // "Dvorak – QWERTY ⌘": V is keycode 47 normally but keycode 9 with Command.
+        let dvorak_qwerty_command = LayoutCodes {
+            plain: collect_key_codes([('v', 47), ('.', 9)]),
+            command: collect_key_codes([('v', 9), ('.', 47)]),
+        };
+        assert_eq!(dvorak_qwerty_command.key_code('v', true), Some(9));
+        assert_eq!(dvorak_qwerty_command.key_code('V', true), Some(9));
+        assert_eq!(dvorak_qwerty_command.key_code('v', false), Some(47));
+
+        let qwerty = LayoutCodes {
+            plain: collect_key_codes([('v', 9)]),
+            command: collect_key_codes([('v', 9)]),
+        };
+        assert_eq!(qwerty.key_code('v', true), Some(9));
+        assert_eq!(qwerty.key_code('v', false), Some(9));
+
+        // A Command layer without Latin letters falls back to the plain snapshot,
+        // which non-Latin layouts fill from the ASCII-capable layout.
+        let non_latin = LayoutCodes {
+            plain: collect_key_codes([('м', 9), ('v', 9)]),
+            command: collect_key_codes([('м', 9)]),
+        };
+        assert_eq!(non_latin.key_code('v', true), Some(9));
+        assert_eq!(non_latin.key_code('x', true), None);
     }
 
     #[test]
