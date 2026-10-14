@@ -89,6 +89,7 @@ impl ActivationStability {
 
 enum FinishResult {
     Discarded,
+    Silent,
     Submitted,
     Rejected(String),
 }
@@ -2079,6 +2080,19 @@ fn finish_dictation(
         }
         return Ok(FinishResult::Discarded);
     };
+    if clip.is_near_silent() {
+        tracing::info!(
+            level_dbfs = clip.loudest_window_dbfs(),
+            threshold_dbfs = crate::dictation::SILENCE_THRESHOLD_DBFS,
+            audio_ms = clip.duration_ms(),
+            "discarded near-silent dictation without transcribing it"
+        );
+        events.dictation(DictationPhase::Discarded, "")?;
+        if let Some(indicator) = indicator {
+            indicator.send(DictationIndicatorEvent::Discarded);
+        }
+        return Ok(FinishResult::Silent);
+    }
     feedback::play(Tone::DictationStop);
     events.emit(&VoiceEvent::State {
         timestamp_ms: now_ms(),
@@ -2228,6 +2242,7 @@ fn finish_outcome(result: &FinishResult) -> CommandOutcome {
     match result {
         FinishResult::Submitted => CommandOutcome::Executed,
         FinishResult::Discarded => CommandOutcome::Failed("capture was too short".into()),
+        FinishResult::Silent => CommandOutcome::Failed("capture was silent".into()),
         FinishResult::Rejected(error) => CommandOutcome::Failed(error.clone()),
     }
 }

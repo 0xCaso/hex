@@ -717,6 +717,7 @@ layout evidence.
 TypeScript SDK + macOS local service
 ├── Caller records audio -> Explicit helper -> Raw transcription
 ├── Running desktop capture API -> Separate microphone ownership protocol
+│   └── No silence gate                  // raw model output, unlike hotkey dictation
 └── Distribution
     ├── SDK 0.3.0 -> Published
     └── Turnkey signed helper -> Unfinished

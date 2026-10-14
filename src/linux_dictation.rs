@@ -241,6 +241,15 @@ fn submit_capture(
 ) -> Result<()> {
     match capture.finish(ended_at) {
         Finish::Discard => events.dictation(DictationPhase::Discarded, "")?,
+        Finish::Transcribe(clip) if clip.is_near_silent() => {
+            tracing::info!(
+                level_dbfs = clip.loudest_window_dbfs(),
+                threshold_dbfs = crate::dictation::SILENCE_THRESHOLD_DBFS,
+                audio_ms = clip.duration_ms(),
+                "discarded near-silent dictation without transcribing it"
+            );
+            events.dictation(DictationPhase::Discarded, "")?;
+        }
         Finish::Transcribe(clip) => {
             feedback::play(Tone::DictationStop);
             let audio_ms = clip.duration_ms();

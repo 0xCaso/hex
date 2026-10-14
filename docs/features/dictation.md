@@ -186,6 +186,9 @@ that run is not claimed as a passing transcription regression check.
 
 ```ts
 Finish
+  ├── Near-silent capture -> Discard, no inference    // dictate.silence-gate
+  │       // loudest 30 ms window (DC removed) below -50 dBFS; no paste,
+  │       // History, or last-result update; process.log records the level
   ├── Capacity available -> Accepted job -> Local transcription -> Mode processing
   │    -> Paste successful nonempty output once, at current focus
   │       // the clipboard write carries nspasteboard.org Transient and
@@ -202,6 +205,17 @@ A pending -> Start capture B                          // dictate.overlap
 ```
 
 Source: `finish_dictation` in [recognition.rs](../../src/recognition.rs).
+The silence gate stops models from hallucinating closing phrases such as "thank
+you" on an empty hold ([#108](https://github.com/anomalyco/hex/issues/108)). It
+covers hotkey, voice-delimited, and Voice Action captures on macOS, and the Linux
+hotkey loop. The local API's programmatic dictation and host-audio transcription
+are deliberately left ungated: they return the model's raw output to the caller.
+The threshold is conservative, so speech is not dropped; a noisy room, the start
+tone, or a key click can lift a capture above it, and those captures still reach
+the model. Hallucinations after real speech are not addressed.
+`silence_gate_discards_only_near_silent_captures` in
+[dictation.rs](../../src/dictation.rs) checks the level policy on synthetic
+samples, not real microphone noise floors.
 Key resolution: [keyboard.rs](../../src/keyboard.rs); non-Latin layout
 fallback details live in [shortcut recovery](recovery.md#keyboard-layout-resolution).
 Checks in [parakeet.rs](../../src/parakeet.rs):
