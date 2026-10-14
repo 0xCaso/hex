@@ -99,6 +99,8 @@ mod onboarding;
 mod parakeet;
 #[cfg(target_os = "macos")]
 mod paste;
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+mod pause_segmenter;
 #[cfg(target_os = "macos")]
 mod permission_guide;
 #[cfg(target_os = "macos")]
