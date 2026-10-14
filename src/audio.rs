@@ -153,6 +153,21 @@ pub enum RecoveringAudioInputEvent {
 
 const MICROPHONE_RETRY_INITIAL: Duration = Duration::from_millis(250);
 const MICROPHONE_RETRY_MAX: Duration = Duration::from_secs(5);
+/// An on-demand open retries the selected microphone briefly before falling
+/// back, because a device that has idled for minutes can fail its first open.
+const SELECTED_MICROPHONE_ATTEMPTS: usize = 3;
+const SELECTED_MICROPHONE_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// How an open treats a selected microphone that cannot be opened.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectedFallback {
+    /// Warm recovery keeps retrying the selection with backoff.
+    Never,
+    /// Startup falls back to automatic selection immediately.
+    Immediate,
+    /// An on-demand cold open retries the selection, then falls back.
+    AfterRetries,
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum MicrophoneRecoveryReason {
@@ -345,7 +360,11 @@ impl RecoveringAudioInput {
         selected_device: Option<&str>,
     ) -> Self {
         let mut input = Self::closed(device_override, selection_revision, selected_device);
-        let opened = open_configured_input(device_override, selected_device, true);
+        let opened = open_configured_input(
+            device_override,
+            selected_device,
+            SelectedFallback::Immediate,
+        );
         input.finish_initial_open(opened, Instant::now());
         input
     }
@@ -541,13 +560,17 @@ impl RecoveringAudioInput {
             .unwrap_or(self.active_revision);
         let device_override = self.device_override.clone();
         let selected_device = self.selected_device.clone();
-        let cold_open = self.input.is_none();
+        let fallback = if self.input.is_none() {
+            SelectedFallback::AfterRetries
+        } else {
+            SelectedFallback::Never
+        };
         let (sender, receiver) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let result = open_configured_input(
                 device_override.as_deref(),
                 selected_device.as_deref(),
-                cold_open,
+                fallback,
             )
             .map_err(|error| error.to_string());
             let _ = sender.send((revision, result));
@@ -572,21 +595,52 @@ impl RecoveringAudioInput {
 fn open_configured_input(
     device_override: Option<&str>,
     selected_device: Option<&str>,
-    fallback_from_selected: bool,
+    fallback: SelectedFallback,
 ) -> Result<AudioInput> {
     if let Some(device) = device_override {
         return AudioInput::open_named(device);
     }
-    if let Some(device) = selected_device {
-        return AudioInput::open_named(device).or_else(|error| {
-            if !fallback_from_selected {
-                return Err(error);
+    let Some(device) = selected_device else {
+        return AudioInput::open(AUTOMATIC_INPUT_DEVICE_PREFERENCES);
+    };
+    open_selected(
+        device,
+        fallback,
+        || AudioInput::open_named(device),
+        || AudioInput::open(AUTOMATIC_INPUT_DEVICE_PREFERENCES),
+        std::thread::sleep,
+    )
+}
+
+fn open_selected<T>(
+    device: &str,
+    fallback: SelectedFallback,
+    mut open_selected: impl FnMut() -> Result<T>,
+    open_automatic: impl FnOnce() -> Result<T>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<T> {
+    let attempts = if fallback == SelectedFallback::AfterRetries {
+        SELECTED_MICROPHONE_ATTEMPTS
+    } else {
+        1
+    };
+    let mut attempt = 1;
+    let error = loop {
+        match open_selected() {
+            Ok(input) => return Ok(input),
+            Err(error) if attempt >= attempts => break error,
+            Err(error) => {
+                tracing::warn!(%error, device, attempt, "could not open the selected microphone; retrying");
+                attempt += 1;
+                sleep(SELECTED_MICROPHONE_RETRY_DELAY);
             }
-            tracing::warn!(%error, device, "selected microphone is unavailable; using automatic selection");
-            AudioInput::open(AUTOMATIC_INPUT_DEVICE_PREFERENCES)
-        });
+        }
+    };
+    if fallback == SelectedFallback::Never {
+        return Err(error);
     }
-    AudioInput::open(AUTOMATIC_INPUT_DEVICE_PREFERENCES)
+    tracing::warn!(%error, device, "selected microphone is unavailable; using automatic selection");
+    open_automatic()
 }
 
 pub fn input_device_names() -> Result<Vec<String>> {
@@ -747,9 +801,23 @@ fn mono<T>(samples: &[T], channels: usize, convert: impl Fn(&T) -> f32) -> Vec<f
         .collect()
 }
 
-fn report_stream_error(sender: &SyncSender<String>, error: String) {
+fn report_stream_error(sender: &SyncSender<String>, error: cpal::Error) {
+    if !stream_error_is_fatal(error.kind()) {
+        // CoreAudio reports processor overloads, common while a cold device
+        // starts, without stopping the stream. Real sample gaps still surface as
+        // capture discontinuities.
+        tracing::warn!(%error, "microphone stream glitched; continuing");
+        return;
+    }
     tracing::error!(%error, "microphone stream failed");
-    let _ = sender.try_send(error);
+    let _ = sender.try_send(error.to_string());
+}
+
+fn stream_error_is_fatal(kind: cpal::ErrorKind) -> bool {
+    !matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
+    )
 }
 
 fn build_stream<T: SizedSample>(
@@ -771,7 +839,7 @@ fn build_stream<T: SizedSample>(
                     captured_through,
                 ));
             },
-            move |error| report_stream_error(&error_sender, error.to_string()),
+            move |error| report_stream_error(&error_sender, error),
             None,
         )
         .wrap_err_with(|| format!("could not open {} microphone stream", T::FORMAT))
@@ -815,9 +883,68 @@ mod tests {
     fn stream_failures_are_visible_to_the_audio_owner() {
         let (sender, errors) = mpsc::sync_channel(1);
 
-        report_stream_error(&sender, "Device sample rate changed".into());
+        report_stream_error(
+            &sender,
+            cpal::Error::with_message(
+                cpal::ErrorKind::StreamInvalidated,
+                "Device sample rate changed",
+            ),
+        );
 
         assert_eq!(errors.try_recv().unwrap(), "Device sample rate changed");
+    }
+
+    #[test]
+    fn overload_glitches_do_not_interrupt_the_stream() {
+        let (sender, errors) = mpsc::sync_channel(1);
+
+        report_stream_error(&sender, cpal::ErrorKind::Xrun.into());
+        report_stream_error(&sender, cpal::ErrorKind::RealtimeDenied.into());
+        assert!(errors.try_recv().is_err());
+
+        report_stream_error(&sender, cpal::ErrorKind::DeviceNotAvailable.into());
+        assert!(errors.try_recv().is_ok());
+    }
+
+    #[test]
+    fn cold_open_retries_the_selected_microphone_before_falling_back() {
+        let open = |fallback, failures: usize| {
+            let mut attempts = 0;
+            let mut sleeps = Vec::new();
+            let result = open_selected(
+                "USB microphone",
+                fallback,
+                || {
+                    attempts += 1;
+                    if attempts > failures {
+                        Ok("selected")
+                    } else {
+                        Err(eyre!("device is waking"))
+                    }
+                },
+                || Ok("automatic"),
+                |delay| sleeps.push(delay),
+            )
+            .map_err(|error| error.to_string());
+            (result, attempts, sleeps.len())
+        };
+
+        assert_eq!(
+            open(SelectedFallback::AfterRetries, 2),
+            (Ok("selected"), 3, 2)
+        );
+        assert_eq!(
+            open(SelectedFallback::AfterRetries, 3),
+            (Ok("automatic"), 3, 2)
+        );
+        assert_eq!(
+            open(SelectedFallback::Immediate, 1),
+            (Ok("automatic"), 1, 0)
+        );
+        assert_eq!(
+            open(SelectedFallback::Never, 1),
+            (Err("device is waking".into()), 1, 0)
+        );
     }
 
     #[test]

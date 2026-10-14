@@ -710,6 +710,14 @@ impl DictationCapture {
         became_intentional
     }
 
+    /// The start of an active recording that has not yet passed the hold threshold.
+    pub fn tentative_start(&self) -> Option<CaptureInstant> {
+        self.recording
+            .as_ref()
+            .filter(|recording| !recording.intentional)
+            .map(|recording| recording.started_at)
+    }
+
     pub fn cancel(&mut self) {
         self.recording = None;
     }

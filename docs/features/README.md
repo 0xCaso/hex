@@ -590,6 +590,7 @@ Linux beta                               // not macOS feature parity
 ├── Escape -> Cancel active capture, not newest accepted job
 │   └── X11 grab conflict -> Try plain Escape; otherwise warn without stopping dictation
 ├── Microphone failure -> Listener exits, not macOS automatic recovery
+│   └── Overload (Xrun) glitch -> Logged; not a failure
 └── Paste -> Retain transcript clipboard, not restore previous contents
 ```
 

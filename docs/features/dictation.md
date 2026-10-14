@@ -91,6 +91,7 @@ Keep ready -> Press shortcut                          // dictate.boundaries
 Release when idle -> Press shortcut                   // dictate.cold-microphone
   -> Open microphone asynchronously, no pre-roll
      ├── Release before readiness -> Discard
+     ├── Stream fails before the hold threshold -> Reopen for the same press
      └── Ready while held or locked -> Capture
   -> Capture idle -> Microphone can close             // accepted jobs do not keep it open
 ```

@@ -217,7 +217,9 @@ CoreAudio formats, AppleScript details, or event serialization.
   enabled, pressing the shortcut opens the selected device asynchronously with
   no pre-roll, preserves the physical press for the hold threshold, discards a
   release before readiness, and closes only after the authoritative capture is
-  idle. Accepted jobs never keep the stream open.
+  idle. Accepted jobs never keep the stream open. A stream failure before the
+  hold threshold returns the press to pending and reopens; later failures fail
+  the capture. Cold opens retry the selected device briefly before falling back.
 - Dictation remains available while command recognition sleeps.
 - Model inference, optional post-processing, paste, and application actions must
   never block authoritative audio capture. Their queues remain bounded.
