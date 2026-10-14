@@ -10,6 +10,7 @@ use color_eyre::eyre::{Result, eyre};
 
 use crate::audio::{CaptureInstant, RecoveringAudioInput, RecoveringAudioInputEvent};
 use crate::dictation::{DictationCapture, Finish};
+use crate::parakeet::SegmentSink;
 use crate::recording_environment::RecordingEnvironmentController;
 use crate::suppression::PendingInputEvents;
 
@@ -141,6 +142,7 @@ struct Owner {
     recognition_overflowed: bool,
     pending_input: PendingInputEvents,
     last_captured_through: Option<CaptureInstant>,
+    segments: Option<SegmentSink>,
 }
 
 #[derive(Clone, Copy)]
@@ -168,6 +170,7 @@ impl DictationAudio {
         recording_environment: RecordingEnvironmentController,
         pending_input: PendingInputEvents,
         release_while_idle: bool,
+        segments: Option<SegmentSink>,
     ) -> Result<Self> {
         let input = if release_while_idle {
             RecoveringAudioInput::closed(device_override, selection_revision, selected_device)
@@ -186,6 +189,7 @@ impl DictationAudio {
             recording_environment,
             pending_input,
             release_while_idle,
+            segments,
         )
     }
 
@@ -195,6 +199,7 @@ impl DictationAudio {
         recording_environment: RecordingEnvironmentController,
         pending_input: PendingInputEvents,
         release_while_idle: bool,
+        segments: Option<SegmentSink>,
     ) -> Result<Self> {
         let (owner, mut audio) = Owner::new(
             input,
@@ -202,6 +207,7 @@ impl DictationAudio {
             recording_environment,
             pending_input,
             release_while_idle,
+            segments,
         );
         audio.worker = Some(
             thread::Builder::new()
@@ -379,6 +385,7 @@ impl Owner {
         recording_environment: RecordingEnvironmentController,
         pending_input: PendingInputEvents,
         release_while_idle: bool,
+        segments: Option<SegmentSink>,
     ) -> (Self, DictationAudio) {
         let state = Arc::new(State {
             sample_rate: AtomicU64::new(if input.is_open() {
@@ -419,6 +426,7 @@ impl Owner {
             recognition_overflowed: false,
             pending_input,
             last_captured_through: None,
+            segments,
         };
         let audio = DictationAudio {
             commands: command_sender,
@@ -485,7 +493,7 @@ impl Owner {
                 }
                 self.state.capture_generation.fetch_add(1, Ordering::AcqRel);
                 if self.input.is_open() {
-                    start_capture_at(&mut self.capture, kind, at);
+                    self.start_capture_at(kind, at);
                 } else {
                     self.pending_capture = Some(PendingCapture {
                         at,
@@ -607,6 +615,10 @@ impl Owner {
                     captured_through,
                     self.pending_input.oldest(),
                 );
+                if let Some(segments) = &self.segments {
+                    self.capture
+                        .offer_segment(|segment| segments.offer(segment));
+                }
                 self.forward_recognition(samples, captured_through);
             }
             RecoveringAudioInputEvent::Timeout => {}
@@ -643,7 +655,7 @@ impl Owner {
                     self.input.device_name().to_owned();
                 self.state.recovering.store(false, Ordering::Release);
                 if let Some(pending) = self.pending_capture.take() {
-                    start_capture_at(&mut self.capture, pending.kind, pending.at);
+                    self.start_capture_at(pending.kind, pending.at);
                     if let Some(at) = pending.intentional_at {
                         let _ = self.capture.become_intentional(at);
                         let _ = self.events.send(DictationAudioEvent::ReadyIntentional {
@@ -757,20 +769,28 @@ impl Owner {
         }
     }
 
+    fn start_capture_at(&mut self, kind: CaptureKind, at: CaptureInstant) {
+        match kind {
+            CaptureKind::Hotkey => self.capture.start_at(at),
+            CaptureKind::Programmatic => self.capture.start_programmatic_at(at),
+            CaptureKind::Voice { .. } => self.capture.start_voice_at(at),
+        }
+        // Only hotkey captures are cut at pauses; the setting applies per capture.
+        if matches!(kind, CaptureKind::Hotkey)
+            && self.segments.is_some()
+            && crate::app_settings::incremental_transcription()
+        {
+            self.capture
+                .segment_capture(self.state.capture_generation.load(Ordering::Acquire));
+        }
+    }
+
     fn close_input(&mut self) {
         self.input.close();
         self.last_captured_through = None;
         self.next_recognition_generation();
         self.state.captured_through.store(0, Ordering::Release);
         self.state.recovering.store(false, Ordering::Release);
-    }
-}
-
-fn start_capture_at(capture: &mut DictationCapture, kind: CaptureKind, at: CaptureInstant) {
-    match kind {
-        CaptureKind::Hotkey => capture.start_at(at),
-        CaptureKind::Programmatic => capture.start_programmatic_at(at),
-        CaptureKind::Voice { .. } => capture.start_voice_at(at),
     }
 }
 
@@ -808,6 +828,7 @@ mod tests {
             RecordingEnvironmentController::for_test(),
             PendingInputEvents::default(),
             false,
+            None,
         );
         input.state.recovering.store(false, Ordering::Release);
         (owner, input, samples)
@@ -825,6 +846,61 @@ mod tests {
             kind: CaptureKind::Hotkey,
             reply,
         }));
+    }
+
+    #[test]
+    fn hotkey_captures_hand_pieces_off_without_blocking_and_others_do_not() {
+        let speech = crate::pause_segmenter::tests::utterance(
+            &[(4_000, 1_000), (4_000, 1_000), (1_000, 0)],
+            -70.0,
+        )
+        .into_iter()
+        .flat_map(|sample| [sample; 3])
+        .collect::<Vec<_>>();
+        for kind in [CaptureKind::Hotkey, CaptureKind::Programmatic] {
+            let (mut owner, input, _samples) = owner_for_test(true);
+            let (sink, received) = SegmentSink::for_test();
+            owner.segments = Some(sink);
+            let at = capture_time();
+            assert!(control(&mut owner, |reply| Command::Start {
+                at,
+                kind,
+                reply
+            }));
+            control(&mut owner, |reply| Command::BecomeIntentional {
+                at: at + crate::dictation::MINIMUM_HOLD_DURATION,
+                reply,
+            });
+            let mut pieces = Vec::new();
+            let mut through = at;
+            for chunk in speech.chunks(480) {
+                through = through + Duration::from_millis(10);
+                owner.handle_input(RecoveringAudioInputEvent::Chunk {
+                    samples: chunk.to_vec(),
+                    captured_through: through,
+                });
+                // The worker takes each piece before the next pause.
+                pieces.extend(received());
+            }
+            let Finish::Transcribe(clip) =
+                control(&mut owner, |reply| Command::Finish { at: through, reply })
+            else {
+                panic!("expected transcription");
+            };
+            if matches!(kind, CaptureKind::Hotkey) {
+                assert_eq!(pieces.len(), 2);
+                assert_eq!(clip.cuts().len(), 2);
+                assert_eq!(clip.capture_generation(), Some(input.capture_generation()));
+                assert!(
+                    pieces
+                        .iter()
+                        .all(|piece| piece.capture_generation == input.capture_generation())
+                );
+            } else {
+                assert!(pieces.is_empty());
+                assert!(clip.cuts().is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1131,6 +1207,7 @@ mod tests {
             RecordingEnvironmentController::for_test(),
             PendingInputEvents::default(),
             false,
+            None,
         )
         .expect("a missing microphone should enter recovery, not stop the listener");
 
@@ -1180,6 +1257,7 @@ mod tests {
                 RecordingEnvironmentController::for_test(),
                 pending_input,
                 false,
+                None,
             )
             .unwrap();
             assert!(input.start(capture_time()).unwrap());
@@ -1217,6 +1295,7 @@ mod tests {
             RecordingEnvironmentController::for_test(),
             PendingInputEvents::default(),
             false,
+            None,
         )
         .unwrap();
         assert!(!input.start(capture_time()).unwrap());

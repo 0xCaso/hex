@@ -13,6 +13,7 @@ use crate::transcription_models::{TranscriptionModelId, TranscriptionSelection};
 static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
+static INCREMENTAL_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 static HOTKEYS: OnceLock<RwLock<RuntimeHotkeys>> = OnceLock::new();
@@ -532,6 +533,8 @@ pub struct AppSettings {
     pub recording_audio_behavior: RecordingAudioBehavior,
     pub double_tap_lock: bool,
     pub double_tap_only: bool,
+    /// Transcribe completed speech at pauses during hotkey captures.
+    pub incremental_transcription: bool,
     pub dictation_hotkey: HotkeyBinding,
     #[serde(
         default = "HotkeyBinding::edit_default",
@@ -568,6 +571,7 @@ impl Default for AppSettings {
             recording_audio_behavior: RecordingAudioBehavior::DoNothing,
             double_tap_lock: true,
             double_tap_only: false,
+            incremental_transcription: true,
             dictation_hotkey: HotkeyBinding::default(),
             edit_hotkey: HotkeyBinding::edit_default(),
             paste_last_hotkey: Some(HotkeyBinding::paste_last_default()),
@@ -783,6 +787,7 @@ impl AppSettings {
             self.double_tap_lock && self.double_tap_only && self.dictation_hotkey.key.is_some(),
             Ordering::Relaxed,
         );
+        INCREMENTAL_TRANSCRIPTION.store(self.incremental_transcription, Ordering::Relaxed);
         *HOTKEYS
             .get_or_init(Default::default)
             .write()
@@ -979,6 +984,10 @@ pub fn double_tap_only() -> bool {
     DOUBLE_TAP_ONLY.load(Ordering::Relaxed)
 }
 
+pub fn incremental_transcription() -> bool {
+    INCREMENTAL_TRANSCRIPTION.load(Ordering::Relaxed)
+}
+
 pub fn runtime_hotkeys() -> RuntimeHotkeys {
     *HOTKEYS
         .get_or_init(Default::default)
@@ -1063,6 +1072,7 @@ mod tests {
         );
         assert!(settings.double_tap_lock);
         assert!(!settings.double_tap_only);
+        assert!(settings.incremental_transcription);
         assert_eq!(settings.dictation_hotkey, HotkeyBinding::default());
         assert_eq!(settings.edit_hotkey, HotkeyBinding::edit_default());
         assert_eq!(
@@ -1544,6 +1554,9 @@ mod tests {
         assert_eq!(decoded.dictation_hotkey, settings.dictation_hotkey);
         assert_eq!(decoded.paste_last_hotkey, None);
         assert!(decoded.double_tap_only);
+        let disabled: AppSettings =
+            serde_json::from_str(r#"{"incremental_transcription":false}"#).unwrap();
+        assert!(!disabled.incremental_transcription);
 
         let legacy: HotkeyModifiers = serde_json::from_str(
             r#"{"control":false,"option":true,"shift":false,"command":false,"function":false}"#,
