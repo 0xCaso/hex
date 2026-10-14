@@ -498,21 +498,21 @@ impl Owner {
                 let _ = reply.send(true);
             }
             Command::BecomeIntentional { at, reply } => {
+                self.drain_through(at);
                 let became_intentional = if let Some(pending) = &mut self.pending_capture {
                     pending.mark_intentional(at);
                     false
                 } else {
-                    self.drain_through(at);
                     self.capture.become_intentional(at)
                 };
                 let _ = reply.send(became_intentional);
             }
             Command::Finish { at, reply } => {
+                self.drain_through(at);
                 let finish = if self.pending_capture.take().is_some() {
                     self.input.cancel_open();
                     Finish::Discard
                 } else {
-                    self.drain_through(at);
                     self.capture.finish(at)
                 };
                 self.state.recording.store(false, Ordering::Release);
@@ -1262,22 +1262,34 @@ mod tests {
 
     #[test]
     fn cold_stream_failure_before_hold_threshold_reopens_for_the_same_press() {
-        for release_before_ready in [false, true] {
-            let (mut owner, input, _unused_samples) = owner_for_test(false);
+        for mode in ["reopen", "release-pending", "release-during-drain"] {
+            let (mut owner, input, first_samples) = owner_for_test(false);
             owner.release_while_idle = true;
-            let (first_input, first_opened) = RecoveringAudioInput::pending_for_test();
-            owner.input = first_input;
             let pressed_at = capture_time();
             start(&mut owner, pressed_at);
             let generation = input.capture_generation();
-            let (first_stream, _first_samples) = crate::audio::AudioInput::channel_for_test();
-            first_opened.send((0, Ok(first_stream))).unwrap();
             let event = owner.input.recv_timeout(Duration::ZERO, false);
             owner.handle_input(event);
             assert!(matches!(
                 input.try_recv_event(),
                 Some(DictationAudioEvent::Reopened)
             ));
+
+            if mode == "release-during-drain" {
+                drop(first_samples);
+                assert!(matches!(
+                    control(&mut owner, |reply| Command::Finish {
+                        at: pressed_at + Duration::from_millis(250),
+                        reply,
+                    }),
+                    Finish::Discard
+                ));
+                owner.reconcile_input();
+                assert!(!input.is_recording());
+                assert!(!owner.input.is_opening());
+                assert!(input.try_recv_event().is_none());
+                continue;
+            }
 
             // #130: the freshly opened stream fails ~150 ms into the held press.
             owner.handle_input(RecoveringAudioInputEvent::Interrupted);
@@ -1288,7 +1300,7 @@ mod tests {
 
             let (second_input, second_opened) = RecoveringAudioInput::pending_for_test();
             owner.input = second_input;
-            if release_before_ready {
+            if mode == "release-pending" {
                 assert!(matches!(
                     control(&mut owner, |reply| Command::Finish {
                         at: pressed_at + Duration::from_millis(250),
@@ -1329,36 +1341,38 @@ mod tests {
 
     #[test]
     fn cold_stream_failure_after_hold_threshold_still_fails_the_capture() {
-        let (mut owner, input, _unused_samples) = owner_for_test(false);
-        owner.release_while_idle = true;
-        let (cold_input, opened) = RecoveringAudioInput::pending_for_test();
-        owner.input = cold_input;
-        let pressed_at = capture_time();
-        start(&mut owner, pressed_at);
-        let (stream, _samples) = crate::audio::AudioInput::channel_for_test();
-        opened.send((0, Ok(stream))).unwrap();
-        let event = owner.input.recv_timeout(Duration::ZERO, false);
-        owner.handle_input(event);
-        assert!(
-            owner
-                .capture
-                .become_intentional(pressed_at + crate::dictation::MINIMUM_HOLD_DURATION)
-        );
-        assert!(matches!(
-            input.try_recv_event(),
-            Some(DictationAudioEvent::Reopened)
-        ));
+        for mark_intentional in [false, true] {
+            let (mut owner, input, _unused_samples) = owner_for_test(false);
+            owner.release_while_idle = true;
+            let pressed_at = capture_time();
+            start(&mut owner, pressed_at);
+            let event = owner.input.recv_timeout(Duration::ZERO, false);
+            owner.handle_input(event);
+            let threshold_at = pressed_at + crate::dictation::MINIMUM_HOLD_DURATION;
+            if mark_intentional {
+                assert!(owner.capture.become_intentional(threshold_at));
+            } else {
+                owner.handle_input(RecoveringAudioInputEvent::Chunk {
+                    samples: vec![0.25; 14_400],
+                    captured_through: threshold_at,
+                });
+            }
+            assert!(matches!(
+                input.try_recv_event(),
+                Some(DictationAudioEvent::Reopened)
+            ));
 
-        // Speech may already be recorded, so dropping it silently would paste a fragment.
-        owner.handle_input(RecoveringAudioInputEvent::Interrupted);
-        assert!(!input.is_recording());
-        assert!(matches!(
-            input.try_recv_event(),
-            Some(DictationAudioEvent::Interrupted {
-                was_recording: true,
-                ..
-            })
-        ));
+            // Speech may already be recorded, so dropping it silently would paste a fragment.
+            owner.handle_input(RecoveringAudioInputEvent::Interrupted);
+            assert!(!input.is_recording());
+            assert!(matches!(
+                input.try_recv_event(),
+                Some(DictationAudioEvent::Interrupted {
+                    was_recording: true,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

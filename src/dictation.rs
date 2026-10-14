@@ -714,7 +714,12 @@ impl DictationCapture {
     pub fn tentative_start(&self) -> Option<CaptureInstant> {
         self.recording
             .as_ref()
-            .filter(|recording| !recording.intentional)
+            .filter(|recording| {
+                !recording.intentional
+                    && recording.recorded_through.is_none_or(|through| {
+                        through.duration_since(recording.started_at) < MINIMUM_HOLD_DURATION
+                    })
+            })
             .map(|recording| recording.started_at)
     }
 
