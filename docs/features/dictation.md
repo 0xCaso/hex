@@ -185,6 +185,28 @@ second-pass mismatch (`say stop` decoded as `say stay`) on the question fixture,
 that run is not claimed as a passing transcription regression check.
 
 ```ts
+Accepted job on a GPU device             // dictate.inference-threads
+├── Inference thread -> macOS user-interactive QoS
+└── GGUF session -> One CPU decoder thread, no ggml worker pool
+    // CPU-only devices keep the backend's default thread count
+```
+
+Source: `session_options` in [gguf_session.rs](../../src/gguf_session.rs) and
+`prioritize_inference_thread` in [parakeet.rs](../../src/parakeet.rs); check
+`gpu_sessions_bound_decoder_threads_and_cpu_sessions_keep_library_default`.
+Parakeet's per-token TDT decoder runs on CPU even with Metal encoding. ggml's
+default pool (up to 8 spin-waiting threads) is created with plain `pthread_create`,
+so its workers start at default QoS rather than inheriting the inference thread's.
+
+**Observed October 14, 2026, standalone `transcribe-cpp` 0.2.4 bench on a Mac
+Studio (18 cores) already busy with other work, Unified English Q8, Metal:** under
+36 extra `yes` processes, user-interactive QoS medians for 3/30/90-second clips were
+170/703/1,819 ms with one thread, 136/1,907/4,940 ms with two, and 178/4,304/13,519 ms
+with four. Without the extra load, one thread measured 83/364/1,631 ms and two
+64/705/2,889 ms. This is backend timing, not physical capture/paste on the
+reporter's MacBook Pro, and not Linux runtime proof.
+
+```ts
 Finish
   ├── Capacity available -> Accepted job -> Local transcription -> Mode processing
   │    -> Paste successful nonempty output once, at current focus

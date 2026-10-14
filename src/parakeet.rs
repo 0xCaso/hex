@@ -719,15 +719,17 @@ fn join_worker(worker: Option<thread::JoinHandle<()>>, name: &str) {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn prioritize_inference_thread() {
-    const QOS_CLASS_USER_INITIATED: u32 = 0x19;
+    // ggml worker pthreads start at default QoS instead of inheriting this
+    // class; GGUF sessions use one decoder thread so decoding stays here.
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
     unsafe extern "C" {
         fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
     }
     // SAFETY: This configures only the calling worker thread using the public
     // macOS pthread QoS API. Relative priority zero is valid for this class.
-    let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0) };
+    let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
     if status == 0 {
-        tracing::info!("dictation inference worker uses user-initiated QoS");
+        tracing::info!("dictation inference worker uses user-interactive QoS");
     } else {
         tracing::warn!(status, "could not raise dictation inference worker QoS");
     }
