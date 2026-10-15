@@ -25,6 +25,8 @@ mod live;
 pub use live::TranscriptReader;
 #[path = "meeting_notes.rs"]
 mod notes;
+#[path = "meeting_query.rs"]
+pub mod query;
 #[path = "meeting_transcript.rs"]
 mod transcript;
 pub use notes::{

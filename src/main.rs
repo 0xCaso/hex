@@ -88,6 +88,8 @@ mod meeting;
 #[cfg(target_os = "macos")]
 mod meeting_detection;
 #[cfg(target_os = "macos")]
+mod meeting_mcp;
+#[cfg(target_os = "macos")]
 mod meeting_watcher;
 #[cfg(target_os = "macos")]
 mod microphone_activity;
@@ -245,6 +247,13 @@ enum Command {
         /// Override the configured microphone preference order.
         #[arg(long)]
         device: Option<String>,
+    },
+    /// Serve recorded meetings to agents over MCP (stdio). Read-only.
+    Mcp {
+        /// Read meetings from this folder instead of Application Support, such
+        /// as a mirrored copy on another Mac.
+        #[arg(long)]
+        meetings_dir: Option<PathBuf>,
     },
     /// Manage the personal command workspace.
     Commands {
@@ -434,11 +443,16 @@ enum MeetingCommand {
 #[cfg(target_os = "macos")]
 fn main() -> Result<()> {
     color_eyre::install()?;
+    let cli = Cli::parse();
+    // Before process logging, the instance lock, or any GUI or permission
+    // setup: an agent may start this over SSH while the app is running.
+    if let Some(Command::Mcp { meetings_dir }) = &cli.command {
+        return run_mcp(meetings_dir.clone());
+    }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let log_dir = app_paths::init_process_logging(&SHUTDOWN)?;
 
     let event_path = log_dir.join("live.ndjson");
-    let cli = Cli::parse();
     let executable_name = std::env::current_exe()
         .ok()
         .and_then(|path| path.file_stem().map(ToOwned::to_owned));
@@ -648,6 +662,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Mcp { .. } => unreachable!("handled before startup"),
         Command::Commands {
             command: CommandsCommand::Init,
         } => {
@@ -795,6 +810,24 @@ fn main() -> Result<()> {
             false => moonshine_lab::run(&root, &directory, device.as_deref()),
         },
     }
+}
+
+/// Logs to stderr only (stdout carries MCP messages) and touches no app state.
+#[cfg(target_os = "macos")]
+fn run_mcp(meetings_dir: Option<PathBuf>) -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("HEX_MCP_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+    let root = match meetings_dir {
+        Some(directory) => directory,
+        None => meeting::root()?,
+    };
+    meeting_mcp::run(root)
 }
 
 #[cfg(target_os = "macos")]
