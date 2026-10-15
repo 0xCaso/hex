@@ -408,6 +408,18 @@ enum MeetingCommand {
         #[arg(long)]
         chunk_chars: Option<usize>,
     },
+    /// Replay a meeting folder's tracks and report which microphone lines
+    /// echo suppression keeps.
+    Echo {
+        directory: PathBuf,
+        /// Microphone start after the system track, when the manifest has
+        /// no arrival times.
+        #[arg(long)]
+        microphone_offset_ms: Option<u64>,
+        /// Also transcribe both tracks with the selected model.
+        #[arg(long)]
+        transcribe: bool,
+    },
 }
 
 #[cfg(target_os = "macos")]
@@ -718,6 +730,24 @@ fn main() -> Result<()> {
                     println!("{error}");
                 }
             }
+            Ok(())
+        }
+        #[cfg(debug_assertions)]
+        Command::Meeting {
+            command:
+                MeetingCommand::Echo {
+                    directory,
+                    microphone_offset_ms,
+                    transcribe,
+                },
+        } => {
+            if transcribe {
+                app_settings::AppSettings::load()?;
+            }
+            print!(
+                "{}",
+                meeting::echo_report(&directory, microphone_offset_ms, transcribe)?
+            );
             Ok(())
         }
         Command::BenchmarkTranscription {

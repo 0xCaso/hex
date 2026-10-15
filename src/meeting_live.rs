@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::events::TranscriptPhase;
 use crate::moonshine::Moonshine;
 
+use super::echo::{EchoEnvelope, Signal};
 use super::{
     AudioPacket, MeetingSource, TranscriptEntry, final_transcript_exists, read_ndjson,
     recover_final_publication, root, set_owner_only,
@@ -29,6 +30,9 @@ pub(super) struct Event {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    /// Microphone lines: whether the audio is speaker bleed or local speech.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<Signal>,
 }
 
 #[derive(Default)]
@@ -64,10 +68,7 @@ impl TranscriptReader {
 
         self.read_live_tail(&directory.join("transcript.live.ndjson"))?;
         self.read_rolling(&directory.join(super::transcript::ROLLING_FILE))?;
-        Ok(merge_rolling(
-            &self.rolling_entries,
-            project_latest(self.live_events.values()),
-        ))
+        Ok(live_view(&self.rolling_entries, self.live_events.values()))
     }
 
     fn read_rolling(&mut self, path: &Path) -> Result<()> {
@@ -130,6 +131,68 @@ impl TranscriptReader {
     }
 }
 
+/// What the pane shows while recording: rolling final-model entries, then
+/// the Moonshine draft after them, without microphone lines that echo the
+/// remote audio. Rolling entries are already echo-free; a draft microphone
+/// line is judged against every remote line by its signal and words. While
+/// the remote side is speaking, an undecided draft line waits until it
+/// completes, so a twin of remote speech never flashes up as `You`.
+pub(super) fn live_view<'a>(
+    rolling: &[TranscriptEntry],
+    events: impl IntoIterator<Item = &'a Event>,
+) -> Vec<TranscriptEntry> {
+    let events = events.into_iter().collect::<Vec<_>>();
+    let merged = merge_rolling(rolling, project_latest(events.iter().copied()));
+    let signals = events
+        .iter()
+        .filter(|event| event.source == MeetingSource::Microphone)
+        .map(|event| ((event.start_ms, event.end_ms), (event.signal, event.phase)))
+        .collect::<HashMap<_, _>>();
+    let rolling_microphone = rolling
+        .iter()
+        .filter(|entry| entry.source == MeetingSource::Microphone)
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let (judged, kept_rolling): (Vec<_>, Vec<_>) = merged
+        .into_iter()
+        .partition(|entry| !rolling_microphone.contains(entry));
+    // An utterance spans one or more draft lines: any local line keeps it,
+    // and it is bleed only when every line is.
+    let (mut entries, _) = super::transcript::suppress_echo(judged, |start, end| {
+        let lines = signals
+            .iter()
+            .filter(|((line_start, line_end), _)| start <= *line_start && *line_end <= end)
+            .map(|(_, (signal, _))| *signal)
+            .collect::<Vec<_>>();
+        if lines.contains(&Some(Signal::Local)) {
+            Some(Signal::Local)
+        } else if !lines.is_empty() && lines.iter().all(|signal| *signal == Some(Signal::Bleed)) {
+            Some(Signal::Bleed)
+        } else {
+            None
+        }
+    });
+    let remote = entries
+        .iter()
+        .filter(|entry| entry.source == MeetingSource::System)
+        .map(|entry| (entry.start_ms, entry.end_ms))
+        .collect::<Vec<_>>();
+    entries.retain(|entry| {
+        let Some((signal, phase)) = signals.get(&(entry.start_ms, entry.end_ms)) else {
+            return true;
+        };
+        entry.source == MeetingSource::System
+            || *phase == TranscriptPhase::Completed
+            || *signal == Some(Signal::Local)
+            || !remote
+                .iter()
+                .any(|(start, end)| *start < entry.end_ms && entry.start_ms < *end)
+    });
+    entries.extend(kept_rolling);
+    entries.sort_by_key(|entry| (entry.start_ms, source_index(entry.source)));
+    entries
+}
+
 /// Rolling final-model entries replace the Moonshine draft for the time they
 /// cover; the draft fills in only after each source's last rolling entry.
 pub(super) fn merge_rolling(
@@ -176,6 +239,7 @@ pub(super) fn transcribe(
     let mut next_arrivals = [None, None];
     let mut model_audio_us = [0, 0];
     let mut time_adjustments = [Vec::new(), Vec::new()];
+    let mut envelope = EchoEnvelope::default();
     let update_clock = Instant::now();
     let mut next_updates = [
         update_clock + UPDATE_INTERVAL,
@@ -196,6 +260,13 @@ pub(super) fn transcribe(
                 time_adjustments[stream].push((model_audio_us[stream], skipped));
             }
         }
+        envelope.push(
+            packet.source,
+            source_offset(source_origins, stream) / 1_000
+                + adjusted_time_ms(model_audio_us[stream] / 1_000, &time_adjustments[stream]),
+            &packet.samples,
+            packet.sample_rate,
+        );
         normalize_microphone(packet.source, &mut packet.samples);
         model.add_audio_to(stream, &packet.samples, packet.sample_rate)?;
         let duration_us = packet.samples.len() as u64 * 1_000_000 / u64::from(packet.sample_rate);
@@ -212,6 +283,7 @@ pub(super) fn transcribe(
                 packet.source,
                 source_offset(source_origins, stream),
                 &time_adjustments[stream],
+                &envelope,
                 &mut writer,
                 false,
             )?;
@@ -227,6 +299,7 @@ pub(super) fn transcribe(
             source,
             source_offset(source_origins, stream),
             &time_adjustments[stream],
+            &envelope,
             &mut writer,
             true,
         ) {
@@ -262,17 +335,37 @@ pub(super) fn persist_error(directory: &Path, error: &color_eyre::Report) {
 
 #[cfg(any(debug_assertions, test))]
 pub(super) fn read_snapshot(path: &Path) -> Result<Vec<TranscriptEntry>> {
-    let events: Vec<Event> = read_ndjson(path)?;
-    Ok(project(events))
+    Ok(live_view(&[], latest(read_ndjson(path)?).values()))
 }
 
 pub(super) fn read_completed_snapshot(path: &Path) -> Result<Vec<TranscriptEntry>> {
     let events: Vec<Event> = read_ndjson(path)?;
-    Ok(project(
-        events
-            .into_iter()
-            .filter(|event| event.phase == TranscriptPhase::Completed),
+    Ok(live_view(
+        &[],
+        latest(
+            events
+                .into_iter()
+                .filter(|event| event.phase == TranscriptPhase::Completed),
+        )
+        .values(),
     ))
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn latest_events(path: &Path) -> Result<Vec<Event>> {
+    Ok(latest(read_ndjson(path)?).into_values().collect())
+}
+
+#[cfg(test)]
+pub(super) fn project(events: impl IntoIterator<Item = Event>) -> Vec<TranscriptEntry> {
+    live_view(&[], latest(events).values())
+}
+
+fn latest(events: impl IntoIterator<Item = Event>) -> HashMap<(MeetingSource, u64), Event> {
+    events
+        .into_iter()
+        .map(|event| ((event.source, event.line_id), event))
+        .collect()
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -320,14 +413,6 @@ pub(super) fn source_offset(origins: [Option<u64>; 2], stream: usize) -> u64 {
     origins[stream].unwrap_or(origin).saturating_sub(origin)
 }
 
-pub(super) fn project(events: impl IntoIterator<Item = Event>) -> Vec<TranscriptEntry> {
-    let mut lines = HashMap::new();
-    for event in events {
-        lines.insert((event.source, event.line_id), event);
-    }
-    project_latest(lines.values())
-}
-
 fn project_latest<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<TranscriptEntry> {
     let mut transcript = events
         .into_iter()
@@ -366,6 +451,7 @@ fn write_updates(
     source: MeetingSource,
     source_offset_us: u64,
     time_adjustments: &[(u64, u64)],
+    envelope: &EchoEnvelope,
     writer: &mut BufWriter<File>,
     finish: bool,
 ) -> Result<()> {
@@ -375,14 +461,19 @@ fn write_updates(
         model.update_stream(stream)?
     };
     for update in updates {
+        let start_ms =
+            source_offset_us / 1_000 + adjusted_time_ms(update.start_ms, time_adjustments);
+        let end_ms = source_offset_us / 1_000 + adjusted_time_ms(update.end_ms, time_adjustments);
         let event = Event {
             source,
             line_id: update.line_id,
             phase: update.phase,
-            start_ms: source_offset_us / 1_000
-                + adjusted_time_ms(update.start_ms, time_adjustments),
-            end_ms: source_offset_us / 1_000 + adjusted_time_ms(update.end_ms, time_adjustments),
+            start_ms,
+            end_ms,
             text: update.text,
+            signal: (source == MeetingSource::Microphone)
+                .then(|| envelope.assess(start_ms, end_ms))
+                .flatten(),
         };
         serde_json::to_writer(&mut *writer, &event)?;
         writer.write_all(b"\n")?;
@@ -427,6 +518,7 @@ mod tests {
             start_ms,
             end_ms: start_ms + 500,
             text: text.into(),
+            signal: None,
         };
         let events = [
             event(
@@ -483,12 +575,12 @@ mod tests {
                 file.flush().unwrap();
                 reader.read_live_tail(&path).unwrap();
                 assert_eq!(
-                    project_latest(reader.live_events.values()),
+                    live_view(&[], reader.live_events.values()),
                     read_snapshot(&path).unwrap(),
                 );
             }
         }
-        let transcript = project_latest(reader.live_events.values());
+        let transcript = live_view(&[], reader.live_events.values());
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[0].source, MeetingSource::System);
         assert_eq!(transcript[0].text, "computer");

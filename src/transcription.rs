@@ -20,7 +20,7 @@ pub struct WarmTranscriber {
     active: Option<Transcriber>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSegment {
     pub start_ms: i64,
@@ -28,11 +28,14 @@ pub struct TranscriptSegment {
     pub text: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transcript {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
+    /// Word timings, when the model produces them.
+    #[serde(default)]
+    pub words: Vec<TranscriptSegment>,
 }
 
 impl Transcriber {
@@ -105,6 +108,15 @@ impl Transcriber {
                                 start_ms: segment.t0_ms,
                                 end_ms: segment.t1_ms,
                                 text: segment.text,
+                            })
+                            .collect(),
+                        words: result
+                            .words
+                            .into_iter()
+                            .map(|word| TranscriptSegment {
+                                start_ms: word.t0_ms,
+                                end_ms: word.t1_ms,
+                                text: word.text,
                             })
                             .collect(),
                     })

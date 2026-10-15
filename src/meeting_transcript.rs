@@ -20,9 +20,10 @@ use hound::WavReader;
 
 use crate::dictation::StreamingResampler;
 use crate::pause_segmenter::PauseSegmenter;
-use crate::transcription::{Transcriber, Transcript};
+use crate::transcription::{Transcriber, Transcript, TranscriptSegment};
 use crate::transcription_models::TranscriptionSelection;
 
+use super::echo::{EchoEnvelope, Signal};
 use super::{
     AudioPacket, MeetingManifest, MeetingSource, TranscriptEntry, coalesce_transcript,
     format_duration, set_owner_only, sync_directory,
@@ -38,8 +39,10 @@ const CHUNK_TARGET: usize = RATE * 20;
 const CHUNK_MAX: usize = RATE * 30;
 const CHUNK_OVERLAP: usize = RATE * 2;
 const MIN_TAIL: usize = RATE * 3 / 10;
-/// About a minute of ScreenCaptureKit packets for both sources.
-const ROLLING_QUEUE_CAPACITY: usize = 4_096;
+/// About five minutes of one-second blocks for both sources.
+const ROLLING_QUEUE_CAPACITY: usize = 600;
+/// Chunks slower than this are logged; a stalled worker loses the queue.
+const SLOW_CHUNK: Duration = Duration::from_secs(5);
 /// A source whose untranscribed backlog exceeds this falls back to the WAV.
 const MAX_PENDING_CHUNKS: usize = 24;
 const DICTATION_WAIT: Duration = Duration::from_secs(20);
@@ -49,6 +52,8 @@ const UTTERANCE_GAP_MS: u64 = 700;
 /// Entries with at least this many words are also judged on their own.
 const SENTENCE_WORDS: usize = 3;
 const ECHO_SIMILARITY: f32 = 0.6;
+/// A pause this long between timed words starts a new sentence.
+const SENTENCE_PAUSE_MS: i64 = 600;
 const SEAM_MAX_WORDS: usize = 12;
 
 pub(super) const ROLLING_FILE: &str = "transcript.rolling.ndjson";
@@ -151,10 +156,14 @@ impl TrackTranscript {
     fn accept(&mut self, chunk: &Chunk, transcript: Transcript) {
         let chunk_ms = self.origin_ms + samples_ms(chunk.start);
         let duration_ms = samples_ms(chunk.samples.len());
-        let segmented = !transcript.segments.is_empty();
+        let segments = if transcript.words.is_empty() {
+            transcript.segments
+        } else {
+            sentences(transcript.words)
+        };
+        let segmented = !segments.is_empty();
         let mut incoming: Vec<TranscriptEntry> = if segmented {
-            transcript
-                .segments
+            segments
                 .into_iter()
                 .filter_map(|segment| {
                     let text = segment.text.trim().to_string();
@@ -193,6 +202,36 @@ impl TrackTranscript {
         }
         self.entries.extend(incoming);
     }
+}
+
+/// Groups timed words into sentences: a group ends after sentence
+/// punctuation or before a pause. Models that time words often return one
+/// segment per chunk, which is too coarse to tell echo from a reply.
+fn sentences(words: Vec<TranscriptSegment>) -> Vec<TranscriptSegment> {
+    let mut sentences: Vec<TranscriptSegment> = Vec::new();
+    let mut open = false;
+    for word in words {
+        let text = word.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        match sentences.last_mut() {
+            Some(sentence)
+                if open && word.start_ms.saturating_sub(sentence.end_ms) < SENTENCE_PAUSE_MS =>
+            {
+                sentence.text.push(' ');
+                sentence.text.push_str(text);
+                sentence.end_ms = sentence.end_ms.max(word.end_ms);
+            }
+            _ => sentences.push(TranscriptSegment {
+                start_ms: word.start_ms,
+                end_ms: word.end_ms,
+                text: text.into(),
+            }),
+        }
+        open = !text.ends_with(['.', '?', '!']);
+    }
+    sentences
 }
 
 /// Removes words at the start of `next` that repeat the end of `previous`.
@@ -260,9 +299,16 @@ fn edit_distance(left: &[char], right: &[char]) -> usize {
     previous[right.len()]
 }
 
-/// Drops microphone utterances that repeat overlapping remote speech, which
-/// happens when the call plays through speakers. Returns the dropped count.
-pub(super) fn suppress_echo(entries: Vec<TranscriptEntry>) -> (Vec<TranscriptEntry>, u64) {
+/// Drops microphone utterances that echo remote speech, which happens when
+/// the call plays through speakers. An utterance is echo when the signal
+/// says delayed system audio explains it, or when its words repeat
+/// overlapping remote speech unless the signal shows local speech
+/// (double-talk). `signal` classifies a microphone time span. Returns the
+/// dropped count.
+pub(super) fn suppress_echo(
+    entries: Vec<TranscriptEntry>,
+    signal: impl Fn(u64, u64) -> Option<Signal>,
+) -> (Vec<TranscriptEntry>, u64) {
     let system = entries
         .iter()
         .filter(|entry| entry.source == MeetingSource::System)
@@ -304,6 +350,13 @@ pub(super) fn suppress_echo(entries: Vec<TranscriptEntry>) -> (Vec<TranscriptEnt
             .count();
         matched as f32 / spoken.len() as f32
     };
+    let is_echo = |spoken: &[String], start_ms: u64, end_ms: u64, judge_words: bool| match signal(
+        start_ms, end_ms,
+    ) {
+        Some(Signal::Bleed) => true,
+        Some(Signal::Local) => false,
+        None => judge_words && echo_score(spoken, start_ms, end_ms) >= ECHO_SIMILARITY,
+    };
     let mut dropped = vec![false; entries.len()];
     let mut dropped_utterances = 0;
     for utterance in utterances {
@@ -316,18 +369,24 @@ pub(super) fn suppress_echo(entries: Vec<TranscriptEntry>) -> (Vec<TranscriptEnt
             .map(|(_, entry)| entry.end_ms)
             .max()
             .unwrap_or_default();
-        if echo_score(&spoken, utterance[0].1.start_ms, end) >= ECHO_SIMILARITY {
+        if is_echo(&spoken, utterance[0].1.start_ms, end, true) {
             dropped_utterances += 1;
             for (index, _) in utterance {
                 dropped[index] = true;
             }
             continue;
         }
+        if utterance.len() == 1 {
+            continue;
+        }
         for (index, entry) in utterance {
             let spoken = tokens(&entry.text);
-            if spoken.len() >= SENTENCE_WORDS
-                && echo_score(&spoken, entry.start_ms, entry.end_ms) >= ECHO_SIMILARITY
-            {
+            if is_echo(
+                &spoken,
+                entry.start_ms,
+                entry.end_ms,
+                spoken.len() >= SENTENCE_WORDS,
+            ) {
                 dropped_utterances += 1;
                 dropped[index] = true;
             }
@@ -341,19 +400,20 @@ pub(super) fn suppress_echo(entries: Vec<TranscriptEntry>) -> (Vec<TranscriptEnt
     (kept, dropped_utterances)
 }
 
-/// Joins per-source transcripts on the meeting timeline and removes echo.
-fn join_tracks(tracks: Vec<TrackTranscript>, origin_ms: u64) -> (Vec<TranscriptEntry>, u64) {
-    let mut entries = tracks
-        .into_iter()
-        .flat_map(|track| track.entries)
-        .map(|mut entry| {
-            entry.start_ms = entry.start_ms.saturating_sub(origin_ms);
-            entry.end_ms = entry.end_ms.saturating_sub(origin_ms);
-            entry
-        })
-        .collect::<Vec<_>>();
+/// Removes echo from both sources' entries, then moves them onto the
+/// meeting timeline. Entries and the envelope share the capture clock.
+fn join_entries(
+    mut entries: Vec<TranscriptEntry>,
+    origin_ms: u64,
+    envelope: &EchoEnvelope,
+) -> (Vec<TranscriptEntry>, u64) {
     entries.sort_by_key(|entry| entry.start_ms);
-    suppress_echo(entries)
+    let (mut entries, dropped) = suppress_echo(entries, |start, end| envelope.assess(start, end));
+    for entry in &mut entries {
+        entry.start_ms = entry.start_ms.saturating_sub(origin_ms);
+        entry.end_ms = entry.end_ms.saturating_sub(origin_ms);
+    }
+    (entries, dropped)
 }
 
 fn samples_ms(samples: usize) -> u64 {
@@ -391,6 +451,8 @@ struct RollingTrack {
     sample_rate: u32,
     chunker: Chunker,
     transcript: TrackTranscript,
+    /// 16 kHz samples fed to the chunker.
+    fed: usize,
     pending: usize,
     failed: bool,
 }
@@ -406,31 +468,60 @@ pub(super) struct Rolling {
 pub(super) struct RollingFeed {
     sender: SyncSender<AudioPacket>,
     lost: Arc<[AtomicBool; 2]>,
+    /// Per-source audio gathered into blocks of about a second, so the
+    /// bounded queue holds minutes of audio rather than ScreenCaptureKit's
+    /// many small packets.
+    blocks: [Option<AudioPacket>; 2],
 }
 
 impl RollingFeed {
     /// Forwards without blocking; a full queue abandons that source's rolling
     /// transcript, which is then rebuilt from its WAV after Stop.
-    pub(super) fn offer(&self, packet: &AudioPacket) {
-        let lost = &self.lost[source_index(packet.source)];
-        if lost.load(Ordering::Relaxed) {
+    pub(super) fn offer(&mut self, packet: &AudioPacket) {
+        let index = source_index(packet.source);
+        if self.lost[index].load(Ordering::Relaxed) {
             return;
         }
-        let copy = AudioPacket {
+        if self.blocks[index]
+            .as_ref()
+            .is_some_and(|block| block.sample_rate != packet.sample_rate)
+        {
+            self.send(index);
+        }
+        let block = self.blocks[index].get_or_insert_with(|| AudioPacket {
             source: packet.source,
             pts_us: packet.pts_us,
             arrival_us: packet.arrival_us,
             sample_rate: packet.sample_rate,
-            samples: packet.samples.clone(),
+            samples: Vec::with_capacity(packet.sample_rate as usize),
+        });
+        block.samples.extend_from_slice(&packet.samples);
+        if block.samples.len() >= block.sample_rate as usize {
+            self.send(index);
+        }
+    }
+
+    /// Sends partial blocks; call once capture ends.
+    pub(super) fn flush(&mut self) {
+        self.send(0);
+        self.send(1);
+    }
+
+    fn send(&mut self, index: usize) {
+        let Some(block) = self.blocks[index].take() else {
+            return;
         };
-        if self.sender.try_send(copy).is_err() && !lost.swap(true, Ordering::Relaxed) {
-            tracing::warn!(source = ?packet.source, "rolling meeting transcription fell behind");
+        let lost = &self.lost[index];
+        let source = block.source;
+        if self.sender.try_send(block).is_err() && !lost.swap(true, Ordering::Relaxed) {
+            tracing::warn!(?source, "rolling meeting transcription fell behind");
         }
     }
 }
 
 pub(super) struct RollingOutcome {
     tracks: [Option<TrackTranscript>; 2],
+    envelope: EchoEnvelope,
     model: Option<Transcriber>,
 }
 
@@ -454,6 +545,7 @@ impl Rolling {
         self.sender.take().map(|sender| RollingFeed {
             sender,
             lost: self.lost.clone(),
+            blocks: [None, None],
         })
     }
 
@@ -473,13 +565,14 @@ fn run_rolling(
     crate::parakeet::deprioritize_background_thread();
     let mut tracks: [Option<RollingTrack>; 2] = [None, None];
     let mut pending: VecDeque<(usize, Chunk)> = VecDeque::new();
+    let mut envelope = EchoEnvelope::default();
     let mut model = None;
     let mut model_failed = false;
     loop {
         let mut disconnected = false;
         loop {
             match receiver.try_recv() {
-                Ok(packet) => ingest(&mut tracks, &mut pending, lost, packet),
+                Ok(packet) => ingest(&mut tracks, &mut pending, &mut envelope, lost, packet),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -498,11 +591,11 @@ fn run_rolling(
                 &mut model_failed,
                 selection,
             );
-            write_rolling_snapshot(directory, &tracks);
+            write_rolling_snapshot(directory, &tracks, &envelope);
             continue;
         }
         match receiver.recv_timeout(Duration::from_millis(200)) {
-            Ok(packet) => ingest(&mut tracks, &mut pending, lost, packet),
+            Ok(packet) => ingest(&mut tracks, &mut pending, &mut envelope, lost, packet),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -517,6 +610,13 @@ fn run_rolling(
             .take()
             .map(StreamingResampler::finish)
             .unwrap_or_default();
+        envelope.push(
+            track.transcript.source,
+            track.transcript.origin_ms + samples_ms(track.fed),
+            &tail,
+            RATE as u32,
+        );
+        track.fed += tail.len();
         for chunk in track.chunker.push(&tail) {
             track.pending += 1;
             pending.push_back((index, chunk));
@@ -545,6 +645,7 @@ fn run_rolling(
     };
     RollingOutcome {
         tracks: [complete(system, 0), complete(microphone, 1)],
+        envelope,
         model,
     }
 }
@@ -552,6 +653,7 @@ fn run_rolling(
 fn ingest(
     tracks: &mut [Option<RollingTrack>; 2],
     pending: &mut VecDeque<(usize, Chunk)>,
+    envelope: &mut EchoEnvelope,
     lost: &[AtomicBool; 2],
     packet: AudioPacket,
 ) {
@@ -566,6 +668,7 @@ fn ingest(
             sample_rate: packet.sample_rate,
             chunker: Chunker::default(),
             transcript: TrackTranscript::new(packet.source, packet.arrival_us / 1_000),
+            fed: 0,
             pending: 0,
         }
     });
@@ -580,6 +683,13 @@ fn ingest(
         return;
     };
     let samples = resampler.push(&packet.samples);
+    envelope.push(
+        packet.source,
+        track.transcript.origin_ms + samples_ms(track.fed),
+        &samples,
+        RATE as u32,
+    );
+    track.fed += samples.len();
     for chunk in track.chunker.push(&samples) {
         track.pending += 1;
         pending.push_back((index, chunk));
@@ -616,7 +726,16 @@ fn transcribe_pending(
             return;
         }
     };
-    match model.transcribe_segments(chunk.samples.clone()) {
+    let started = Instant::now();
+    let result = model.transcribe_segments(chunk.samples.clone());
+    if started.elapsed() > SLOW_CHUNK {
+        tracing::warn!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            audio_ms = samples_ms(chunk.samples.len()),
+            "rolling meeting chunk was slow"
+        );
+    }
+    match result {
         Ok(transcript) => track.transcript.accept(&chunk, transcript),
         Err(error) => {
             tracing::warn!(%error, "rolling meeting chunk failed");
@@ -627,7 +746,11 @@ fn transcribe_pending(
 }
 
 /// Atomically replaces the draft that the Meetings pane shows while recording.
-fn write_rolling_snapshot(directory: &Path, tracks: &[Option<RollingTrack>; 2]) {
+fn write_rolling_snapshot(
+    directory: &Path,
+    tracks: &[Option<RollingTrack>; 2],
+    envelope: &EchoEnvelope,
+) {
     let result = (|| -> Result<()> {
         let origin_ms = tracks
             .iter()
@@ -635,19 +758,14 @@ fn write_rolling_snapshot(directory: &Path, tracks: &[Option<RollingTrack>; 2]) 
             .map(|track| track.transcript.origin_ms)
             .min()
             .unwrap_or_default();
+        // A track that fell behind keeps showing what it transcribed; the
+        // live draft continues after it.
         let entries = tracks
             .iter()
             .flatten()
-            .filter(|track| !track.failed)
             .flat_map(|track| track.transcript.entries.iter().cloned())
-            .map(|mut entry| {
-                entry.start_ms = entry.start_ms.saturating_sub(origin_ms);
-                entry.end_ms = entry.end_ms.saturating_sub(origin_ms);
-                entry
-            })
             .collect::<Vec<_>>();
-        let mut entries = suppress_echo(entries).0;
-        entries.sort_by_key(|entry| entry.start_ms);
+        let (entries, _) = join_entries(entries, origin_ms, envelope);
         let temporary = directory.join(format!("{ROLLING_FILE}.tmp"));
         let mut file = BufWriter::new(File::create(&temporary)?);
         set_owner_only(&temporary, false)?;
@@ -674,9 +792,9 @@ pub(super) fn transcribe(
     rolling: Option<RollingOutcome>,
 ) -> Result<(Vec<TranscriptEntry>, u64)> {
     crate::parakeet::deprioritize_background_thread();
-    let (mut rolled, mut model) = match rolling {
-        Some(outcome) => (outcome.tracks, outcome.model),
-        None => ([None, None], None),
+    let (mut rolled, mut envelope, mut model) = match rolling {
+        Some(outcome) => (outcome.tracks, outcome.envelope, outcome.model),
+        None => ([None, None], EchoEnvelope::default(), None),
     };
     let mut tracks = Vec::new();
     for (source, track) in [
@@ -686,13 +804,17 @@ pub(super) fn transcribe(
         let origin_ms = track.first_arrival_us.unwrap_or_default() / 1_000;
         let transcript = match rolled[source_index(source)].take() {
             Some(transcript) => transcript,
-            None => transcribe_file(
-                &mut model,
-                selection,
-                &directory.join(&track.file),
-                source,
-                origin_ms,
-            )?,
+            None => {
+                envelope.clear(source);
+                transcribe_file(
+                    &mut model,
+                    selection,
+                    &directory.join(&track.file),
+                    source,
+                    origin_ms,
+                    &mut envelope,
+                )?
+            }
         };
         tracks.push(transcript);
     }
@@ -705,7 +827,8 @@ pub(super) fn transcribe(
     .min()
     .unwrap_or_default()
         / 1_000;
-    Ok(join_tracks(tracks, origin_ms))
+    let entries = tracks.into_iter().flat_map(|track| track.entries).collect();
+    Ok(join_entries(entries, origin_ms, &envelope))
 }
 
 fn transcribe_file(
@@ -714,6 +837,7 @@ fn transcribe_file(
     path: &Path,
     source: MeetingSource,
     origin_ms: u64,
+    envelope: &mut EchoEnvelope,
 ) -> Result<TrackTranscript> {
     let mut transcript = TrackTranscript::new(source, origin_ms);
     let mut reader =
@@ -726,6 +850,7 @@ fn transcribe_file(
     let mut chunker = Chunker::default();
     let mut samples = reader.samples::<f32>();
     let mut block = Vec::with_capacity(source_rate as usize);
+    let mut fed = 0;
     let mut transcribe_chunk = |chunk: Chunk, transcript: &mut TrackTranscript| -> Result<()> {
         wait_for_dictation();
         let result = load_model(model, selection)?.transcribe_segments(chunk.samples.clone())?;
@@ -740,17 +865,217 @@ fn transcribe_file(
         if block.is_empty() {
             break;
         }
-        for chunk in chunker.push(&resampler.push(&block)) {
+        let samples = resampler.push(&block);
+        envelope.push(source, origin_ms + samples_ms(fed), &samples, RATE as u32);
+        fed += samples.len();
+        for chunk in chunker.push(&samples) {
             transcribe_chunk(chunk, &mut transcript)?;
         }
     }
-    for chunk in chunker.push(&resampler.finish()) {
+    let tail = resampler.finish();
+    envelope.push(source, origin_ms + samples_ms(fed), &tail, RATE as u32);
+    for chunk in chunker.push(&tail) {
         transcribe_chunk(chunk, &mut transcript)?;
     }
     if let Some(chunk) = chunker.finish() {
         transcribe_chunk(chunk, &mut transcript)?;
     }
     Ok(transcript)
+}
+
+/// Debug CLI `hex meeting echo <dir>`: replays a recording's tracks and
+/// reports how many microphone lines echo suppression keeps, before (words
+/// only, one entry per model segment) and after (signal plus words, one
+/// entry per sentence). The microphone is placed `microphone_offset_ms`
+/// after the system track when the manifest has no arrival times.
+#[cfg(debug_assertions)]
+pub(super) fn echo_report(
+    directory: &Path,
+    microphone_offset_ms: Option<u64>,
+    transcribe: bool,
+) -> Result<String> {
+    use std::fmt::Write as _;
+
+    let manifest = super::read_manifest(directory).ok();
+    let offset_ms = microphone_offset_ms.unwrap_or_else(|| {
+        manifest
+            .as_ref()
+            .and_then(|manifest| {
+                Some(
+                    manifest
+                        .microphone
+                        .first_arrival_us?
+                        .saturating_sub(manifest.system.first_arrival_us?)
+                        / 1_000,
+                )
+            })
+            .unwrap_or_default()
+    });
+    let sources = [
+        (MeetingSource::System, 0, directory.join("system.wav")),
+        (
+            MeetingSource::Microphone,
+            offset_ms,
+            directory.join("microphone.wav"),
+        ),
+    ];
+    let mut envelope = EchoEnvelope::default();
+    let mut report = String::new();
+    let mut model = None;
+    let selection = transcribe.then(|| crate::app_settings::transcription_selection().1);
+    let mut old_entries = Vec::new();
+    let mut new_entries = Vec::new();
+    for (source, origin_ms, path) in &sources {
+        let mut reader =
+            WavReader::open(path).wrap_err_with(|| format!("could not read {}", path.display()))?;
+        let rate = reader.spec().sample_rate;
+        let mut resampler = StreamingResampler::new(rate).map_err(|error| eyre!(error))?;
+        let mut chunker = Chunker::default();
+        let mut old_track = TrackTranscript::new(*source, *origin_ms);
+        let mut new_track = TrackTranscript::new(*source, *origin_ms);
+        let mut fed = 0;
+        let samples = reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?;
+        let mut chunks = Vec::new();
+        for block in samples.chunks(rate as usize) {
+            let resampled = resampler.push(block);
+            envelope.push(
+                *source,
+                origin_ms + samples_ms(fed),
+                &resampled,
+                RATE as u32,
+            );
+            fed += resampled.len();
+            chunks.extend(chunker.push(&resampled));
+        }
+        let tail = resampler.finish();
+        envelope.push(*source, origin_ms + samples_ms(fed), &tail, RATE as u32);
+        chunks.extend(chunker.push(&tail));
+        chunks.extend(chunker.finish());
+        if let Some(selection) = &selection {
+            for chunk in chunks {
+                let transcript = load_model(&mut model, selection)?
+                    .transcribe_segments(chunk.samples.clone())?;
+                old_track.accept(
+                    &chunk,
+                    Transcript {
+                        words: Vec::new(),
+                        ..transcript.clone()
+                    },
+                );
+                new_track.accept(&chunk, transcript);
+            }
+        }
+        old_entries.extend(old_track.entries);
+        new_entries.extend(new_track.entries);
+    }
+
+    let live_path = directory.join("transcript.live.ndjson");
+    if live_path.exists() {
+        let mut events = super::live::latest_events(&live_path)?;
+        let before = events
+            .iter()
+            .filter(|event| event.source == MeetingSource::Microphone)
+            .count();
+        for event in &mut events {
+            if event.source == MeetingSource::Microphone {
+                event.signal = envelope.assess(event.start_ms, event.end_ms);
+            }
+        }
+        let shown = super::live::live_view(&[], events.iter());
+        let after = shown
+            .iter()
+            .filter(|entry| entry.source == MeetingSource::Microphone)
+            .count();
+        let text_only = events
+            .iter()
+            .cloned()
+            .map(|mut event| {
+                event.signal = None;
+                event
+            })
+            .collect::<Vec<_>>();
+        let words_only = super::live::live_view(&[], text_only.iter())
+            .iter()
+            .filter(|entry| entry.source == MeetingSource::Microphone)
+            .count();
+        writeln!(
+            report,
+            "live draft (microphone offset {offset_ms} ms): {before} You lines shown before, \
+             {words_only} with word matching only, {after} with signal and words"
+        )?;
+        let mut events = events;
+        events.sort_by_key(|event| event.start_ms);
+        for event in events
+            .iter()
+            .filter(|event| event.source == MeetingSource::Microphone)
+        {
+            let kept = shown
+                .iter()
+                .any(|entry| entry.source == event.source && entry.start_ms == event.start_ms);
+            writeln!(
+                report,
+                "  {} {:>7} {:<6} {:>4} {}",
+                if kept { "KEEP" } else { "drop" },
+                event.start_ms,
+                match event.signal {
+                    Some(Signal::Bleed) => "bleed",
+                    Some(Signal::Local) => "local",
+                    None => "?",
+                },
+                envelope
+                    .local_share(event.start_ms, event.end_ms)
+                    .map_or("-".into(), |share| format!("{share:.2}")),
+                event.text
+            )?;
+        }
+    }
+
+    if transcribe {
+        let count = |entries: &[TranscriptEntry]| {
+            entries
+                .iter()
+                .filter(|entry| entry.source == MeetingSource::Microphone)
+                .count()
+        };
+        let (old_kept, old_dropped) = suppress_echo(old_entries.clone(), |_, _| None);
+        let (new_kept, new_dropped) = suppress_echo(new_entries.clone(), |start, end| {
+            envelope.assess(start, end)
+        });
+        let (words_kept, _) = suppress_echo(new_entries.clone(), |_, _| None);
+        writeln!(
+            report,
+            "final: before {} of {} You entries kept ({old_dropped} dropped); sentences with \
+             words only {} of {}; after {} of {} kept ({new_dropped} dropped)",
+            count(&old_kept),
+            count(&old_entries),
+            count(&words_kept),
+            count(&new_entries),
+            count(&new_kept),
+            count(&new_entries),
+        )?;
+        let mut sorted = new_entries.clone();
+        sorted.sort_by_key(|entry| entry.start_ms);
+        for entry in sorted {
+            let kept = new_kept.contains(&entry);
+            let signal = (entry.source == MeetingSource::Microphone)
+                .then(|| envelope.assess(entry.start_ms, entry.end_ms));
+            writeln!(
+                report,
+                "  {} {:>6} {:<5} {:<6} {}",
+                if kept { "KEEP" } else { "drop" },
+                entry.start_ms,
+                entry.source.label(),
+                match signal {
+                    Some(Some(Signal::Bleed)) => "bleed",
+                    Some(Some(Signal::Local)) => "local",
+                    Some(None) => "?",
+                    None => "",
+                },
+                entry.text
+            )?;
+        }
+    }
+    Ok(report)
 }
 
 pub(super) struct LocalTime {
@@ -912,7 +1237,6 @@ pub(super) fn export_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcription::TranscriptSegment;
 
     fn entry(source: MeetingSource, start_ms: u64, end_ms: u64, text: &str) -> TranscriptEntry {
         TranscriptEntry {
@@ -1032,6 +1356,7 @@ mod tests {
                         text: "on".into(),
                     },
                 ],
+                words: Vec::new(),
             },
         );
         let second = Chunk {
@@ -1055,6 +1380,7 @@ mod tests {
                         text: "on Friday.".into(),
                     },
                 ],
+                words: Vec::new(),
             },
         );
         let texts = track
@@ -1090,7 +1416,7 @@ mod tests {
                 "Yes, since version two.",
             ),
         ];
-        let (kept, dropped) = suppress_echo(entries);
+        let (kept, dropped) = suppress_echo(entries, |_, _| None);
         assert_eq!(dropped, 1);
         assert_eq!(
             kept.iter()
@@ -1115,9 +1441,123 @@ mod tests {
             let start = 5_200 + index as u64 * 300;
             entries.push(entry(MeetingSource::Microphone, start, start + 250, word));
         }
-        let (kept, dropped) = suppress_echo(entries);
+        let (kept, dropped) = suppress_echo(entries, |_, _| None);
         assert_eq!(dropped, 1);
         assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn the_signal_overrides_word_matching_both_ways() {
+        let entries = vec![
+            entry(
+                MeetingSource::System,
+                1_000,
+                3_000,
+                "We could make twenty games.",
+            ),
+            // Misheard bleed: different words, but the signal explains it.
+            entry(
+                MeetingSource::Microphone,
+                1_100,
+                3_000,
+                "We can make plenty.",
+            ),
+            entry(MeetingSource::System, 10_000, 11_000, "Yeah, totally."),
+            // Double-talk: the same words, but the microphone is louder than
+            // any bleed, so the user said them too.
+            entry(MeetingSource::Microphone, 10_050, 11_000, "Yeah, totally."),
+        ];
+        let (kept, dropped) = suppress_echo(entries, |start, _| {
+            Some(if start < 5_000 {
+                Signal::Bleed
+            } else {
+                Signal::Local
+            })
+        });
+        assert_eq!(dropped, 1);
+        assert_eq!(
+            kept.iter()
+                .map(|entry| (entry.source, entry.start_ms))
+                .collect::<Vec<_>>(),
+            [
+                (MeetingSource::System, 1_000),
+                (MeetingSource::System, 10_000),
+                (MeetingSource::Microphone, 10_050),
+            ]
+        );
+    }
+
+    #[test]
+    fn synthetic_speaker_bleed_is_dropped_and_double_talk_kept() {
+        use super::super::echo::tests::{bleed, envelope, speech};
+        let system = speech(12.0, 11);
+        let mut microphone = bleed(&system, 80, 0.1);
+        for (offset, sample) in speech(3.0, 29).iter().enumerate() {
+            microphone[7 * RATE + offset] += sample * 0.9;
+        }
+        let envelope = envelope(&system, &microphone);
+        let entries = vec![
+            entry(
+                MeetingSource::System,
+                1_000,
+                4_000,
+                "Ship the beta on Friday.",
+            ),
+            entry(
+                MeetingSource::Microphone,
+                1_100,
+                4_000,
+                "Shipped a better Friday.",
+            ),
+            entry(
+                MeetingSource::System,
+                7_000,
+                10_000,
+                "Then we tell everyone.",
+            ),
+            entry(
+                MeetingSource::Microphone,
+                7_000,
+                10_000,
+                "Wait, which beta?",
+            ),
+        ];
+        let (kept, dropped) = suppress_echo(entries, |start, end| envelope.assess(start, end));
+        assert_eq!(dropped, 1);
+        assert!(kept.iter().any(|entry| entry.text == "Wait, which beta?"));
+        assert!(
+            !kept
+                .iter()
+                .any(|entry| entry.text == "Shipped a better Friday.")
+        );
+    }
+
+    #[test]
+    fn timed_words_become_sentences_at_punctuation_and_pauses() {
+        let word = |start_ms, end_ms, text: &str| TranscriptSegment {
+            start_ms,
+            end_ms,
+            text: text.into(),
+        };
+        let grouped = sentences(vec![
+            word(0, 300, " Basically,"),
+            word(320, 500, "yes."),
+            word(560, 800, "Then"),
+            word(820, 1_000, "this"),
+            word(2_000, 2_300, "Later"),
+            word(2_320, 2_600, "words"),
+        ]);
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|sentence| (sentence.start_ms, sentence.end_ms, sentence.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, 500, "Basically, yes."),
+                (560, 1_000, "Then this"),
+                (2_000, 2_600, "Later words"),
+            ]
+        );
     }
 
     #[test]
@@ -1144,7 +1584,7 @@ mod tests {
                 "Does it have AISDK support?",
             ),
         ];
-        let (kept, dropped) = suppress_echo(entries);
+        let (kept, dropped) = suppress_echo(entries, |_, _| None);
         assert_eq!(dropped, 0);
         assert_eq!(kept.len(), 3);
     }

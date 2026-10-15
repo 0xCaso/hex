@@ -18,6 +18,8 @@ use crate::events::now_ms;
 const SAMPLE_RATE: u32 = 16_000;
 const TRANSCRIPT_TURN_GAP_MS: u64 = 3_000;
 
+#[path = "meeting_echo.rs"]
+mod echo;
 #[path = "meeting_live.rs"]
 mod live;
 pub use live::TranscriptReader;
@@ -741,7 +743,7 @@ fn write_tracks(
     directory: &Path,
     receiver: Receiver<AudioPacket>,
     mut live_sender: Option<SyncSender<AudioPacket>>,
-    rolling: Option<transcript::RollingFeed>,
+    mut rolling: Option<transcript::RollingFeed>,
     live_drops: &AtomicU64,
 ) -> Result<CaptureStats> {
     let mut system = None;
@@ -789,7 +791,7 @@ fn write_tracks(
         for &sample in &packet.samples {
             writer.write_sample(sample)?;
         }
-        if let Some(rolling) = &rolling {
+        if let Some(rolling) = &mut rolling {
             rolling.offer(&packet);
         }
         if let Some(sender) = &live_sender {
@@ -801,6 +803,9 @@ fn write_tracks(
                 Err(TrySendError::Disconnected(_)) => live_sender = None,
             }
         }
+    }
+    if let Some(rolling) = &mut rolling {
+        rolling.flush();
     }
     finalize_track(directory.join("system.wav"), system)?;
     finalize_track(directory.join("microphone.wav"), microphone)?;
@@ -972,6 +977,88 @@ fn recovered_status(
         ) => MeetingStatus::Interrupted,
         _ => status,
     }
+}
+
+/// Moves a finished meeting to the Trash: its exported Markdown first, then
+/// its recording folder. Refuses while it records, transcribes, or writes
+/// notes. A missing Markdown file is skipped.
+pub fn trash(id: &str) -> Result<()> {
+    trash_meeting(&root()?.join(id), move_to_trash)
+}
+
+fn trash_meeting(
+    directory: &Path,
+    mut move_to_trash: impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    let manifest = read_manifest(directory)?;
+    if meeting_is_active(directory) != Some(false) {
+        return Err(eyre!("Stop the recording before deleting it"));
+    }
+    if notes_in_progress(&manifest.id) {
+        return Err(eyre!("Wait for the notes to finish before deleting"));
+    }
+    if let Some(path) = manifest.export_path.filter(|path| path.exists()) {
+        move_to_trash(&path)?;
+    }
+    move_to_trash(directory)
+}
+
+fn move_to_trash(path: &Path) -> Result<()> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|error| {
+            eyre!(
+                "could not move {} to the Trash: {}",
+                path.display(),
+                error.localizedDescription()
+            )
+        })
+}
+
+/// Renames a meeting. The Markdown heading follows only while it still reads
+/// the previous title, and the file keeps its name, as with generated titles.
+pub fn rename(id: &str, title: &str) -> Result<MeetingManifest> {
+    rename_meeting(&root()?.join(id), title)
+}
+
+fn rename_meeting(directory: &Path, title: &str) -> Result<MeetingManifest> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        return Err(eyre!("The title is empty"));
+    }
+    let id = directory
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut manifest = read_manifest(directory)?;
+    let previous = display_title(&manifest);
+    manifest.title = title;
+    let next = display_title(&manifest);
+    let mut markdown_error = None;
+    if previous != next
+        && let Some(path) = manifest.export_path.clone().filter(|path| path.exists())
+        && let Err(error) = notes::retitle_markdown_file(&path, &previous, &next)
+    {
+        tracing::warn!(%error, meeting = id, "could not retitle meeting Markdown");
+        markdown_error = Some(error);
+    }
+    write_manifest(directory, &manifest)?;
+    match markdown_error {
+        Some(error) => Err(error.wrap_err("Renamed, but the Markdown heading was not updated")),
+        None => Ok(manifest),
+    }
+}
+
+/// Debug CLI: replays a recording's tracks through echo suppression.
+#[cfg(debug_assertions)]
+pub fn echo_report(
+    directory: &Path,
+    microphone_offset_ms: Option<u64>,
+    transcribe: bool,
+) -> Result<String> {
+    transcript::echo_report(directory, microphone_offset_ms, transcribe)
 }
 
 #[cfg(debug_assertions)]

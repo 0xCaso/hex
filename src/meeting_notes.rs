@@ -549,12 +549,44 @@ pub(super) fn apply_notes(
     output
 }
 
-/// Applies the notes to the exported file in place, keeping its name. The
-/// file is replaced atomically, and only if nothing changed it meanwhile.
+/// Replaces the first heading only while it still reads `previous_title`.
+pub(super) fn apply_title(markdown: &str, previous_title: &str, title: &str) -> String {
+    let mut output = String::with_capacity(markdown.len() + title.len());
+    let mut heading_seen = false;
+    for line in markdown.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if !heading_seen && bare.starts_with("# ") {
+            heading_seen = true;
+            if bare[2..].trim() == previous_title.trim() {
+                output.push_str(&format!("# {}\n", title.trim()));
+                continue;
+            }
+        }
+        output.push_str(line);
+    }
+    output
+}
+
+/// Renames the exported file's heading in place, under the same rule as
+/// generated titles.
+pub(super) fn retitle_markdown_file(path: &Path, previous_title: &str, title: &str) -> Result<()> {
+    rewrite_markdown_file(path, |markdown| {
+        apply_title(markdown, previous_title, title)
+    })
+}
+
+/// Applies the notes to the exported file in place, keeping its name.
 fn update_markdown_file(path: &Path, previous_title: &str, title: &str, block: &str) -> Result<()> {
+    rewrite_markdown_file(path, |markdown| {
+        apply_notes(markdown, previous_title, title, block)
+    })
+}
+
+/// The file is replaced atomically, and only if nothing changed it meanwhile.
+fn rewrite_markdown_file(path: &Path, rewrite: impl FnOnce(&str) -> String) -> Result<()> {
     let original =
         fs::read_to_string(path).wrap_err_with(|| format!("could not read {}", path.display()))?;
-    let updated = apply_notes(&original, previous_title, title, block);
+    let updated = rewrite(&original);
     if updated == original {
         return Ok(());
     }
@@ -573,7 +605,7 @@ fn update_markdown_file(path: &Path, previous_title: &str, title: &str, block: &
     File::open(&temporary)?.sync_all()?;
     if fs::read_to_string(path).ok().as_deref() != Some(original.as_str()) {
         let _ = fs::remove_file(&temporary);
-        return Err(eyre!("the Markdown changed while notes were being written"));
+        return Err(eyre!("the Markdown changed while it was being updated"));
     }
     fs::rename(&temporary, path)?;
     sync_directory(folder)
@@ -1108,6 +1140,16 @@ mod tests {
         assert_eq!(display_title(&manifest), "Launch plan review");
         manifest.title = "Design sync".into();
         assert_eq!(display_title(&manifest), "Design sync");
+    }
+
+    #[test]
+    fn retitling_replaces_only_a_matching_first_heading() {
+        let markdown = "# Zoom call — 2:30 PM\n\nText\n# Zoom call — 2:30 PM\n";
+        assert_eq!(
+            apply_title(markdown, "Zoom call — 2:30 PM", "Launch review"),
+            "# Launch review\n\nText\n# Zoom call — 2:30 PM\n"
+        );
+        assert_eq!(apply_title(markdown, "Other", "Launch review"), markdown);
     }
 
     #[test]
