@@ -319,6 +319,8 @@ fn capture_failures_are_persisted_instead_of_looking_interrupted() {
         export_path: None,
         export_error: None,
         echo_suppressed_utterances: 0,
+        notes: None,
+        notes_error: None,
     };
     write_manifest(&directory, &manifest).unwrap();
 

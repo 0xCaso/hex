@@ -21,8 +21,13 @@ const TRANSCRIPT_TURN_GAP_MS: u64 = 3_000;
 #[path = "meeting_live.rs"]
 mod live;
 pub use live::TranscriptReader;
+#[path = "meeting_notes.rs"]
+mod notes;
 #[path = "meeting_transcript.rs"]
 mod transcript;
+pub use notes::{MeetingNotes, display_title, notes_in_progress, notes_wanted, spawn_summary};
+#[cfg(debug_assertions)]
+pub use notes::{summarize, summarize_file};
 
 /// What the recorder knows about a meeting when it starts.
 #[derive(Clone, Debug, Default)]
@@ -83,6 +88,8 @@ pub fn reveal(path: &Path) {
 pub enum MeetingRequest {
     Start,
     Stop,
+    /// Regenerate Apple Intelligence notes for a completed meeting.
+    Summarize(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -111,6 +118,11 @@ pub struct MeetingManifest {
     pub export_error: Option<String>,
     #[serde(default)]
     pub echo_suppressed_utterances: u64,
+    /// Apple Intelligence notes generated after final publication.
+    #[serde(default)]
+    pub notes: Option<MeetingNotes>,
+    #[serde(default)]
+    pub notes_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -295,6 +307,8 @@ pub fn record(
         export_path: None,
         export_error: None,
         echo_suppressed_utterances: 0,
+        notes: None,
+        notes_error: None,
     };
     write_manifest(&meeting_dir, &manifest)?;
 

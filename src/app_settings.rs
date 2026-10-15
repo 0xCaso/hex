@@ -15,6 +15,7 @@ static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
 static INCREMENTAL_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
 static MEETINGS_ENABLED: AtomicBool = AtomicBool::new(false);
+static MEETING_NOTES_ENABLED: AtomicBool = AtomicBool::new(true);
 static MEETING_OUTPUT_FOLDER: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -410,12 +411,25 @@ impl Default for RuntimeHotkeys {
 
 /// Opt-in meeting recording. Detection, the Meetings pane, and the meeting
 /// paste shortcut stay off in release builds until `enabled` is set.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct MeetingSettings {
     pub enabled: bool,
     /// Folder for finished Markdown transcripts; `None` uses the default.
     pub output_folder: Option<PathBuf>,
+    /// Write a title, summary, and action items with Apple Intelligence when
+    /// it is available.
+    pub summarize_with_apple_intelligence: bool,
+}
+
+impl Default for MeetingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_folder: None,
+            summarize_with_apple_intelligence: true,
+        }
+    }
 }
 
 impl MeetingSettings {
@@ -823,6 +837,10 @@ impl AppSettings {
         );
         INCREMENTAL_TRANSCRIPTION.store(self.incremental_transcription, Ordering::Relaxed);
         MEETINGS_ENABLED.store(self.meetings.available(), Ordering::Release);
+        MEETING_NOTES_ENABLED.store(
+            self.meetings.summarize_with_apple_intelligence,
+            Ordering::Release,
+        );
         *MEETING_OUTPUT_FOLDER
             .get_or_init(Default::default)
             .write()
@@ -1036,6 +1054,10 @@ pub fn meetings_enabled() -> bool {
     MEETINGS_ENABLED.load(Ordering::Acquire)
 }
 
+pub fn meeting_notes_enabled() -> bool {
+    MEETING_NOTES_ENABLED.load(Ordering::Acquire)
+}
+
 pub fn meeting_output_folder() -> PathBuf {
     MEETING_OUTPUT_FOLDER
         .get_or_init(Default::default)
@@ -1150,6 +1172,7 @@ mod tests {
         assert_eq!(settings.voice_action.deadline_seconds, 60);
         assert!(!settings.meetings.enabled);
         assert_eq!(settings.meetings.output_folder, None);
+        assert!(settings.meetings.summarize_with_apple_intelligence);
         assert!(
             settings
                 .meetings
@@ -1157,6 +1180,14 @@ mod tests {
                 .ends_with("Hex Meetings")
         );
         assert!(settings.text_replacements.is_empty());
+    }
+
+    #[test]
+    fn existing_meeting_settings_summarize_by_default() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"meetings":{"enabled":true}}"#).unwrap();
+        assert!(settings.meetings.enabled);
+        assert!(settings.meetings.summarize_with_apple_intelligence);
     }
 
     #[test]

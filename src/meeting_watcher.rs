@@ -37,6 +37,7 @@ enum ControllerCommand {
     Record(MeetingCandidate),
     Dismiss,
     Stop,
+    Summarize(String),
 }
 
 enum ControllerEvent {
@@ -47,6 +48,8 @@ enum ControllerEvent {
     CallEnded { app: String },
     Finished(Box<meeting::MeetingManifest>),
     Failed { title: String, error: String },
+    NotesStarted,
+    NotesFinished(Box<meeting::MeetingManifest>),
 }
 
 struct ActiveRecording {
@@ -201,6 +204,11 @@ fn run_panel_preview(preview: PanelPreview) -> Result<()> {
             manifest.export_path = Some(PathBuf::from(
                 "~/Documents/Hex Meetings/2026-10-15 1430 Zoom call — 2-30 PM.md",
             ));
+            manifest.title = meeting::default_title(None, manifest.created_at_ms);
+            manifest.notes = Some(meeting::MeetingNotes {
+                title: "Q4 launch plan and docs owners".into(),
+                ..Default::default()
+            });
             PanelKind::Ready(Box::new(manifest))
         }
     };
@@ -816,6 +824,26 @@ async fn drive_ui(
                     )
                     .ok();
                 }
+                ControllerEvent::NotesStarted => {
+                    update_app_window(&ui.app_window, cx, |window, cx| {
+                        window.meeting_updated_notes(cx);
+                    });
+                }
+                ControllerEvent::NotesFinished(manifest) => {
+                    if let Some(panel) = offer_window {
+                        let _ = panel.update(cx, |panel, _, cx| {
+                            if let PanelKind::Ready(ready) = &mut panel.kind
+                                && ready.id == manifest.id
+                            {
+                                *ready = manifest.clone();
+                                cx.notify();
+                            }
+                        });
+                    }
+                    update_app_window(&ui.app_window, cx, |window, cx| {
+                        window.meeting_updated_notes(cx);
+                    });
+                }
                 ControllerEvent::Failed { title, error } => {
                     meeting_state = MeetingMenuState::Idle;
                     ui.show_meeting_window(
@@ -948,6 +976,7 @@ fn controller_loop(
             .map(|request| match request {
                 MeetingRequest::Start => ControllerCommand::Record(MeetingCandidate::manual()),
                 MeetingRequest::Stop => ControllerCommand::Stop,
+                MeetingRequest::Summarize(id) => ControllerCommand::Summarize(id),
             });
         for command in commands.try_iter().take(8).chain(requested_commands) {
             match command {
@@ -987,6 +1016,7 @@ fn controller_loop(
                         let _ = events.send(ControllerEvent::Transcribing);
                     }
                 }
+                ControllerCommand::Summarize(id) => start_notes(id, &events),
                 ControllerCommand::Dismiss | ControllerCommand::Record(_) => {}
             }
         }
@@ -1009,7 +1039,14 @@ fn controller_loop(
                 .take()
                 .ok_or_else(|| eyre!("recording disappeared"))?;
             let event = match active.worker.join() {
-                Ok(Ok(manifest)) => ControllerEvent::Finished(Box::new(manifest)),
+                Ok(Ok(manifest)) => {
+                    if manifest.status == meeting::MeetingStatus::Complete
+                        && meeting::notes_wanted()
+                    {
+                        start_notes(manifest.id.clone(), &events);
+                    }
+                    ControllerEvent::Finished(Box::new(manifest))
+                }
                 Ok(Err(error)) => ControllerEvent::Failed {
                     title: active.title,
                     error: error.to_string(),
@@ -1105,6 +1142,26 @@ fn controller_loop(
             .map_err(|_| eyre!("meeting recorder panicked"))??;
     }
     Ok(())
+}
+
+/// Writes notes on a background thread; the UI refreshes from the manifest
+/// whether generation succeeds or fails.
+fn start_notes(id: String, events: &SyncSender<ControllerEvent>) {
+    let finished = events.clone();
+    let reload_id = id.clone();
+    if meeting::spawn_summary(id, move |result| {
+        let manifest = match result {
+            Ok(manifest) => Some(manifest),
+            Err(_) => meeting::list()
+                .ok()
+                .and_then(|meetings| meetings.into_iter().find(|item| item.id == reload_id)),
+        };
+        if let Some(manifest) = manifest {
+            let _ = finished.send(ControllerEvent::NotesFinished(Box::new(manifest)));
+        }
+    }) {
+        let _ = events.send(ControllerEvent::NotesStarted);
+    }
 }
 
 fn panel_options(cx: &App) -> WindowOptions {
@@ -1276,6 +1333,9 @@ impl Render for MeetingPanel {
                 let copy_path = path.clone();
                 let entity = cx.entity();
                 let subtitle = match (&path, &manifest.export_error) {
+                    _ if meeting::notes_in_progress(&manifest.id) => {
+                        "Writing notes with Apple Intelligence…".into()
+                    }
                     (Some(path), _) => path
                         .file_name()
                         .map(|name| name.to_string_lossy().to_string())
@@ -1283,9 +1343,13 @@ impl Render for MeetingPanel {
                     (None, Some(error)) => format!("Markdown not saved: {error}"),
                     (None, None) => "Saved in Meetings".into(),
                 };
+                let title = match &manifest.notes {
+                    Some(_) => format!("Ready · {}", meeting::display_title(manifest)),
+                    None => "Meeting transcript ready".into(),
+                };
                 (
                     rgb(0x5ac46a),
-                    "Meeting transcript ready".into(),
+                    title,
                     subtitle,
                     div()
                         .flex()

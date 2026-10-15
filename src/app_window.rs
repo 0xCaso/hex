@@ -1001,6 +1001,7 @@ pub struct AppWindow {
     dock_icon_toggle: ToggleSpring,
     incremental_toggle: ToggleSpring,
     meetings_toggle: ToggleSpring,
+    meeting_notes_toggle: ToggleSpring,
     screen_recording_permitted: bool,
     meeting_folder_error: Option<String>,
     sound_volume_spring: ToggleSpring,
@@ -1453,6 +1454,9 @@ impl AppWindow {
             dock_icon_toggle: ToggleSpring::new(settings.show_dock_icon),
             incremental_toggle: ToggleSpring::new(settings.incremental_transcription),
             meetings_toggle: ToggleSpring::new(settings.meetings.enabled),
+            meeting_notes_toggle: ToggleSpring::new(
+                settings.meetings.summarize_with_apple_intelligence,
+            ),
             screen_recording_permitted: match &preview {
                 Some(preview) => !preview.screen_recording_missing,
                 None => crate::meeting::screen_recording_permitted(),
@@ -2126,6 +2130,19 @@ impl AppWindow {
         self.meeting_stop_pending = true;
         self.reload_meetings();
         cx.notify();
+    }
+
+    pub fn meeting_updated_notes(&mut self, cx: &mut Context<Self>) {
+        self.reload_meetings();
+        cx.notify();
+    }
+
+    fn apple_intelligence_availability(&self) -> crate::apple_intelligence::Availability {
+        if self.preview {
+            crate::apple_intelligence::Availability::Available
+        } else {
+            crate::apple_intelligence::availability()
+        }
     }
 
     pub fn meeting_finished(&mut self, cx: &mut Context<Self>) {
@@ -3884,6 +3901,7 @@ impl AppWindow {
     fn render_meeting_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let enabled = self.settings.meetings.enabled;
         let position = self.meetings_toggle.render_position(window);
+        let notes_position = self.meeting_notes_toggle.render_position(window);
         let folder = self.settings.meetings.resolved_output_folder();
         let folder_label = folder
             .strip_prefix(dirs::home_dir().unwrap_or_default())
@@ -3940,44 +3958,57 @@ impl AppWindow {
                         },
                         permission_control,
                     ))
+                    .child(settings_row(
+                        "Transcript folder",
+                        "Finished meetings are saved here as Markdown",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                canvas_button()
+                                    .id("reveal-meeting-folder")
+                                    .h(px(32.0))
+                                    .px_2p5()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(MUTED))
+                                    .child("Reveal")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let folder =
+                                            this.settings.meetings.resolved_output_folder();
+                                        match std::fs::create_dir_all(&folder) {
+                                            Ok(()) => crate::meeting::reveal(&folder),
+                                            Err(error) => {
+                                                this.meeting_folder_error = Some(error.to_string());
+                                            }
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                disclosure_button(folder_label)
+                                    .id("meeting-folder-setting")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.choose_meeting_folder(cx);
+                                    })),
+                            ),
+                    ))
                     .child(
                         settings_row(
-                            "Transcript folder",
-                            "Finished meetings are saved here as Markdown",
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    canvas_button()
-                                        .id("reveal-meeting-folder")
-                                        .h(px(32.0))
-                                        .px_2p5()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(MUTED))
-                                        .child("Reveal")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            let folder =
-                                                this.settings.meetings.resolved_output_folder();
-                                            match std::fs::create_dir_all(&folder) {
-                                                Ok(()) => crate::meeting::reveal(&folder),
-                                                Err(error) => {
-                                                    this.meeting_folder_error =
-                                                        Some(error.to_string());
-                                                }
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    disclosure_button(folder_label)
-                                        .id("meeting-folder-setting")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.choose_meeting_folder(cx);
-                                        })),
-                                ),
+                            "Summarize with Apple Intelligence",
+                            self.apple_intelligence_availability().description(),
+                            toggle(notes_position),
                         )
-                        .border_b_0(),
+                        .border_b_0()
+                        .id("meeting-notes-setting")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let enabled = !this.settings.meetings.summarize_with_apple_intelligence;
+                            if this.update_settings(cx, |settings| {
+                                settings.meetings.summarize_with_apple_intelligence = enabled
+                            }) {
+                                this.meeting_notes_toggle.set_enabled(enabled);
+                            }
+                        })),
                     )
                     .when_some(self.meeting_folder_error.clone(), |panel, error| {
                         panel.child(
@@ -6276,7 +6307,7 @@ impl AppWindow {
             .map(|(index, meeting)| {
                 let id = meeting.id.clone();
                 let selected = self.selected_meeting.as_deref() == Some(id.as_str());
-                let title = meeting.title.clone();
+                let title = meeting::display_title(meeting);
                 let duration = meeting::format_duration(meeting_duration(meeting));
                 let status = meeting_status(meeting.status);
                 list_row(selected)
@@ -6402,6 +6433,42 @@ impl AppWindow {
                 }
             }));
 
+        let notes_running = meeting::notes_in_progress(&meeting.id);
+        let notes_action = (meeting.status == MeetingStatus::Complete
+            && self.apple_intelligence_availability().is_available())
+        .then(|| {
+            if notes_running {
+                return meeting_progress_action("Writing notes...");
+            }
+            let id = meeting.id.clone();
+            canvas_button()
+                .id("regenerate-meeting-notes")
+                .h(px(30.0))
+                .px_3()
+                .text_size(px(12.0))
+                .child(if meeting.notes.is_some() {
+                    "Regenerate Notes"
+                } else {
+                    "Write Notes"
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Err(error) = this
+                        .meeting_requests
+                        .try_send(MeetingRequest::Summarize(id.clone()))
+                    {
+                        log_meeting_request_error(error);
+                    }
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
+        let notes_error = meeting
+            .notes_error
+            .clone()
+            .filter(|_| !notes_running)
+            .map(|error| format!("Notes: {error}"));
+        let notes = meeting.notes.clone().map(render_meeting_notes);
+
         let transcript = match &self.meeting_transcript {
             MeetingTranscript::Empty => empty_message("No transcript selected."),
             MeetingTranscript::Loaded(lines) if lines.is_empty() => {
@@ -6511,7 +6578,7 @@ impl AppWindow {
                                 div()
                                     .text_size(px(20.0))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(meeting.title.clone()),
+                                    .child(meeting::display_title(&meeting)),
                             )
                             .child(
                                 div()
@@ -6531,12 +6598,16 @@ impl AppWindow {
                                     .child(meeting::format_duration(meeting_duration(&meeting))),
                             )
                             .when_some(
-                                meeting.error.clone().or_else(|| {
-                                    meeting
-                                        .export_error
-                                        .clone()
-                                        .map(|error| format!("Markdown not saved: {error}"))
-                                }),
+                                meeting
+                                    .error
+                                    .clone()
+                                    .or_else(|| {
+                                        meeting
+                                            .export_error
+                                            .clone()
+                                            .map(|error| format!("Markdown not saved: {error}"))
+                                    })
+                                    .or(notes_error),
                                 |header, error| {
                                     header.child(
                                         div()
@@ -6549,7 +6620,14 @@ impl AppWindow {
                                 },
                             ),
                     )
-                    .child(reveal),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .gap_2()
+                            .when_some(notes_action, |actions, action| actions.child(action))
+                            .child(reveal),
+                    ),
             )
             .child(
                 div()
@@ -6559,6 +6637,7 @@ impl AppWindow {
                     .track_scroll(&self.meeting_transcript_scroll)
                     .px_6()
                     .pb_6()
+                    .when_some(notes, |content, notes| content.child(notes))
                     .child(
                         div()
                             .h(px(42.0))
@@ -8722,6 +8801,60 @@ fn meeting_action_button(id: &'static str, label: &'static str) -> gpui::Statefu
         .text_color(rgb(0x171717))
         .hover(|button| button.bg(rgb(0xffffff)))
         .child(label)
+}
+
+fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
+    let section = |label: &'static str, items: Vec<String>| {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .h(px(28.0))
+                    .flex()
+                    .items_end()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(MUTED))
+                    .child(label),
+            )
+            .children(items.into_iter().map(|item| {
+                div()
+                    .flex()
+                    .gap_2()
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
+                    .text_color(rgb(TEXT_SOFT))
+                    .child(div().flex_none().text_color(rgb(FAINT)).child("•"))
+                    .child(div().flex_1().min_w(px(0.0)).child(item))
+            }))
+    };
+    let actions = notes
+        .action_items
+        .iter()
+        .map(|item| match &item.owner {
+            Some(owner) => format!("{} — {owner}", item.task),
+            None => item.task.clone(),
+        })
+        .collect::<Vec<_>>();
+    div()
+        .pt_2()
+        .pb_4()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .border_b_1()
+        .border_color(rgb(LINE))
+        .when(!notes.summary.is_empty(), |block| {
+            block.child(section("SUMMARY", notes.summary.clone()))
+        })
+        .when(!actions.is_empty(), |block| {
+            block.child(section("ACTION ITEMS", actions))
+        })
+        .when(!notes.decisions.is_empty(), |block| {
+            block.child(section("DECISIONS", notes.decisions.clone()))
+        })
 }
 
 fn meeting_progress_action(label: &'static str) -> AnyElement {

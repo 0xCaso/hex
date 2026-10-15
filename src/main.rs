@@ -6,6 +6,8 @@ mod app_settings;
 #[cfg(target_os = "macos")]
 mod app_window;
 #[cfg(target_os = "macos")]
+mod apple_intelligence;
+#[cfg(target_os = "macos")]
 mod apple_speech;
 #[cfg(target_os = "macos")]
 mod application_catalog;
@@ -398,6 +400,14 @@ enum MeetingCommand {
     },
     /// Print applications currently using microphone input.
     Probe,
+    /// Write Apple Intelligence notes for a meeting id, or print notes for a
+    /// transcript Markdown file without saving them.
+    Summarize {
+        target: String,
+        /// Override the per-chunk character budget (file targets only).
+        #[arg(long)]
+        chunk_chars: Option<usize>,
+    },
 }
 
 #[cfg(target_os = "macos")]
@@ -686,6 +696,30 @@ fn main() -> Result<()> {
         Command::Meeting {
             command: MeetingCommand::Probe,
         } => meeting_watcher::probe(),
+        #[cfg(debug_assertions)]
+        Command::Meeting {
+            command:
+                MeetingCommand::Summarize {
+                    target,
+                    chunk_chars,
+                },
+        } => {
+            let path = PathBuf::from(&target);
+            if path.is_file() {
+                print!("{}", meeting::summarize_file(&path, chunk_chars)?);
+            } else {
+                app_settings::AppSettings::load()?;
+                let manifest = meeting::summarize(&target)?;
+                println!("{}", meeting::display_title(&manifest));
+                if let Some(path) = manifest.export_path {
+                    println!("{}", path.display());
+                }
+                if let Some(error) = manifest.notes_error {
+                    println!("{error}");
+                }
+            }
+            Ok(())
+        }
         Command::BenchmarkTranscription {
             manifest,
             backend,
