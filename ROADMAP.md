@@ -206,19 +206,18 @@ Downloads, Calendar, or other unrelated TCC access.
 
 ## Complete Meeting Lifecycle Recovery
 
-When meeting microphone activity disappears, ask `Keep Recording` or
-`Stop & Transcribe`; never stop automatically. Add EventKit correlation for
-titles and reminders, explicit input-device selection, structured capture-gap
-observations, active-WAV repair, and resumable final transcription. Status and
-final-publication recovery already exist; do not replace them.
+Add EventKit correlation for titles and reminders, explicit input-device
+selection, structured capture-gap observations, active-WAV repair, and resumable
+final transcription. Status, final-publication recovery, the call-ended prompt,
+and the menu-bar recording state already exist; do not replace them.
 
-Keep active recording discoverable after the main window closes through a
-persistent menu-bar/status affordance. Add transcript search; scrolling and
-follow-live behavior are already implemented.
+Add transcript search; scrolling and follow-live behavior are already
+implemented. Validate echo suppression thresholds against real speaker-mode
+recordings.
 
 Give durable transcript entries stable identities so live-to-final reconciliation,
 incremental UI refresh, and meeting-delta paste can advance without rereading
-broad history. Keep `You` and `Computer` source labels and the recoverable live
+broad history. Keep `You` and `Them` source labels and the recoverable live
 draft when final transcription fails.
 
 Add end-to-end coverage for voice-triggered start/stop, shutdown during capture,

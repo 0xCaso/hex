@@ -11,9 +11,11 @@ runtime settings persist in Application Support.
 The distributed release starts in hotkey-dictation-only mode. Voice commands and
 their catalog remain available as a persisted opt-in that defaults off.
 Voice Action also requires its own persisted opt-in, defaulting off even for
-existing settings without an explicit enabled flag.
-`DEVELOPER_FEATURES_ENABLED` keeps meetings and their UI/CLI surfaces available
-only in debug builds.
+existing settings without an explicit enabled flag. Meetings (beta) is a third
+persisted opt-in (`meetings.enabled`, default off) that adds call detection, the
+Meetings pane, menu-bar recording controls, and meeting paste in release builds.
+`DEVELOPER_FEATURES_ENABLED` keeps meetings always available in debug builds and
+keeps the meeting CLI, Activity, and HUD Lab debug-only.
 
 ## Feature Map
 
@@ -156,16 +158,23 @@ substitute for source inspection or a second roadmap.
   processing, Voice Action, History, and opt-in Commands shell plus
   developer-only Meetings, Activity, and HUD Lab panes.
 - `status_item`: the persistent macOS menu-bar owner for Settings, Paste Last
-  Dictation, update checks, and orderly application shutdown.
+  Dictation, meeting recording state and Stop & Transcribe, update checks, and
+  orderly application shutdown.
 - `dictation_indicator`: the click-through Metal/GPUI capture and processing HUD.
 - `meeting`: explicit ScreenCaptureKit capture, owner-only WAV and transcript
-  artifacts, final local-model publication, and recovery.
+  artifacts, Screen Recording permission checks, final local-model publication,
+  the user-facing Markdown copy, and recovery.
+- `meeting_transcript`: streaming 16 kHz resampling, pause-aware overlapping
+  chunks, the utility-QoS rolling transcriber that yields to dictation, seam
+  deduplication, echo suppression, and Markdown rendering.
 - `meeting_live`: bounded dual-stream Moonshine draft transcription and
   byte-offset transcript tailing.
 - `microphone_activity`: permission-light CoreAudio process input observation.
-- `meeting_detection`: pure provider classification, debounce, and suppression.
-- `meeting_watcher`: GPUI application lifecycle, recognition ownership, meeting
-  offers, and explicit handoff into capture.
+- `meeting_detection`: pure provider classification, debounce, per-call snooze,
+  and call-ended presence.
+- `meeting_watcher`: GPUI application lifecycle, recognition ownership, the
+  focus-free meeting capsules, menu-bar meeting state, and explicit handoff into
+  capture.
 - `instance`: the exclusive Application Support lock that prevents concurrent
   command listeners.
 - `feedback`: bounded volume-controlled mode, capture, cancellation, and
@@ -320,14 +329,26 @@ CoreAudio formats, AppleScript details, or event serialization.
   Turning retention Off preserves existing entries; clearing history is explicit.
   Time-based retention expires during idle uptime through the shared history
   owner; searches never return expired entries while waiting for disk cleanup.
-- Developer-only meeting detection may inspect process audio metadata but must
-  not capture samples. Detection can offer recording; it must never start
-  automatically. Release builds must not start the meeting controller.
+- Meeting detection may inspect process audio metadata but must not capture
+  samples. Detection can offer recording; it must never start automatically, and
+  an offer that times out only closes. Release builds keep the meeting controller
+  idle, without inspecting microphone activity, until the user opts in. When the
+  detected call app leaves the microphone, offer `Keep Recording` or
+  `Stop & Transcribe`; never stop automatically. An active recording stays
+  visible and stoppable from the menu bar without the Settings window.
+- Meeting transcription never blocks dictation: it runs on its own model session
+  at utility QoS, waits while an intentional dictation capture or dictation
+  inference is active, and keeps its packet queue and chunk backlog bounded; a
+  source that falls behind is rebuilt from its WAV after Stop.
 - Meeting recording prevents idle sleep but does not apply dictation mute or
   pause-media behavior.
 - Live meeting drafts remain available if final transcription fails. Final
   publication is atomic; adjacent same-source entries within three seconds form
-  one displayed turn labeled `You` or `Computer`.
+  one displayed turn labeled `You` or `Them`. Microphone utterances that repeat
+  overlapping remote speech are dropped from the final transcript. Each finished
+  meeting is also written as Markdown to the configured folder (default
+  `~/Documents/Hex Meetings`) without overwriting existing files; an export
+  failure does not fail the meeting.
 - Meeting paste cursors advance only after successful insertion and reset when
   HEX restarts.
 - Visible state remains `Transcribing` until every accepted transcription or
@@ -453,8 +474,10 @@ Use `scripts/capture-preview.sh` as the default desktop-UI iteration loop. It
 builds the release binary, launches one isolated deterministic preview, waits
 for that process's `HEX` window, captures only that window, and terminates the
 preview. Targets include `settings`, `modes`, `voice-action`, `commands`,
-`meetings`, `activity`, `onboarding`, `transcription-picker`, `hud-lab`, and
-`dictation-hud`. The Modes preview includes representative activation,
+`meetings`, `activity`, `onboarding`, `transcription-picker`, `hud-lab`,
+`dictation-hud`, and `meeting-offer` (with `--meeting-panel call-ended|ready`).
+Pass `--meetings-enabled` and `--screen-recording-missing` to Settings for the
+Meetings section. The Modes preview includes representative activation,
 correction, model-variant, and transformation data so it exercises the complete
 editor. Pass `--collapse-mode-processing` to expose the lower transformation
 and deletion states without scrolling. Use `--open-transformation-picker`,

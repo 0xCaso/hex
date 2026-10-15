@@ -19,13 +19,14 @@ HEX                                      // macOS release
 ├── Use the result                       // paste, Send, paste-last, History
 ├── Adjust behavior                      // shortcut, microphone, recording preferences
 ├── Process text                         // context-selected Modes
-├── Opt in                               // Voice Action and Commands: separately off
+├── Opt in                               // Voice Action, Commands, Meetings: separately off
 ├── Recover                              // prove the next attempt works
 └── Maintain the app                     // menu bar, login, updates, quit
 ```
 
 [Dictation](dictation.md), [Voice Commands](commands.md),
-[Voice Action](voice-action.md), and [Recovery](recovery.md) have detailed maps.
+[Voice Action](voice-action.md), [Meetings](meetings.md), and [Recovery](recovery.md)
+have detailed maps.
 The other capabilities stay here until they need their own verification recipe.
 
 ## Get Ready
@@ -429,6 +430,12 @@ model, awake/sleep state, contextual catalog, personal config, and
 It owns the checks and [host/startup gaps](commands.md#gaps-and-constraints);
 actual capture and output remain in [Dictation](dictation.md).
 
+## Record Meetings
+
+[Meetings (beta)](meetings.md) maps the Settings opt-in, call detection and the
+focus-free offer, menu-bar recording state, rolling transcription, echo
+suppression, and the Markdown copy in the user's transcript folder.
+
 ## Recover And Maintain
 
 ```ts
@@ -749,8 +756,7 @@ microphone behavior.
 
 ```ts
 macOS debug runtime                      // not release navigation
-├── Meetings -> Explicit recording, separate artifacts, recoverable drafts
-│   └── Detection may offer recording, never start it automatically
+├── Meetings -> Always available; release builds need the Settings opt-in
 └── Activity / HUD Lab / hex dev -> Observation and developer controls
 
 Desktop previews -> Rendered fixtures    // not proof capture/download/update happened
@@ -773,7 +779,8 @@ ordering. This checks filesystem/projection behavior, not native meeting capture
 `production_navigation_keeps_commands_available_as_an_opt_in` and
 `developer_navigation_appends_developer_panes_in_order` in
 [app_window.rs](../../src/app_window.rs) check exact pane availability and order
-from the developer-feature flag; they do not exercise native navigation clicks.
+from the developer-feature flag and the Meetings opt-in; they do not exercise
+native navigation clicks.
 
 Desktop previews use a deterministic microphone list. Their settings controls do
 not change global shortcut-capture suspension or Dock policy, or play preview
@@ -784,7 +791,7 @@ device discovery or installed-app behavior.
 `default_paste_hotkeys_follow_build_capabilities` in
 [app_settings.rs](../../src/app_settings.rs) checks the production default runtime
 and settings projections: Paste Last remains available in both build profiles;
-meeting paste is present only in debug. `meeting_paste_is_only_active_in_developer_builds`
+meeting paste is present in debug or after the Meetings opt-in. `meeting_paste_is_only_active_in_developer_builds`
 in [suppression.rs](../../src/suppression.rs) checks the corresponding constructed
 hotkey event, including ordinary-chord discard in release. These replace an
 unconditional debug-only expectation and a test-only copy of the reservation rule;
