@@ -1003,7 +1003,6 @@ pub(super) fn echo_report(
             "live draft (microphone offset {offset_ms} ms): {before} You lines shown before, \
              {words_only} with word matching only, {after} with signal and words"
         )?;
-        let mut events = events;
         events.sort_by_key(|event| event.start_ms);
         for event in events
             .iter()
@@ -1112,7 +1111,12 @@ impl LocalTime {
         format!("{hour}:{:02} {period}", self.minute)
     }
 
-    fn date(&self) -> String {
+    /// `(year, month, day)`, for grouping meetings by local day.
+    pub(super) fn day(&self) -> (i32, u32, u32) {
+        (self.year, self.month, self.day)
+    }
+
+    pub(super) fn date(&self) -> String {
         const WEEKDAYS: [&str; 7] = [
             "Sunday",
             "Monday",

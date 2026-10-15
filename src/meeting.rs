@@ -27,7 +27,9 @@ pub use live::TranscriptReader;
 mod notes;
 #[path = "meeting_transcript.rs"]
 mod transcript;
-pub use notes::{MeetingNotes, display_title, notes_in_progress, notes_wanted, spawn_summary};
+pub use notes::{
+    ActionItem, MeetingNotes, display_title, notes_in_progress, notes_wanted, spawn_summary,
+};
 #[cfg(debug_assertions)]
 pub use notes::{summarize, summarize_file};
 
@@ -977,6 +979,74 @@ fn recovered_status(
         ) => MeetingStatus::Interrupted,
         _ => status,
     }
+}
+
+/// The local clock time of a timestamp, such as `2:30 PM`.
+pub fn clock(milliseconds: u64) -> String {
+    transcript::LocalTime::from_ms(milliseconds).clock()
+}
+
+/// `Today`, `Yesterday`, or a date such as `Thursday, October 15, 2026`.
+pub fn day_label(milliseconds: u64, now_ms: u64) -> String {
+    let day = transcript::LocalTime::from_ms(milliseconds);
+    if day.day() == transcript::LocalTime::from_ms(now_ms).day() {
+        "Today".into()
+    } else if day.day() == transcript::LocalTime::from_ms(now_ms.saturating_sub(86_400_000)).day() {
+        "Yesterday".into()
+    } else {
+        day.date()
+    }
+}
+
+/// The notes as Markdown, for copying.
+pub fn notes_markdown(notes: &MeetingNotes) -> String {
+    notes::render_notes_block(notes)
+        .lines()
+        .filter(|line| !line.starts_with("<!--") && !line.starts_with("_Notes written"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Speaker turns as Markdown, for copying.
+pub fn transcript_markdown(entries: &[TranscriptEntry]) -> String {
+    coalesce_transcript(entries.iter().cloned())
+        .into_iter()
+        .map(|turn| {
+            format!(
+                "**{}** · {}\n{}",
+                turn.source.label(),
+                format_duration(turn.start_ms),
+                turn.text.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Lowercased title, app, notes, and final transcript, for search.
+pub fn search_text(manifest: &MeetingManifest) -> String {
+    let mut text = format!(
+        "{} {} {}",
+        display_title(manifest),
+        manifest.title,
+        manifest.app.as_deref().unwrap_or_default()
+    );
+    if let Some(notes) = &manifest.notes {
+        text.push(' ');
+        text.push_str(&notes_markdown(notes));
+    }
+    if manifest.status == MeetingStatus::Complete
+        && let Ok(directory) = root().map(|root| root.join(&manifest.id))
+        && let Ok(entries) = read_ndjson::<TranscriptEntry>(&directory.join("transcript.ndjson"))
+    {
+        for entry in entries {
+            text.push(' ');
+            text.push_str(&entry.text);
+        }
+    }
+    text.to_lowercase()
 }
 
 /// Moves a finished meeting to the Trash: its exported Markdown first, then

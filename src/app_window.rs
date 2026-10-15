@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::rc::Rc;
@@ -47,7 +48,9 @@ use crate::events::{
 };
 use crate::history::{History, HistoryEntry, HistoryKind, HistoryRetention};
 use crate::login_item::{LoginItemRequest, LoginItemResponse, LoginItemStatus, LoginItemWorker};
-use crate::meeting::{self, MeetingManifest, MeetingRequest, MeetingStatus};
+use crate::meeting::{
+    self, MeetingManifest, MeetingRequest, MeetingSource, MeetingStatus, TranscriptEntry,
+};
 use crate::onboarding::{
     PermissionAction, PermissionKind, PermissionState, PermissionWarning, SetupStatus,
 };
@@ -434,6 +437,9 @@ pub struct AppWindowPreview {
     pub update_available: bool,
     pub meetings_enabled: bool,
     pub screen_recording_missing: bool,
+    pub meeting_recording: bool,
+    pub confirm_meeting_delete: bool,
+    pub meetings_empty: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -596,9 +602,16 @@ fn personal_workspace_state(
 
 #[derive(Clone, PartialEq)]
 struct TranscriptLine {
-    source: String,
+    source: MeetingSource,
+    clock: String,
     text: String,
     pause_before_ms: Option<u64>,
+}
+
+struct MeetingPreview {
+    recording: bool,
+    confirm_delete: bool,
+    empty: bool,
 }
 
 #[derive(Clone)]
@@ -1051,6 +1064,17 @@ pub struct AppWindow {
     meeting_transcript_id: Option<String>,
     meeting_transcript_reader: meeting::TranscriptReader,
     meeting_transcript_scroll: ScrollHandle,
+    /// Coalesced turns of the selected meeting, for Copy Transcript.
+    meeting_turns: Vec<TranscriptEntry>,
+    meeting_search: ProcessingInput,
+    /// Lowercased searchable text per meeting, loaded when a search starts.
+    meeting_search_text: HashMap<String, String>,
+    meeting_rename: Option<(String, ProcessingInput)>,
+    meeting_delete_armed: Option<String>,
+    meeting_action_error: Option<String>,
+    meeting_copied: Option<(String, &'static str)>,
+    /// Deterministic transcripts for the Meetings preview.
+    meeting_preview_transcripts: Option<HashMap<String, Vec<TranscriptEntry>>>,
     compiled_commands: Vec<CatalogCommand>,
     commands: Vec<CatalogCommand>,
     personal_commands_status: StatusSnapshot,
@@ -1155,6 +1179,14 @@ impl AppWindow {
         })
         .detach();
         let preview_mode = preview.is_some();
+        let preview_meetings = preview
+            .as_ref()
+            .filter(|preview| matches!(preview.pane, DeveloperPane::Meetings))
+            .map(|preview| MeetingPreview {
+                recording: preview.meeting_recording,
+                confirm_delete: preview.confirm_meeting_delete,
+                empty: preview.meetings_empty,
+            });
         let preview_choices = crate::transcription_models::choices_for_runtime;
         let (settings, settings_load_error) = if let Some(preview) = &preview {
             let mut settings = AppSettings {
@@ -1392,6 +1424,7 @@ impl AppWindow {
             history
         };
         let history_search = Self::history_search_input(cx);
+        let meeting_search = Self::meeting_search_input(cx);
         let command_search = Self::command_search_input(cx);
         let mut window = Self {
             preview: preview_mode,
@@ -1586,6 +1619,14 @@ impl AppWindow {
             meeting_transcript_id: None,
             meeting_transcript_reader: meeting::TranscriptReader::default(),
             meeting_transcript_scroll: ScrollHandle::new(),
+            meeting_turns: Vec::new(),
+            meeting_search,
+            meeting_search_text: HashMap::new(),
+            meeting_rename: None,
+            meeting_delete_armed: None,
+            meeting_action_error: None,
+            meeting_copied: None,
+            meeting_preview_transcripts: None,
             compiled_commands,
             commands,
             personal_commands_status,
@@ -1621,6 +1662,11 @@ impl AppWindow {
         window.reload_history(cx);
         if window.preview {
             window.selected_history = window.history_entries.first().map(|entry| entry.id);
+        }
+        if let Some(preview) = preview_meetings.as_ref()
+            && window.pane == Pane::Meetings
+        {
+            window.load_meeting_preview(preview);
         }
         if window.pane == Pane::Modes {
             window.ensure_application_catalog_load();
@@ -2170,6 +2216,9 @@ impl AppWindow {
     }
 
     fn reload_meetings(&mut self) {
+        if self.meeting_preview_transcripts.is_some() {
+            return;
+        }
         match meeting::list() {
             Ok(meetings) => {
                 let previous_active = meeting::active(&self.meetings).map(|meeting| &meeting.id);
@@ -2196,6 +2245,12 @@ impl AppWindow {
                     self.meeting_refresh_started_ms = None;
                 }
                 self.meetings = meetings;
+                let indexed = &self.meetings;
+                self.meeting_search_text.retain(|id, _| {
+                    indexed
+                        .iter()
+                        .any(|manifest| &manifest.id == id && !manifest.status.is_active())
+                });
                 if meeting::active(&self.meetings)
                     .is_none_or(|meeting| meeting.status == MeetingStatus::Transcribing)
                 {
@@ -2243,29 +2298,19 @@ impl AppWindow {
                     + self.meeting_transcript_scroll.offset().y
                     <= px(48.0)
         });
-        self.meeting_transcript = match self.meeting_transcript_reader.read(&id) {
-            Ok(entries) => MeetingTranscript::Loaded(
-                meeting::coalesce_transcript(entries)
-                    .into_iter()
-                    .scan(None, |previous_end, entry| {
-                        let pause_before_ms = previous_end
-                            .map(|end| entry.start_ms.saturating_sub(end))
-                            .filter(|pause| *pause >= 8_000);
-                        *previous_end =
-                            Some(previous_end.map_or(entry.end_ms, |end| end.max(entry.end_ms)));
-                        Some(TranscriptLine {
-                            source: format!(
-                                "{} {}",
-                                meeting::format_duration(entry.start_ms),
-                                entry.source.label()
-                            ),
-                            text: entry.text,
-                            pause_before_ms,
-                        })
-                    })
-                    .collect(),
-            ),
-            Err(error) => MeetingTranscript::Unavailable(error.to_string()),
+        let entries = match &self.meeting_preview_transcripts {
+            Some(fixtures) => Ok(fixtures.get(&id).cloned().unwrap_or_default()),
+            None => self.meeting_transcript_reader.read(&id),
+        };
+        self.meeting_transcript = match entries {
+            Ok(entries) => {
+                self.meeting_turns = meeting::coalesce_transcript(entries);
+                MeetingTranscript::Loaded(transcript_lines(&self.meeting_turns))
+            }
+            Err(error) => {
+                self.meeting_turns.clear();
+                MeetingTranscript::Unavailable(error.to_string())
+            }
         };
         if !selection_changed
             && matches!(
@@ -2274,6 +2319,208 @@ impl AppWindow {
             )
         {
             self.meeting_transcript_scroll.scroll_to_bottom();
+        }
+    }
+
+    fn meeting_search_input(cx: &mut Context<Self>) -> ProcessingInput {
+        let entity = cx.new(|cx| TextInput::picker(cx, "Search meetings", ""));
+        let changed = cx.subscribe(&entity, |this, _, _: &TextChanged, cx| {
+            this.refresh_meeting_search(cx);
+            cx.notify();
+        });
+        ProcessingInput {
+            entity,
+            _subscriptions: vec![changed],
+        }
+    }
+
+    fn meeting_query(&self, cx: &App) -> String {
+        self.meeting_search
+            .entity
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase()
+    }
+
+    /// Loads searchable text for meetings not yet indexed. Runs only while
+    /// a query is entered, so idle panes never read transcripts.
+    fn refresh_meeting_search(&mut self, cx: &App) {
+        if self.meeting_query(cx).is_empty() {
+            return;
+        }
+        for manifest in &self.meetings {
+            if !self.meeting_search_text.contains_key(&manifest.id) {
+                let text = match &self.meeting_preview_transcripts {
+                    Some(fixtures) => format!(
+                        "{} {}",
+                        meeting::display_title(manifest),
+                        fixtures
+                            .get(&manifest.id)
+                            .into_iter()
+                            .flatten()
+                            .map(|entry| entry.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                    .to_lowercase(),
+                    None => meeting::search_text(manifest),
+                };
+                self.meeting_search_text.insert(manifest.id.clone(), text);
+            }
+        }
+    }
+
+    fn visible_meetings(&self, cx: &App) -> Vec<&MeetingManifest> {
+        let query = self.meeting_query(cx);
+        self.meetings
+            .iter()
+            .filter(|manifest| {
+                query.is_empty()
+                    || manifest.status.is_active()
+                    || self
+                        .meeting_search_text
+                        .get(&manifest.id)
+                        .is_none_or(|text| query.split_whitespace().all(|word| text.contains(word)))
+            })
+            .collect()
+    }
+
+    fn select_meeting(&mut self, id: String) {
+        if self.selected_meeting.as_deref() != Some(id.as_str()) {
+            self.meeting_rename = None;
+            self.meeting_delete_armed = None;
+            self.meeting_action_error = None;
+            self.meeting_copied = None;
+        }
+        self.selected_meeting = Some(id);
+        self.load_selected_meeting();
+    }
+
+    fn copy_meeting_text(
+        &mut self,
+        id: String,
+        what: &'static str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
+            Ok(()) => {
+                self.meeting_copied = Some((id, what));
+                self.meeting_action_error = None;
+            }
+            Err(error) => self.meeting_action_error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn trash_meeting(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.meeting_delete_armed.as_deref() != Some(id.as_str()) {
+            self.meeting_delete_armed = Some(id);
+            self.meeting_rename = None;
+            cx.notify();
+            return;
+        }
+        self.meeting_delete_armed = None;
+        let result = if self.preview {
+            Ok(())
+        } else {
+            meeting::trash(&id)
+        };
+        match result {
+            Ok(()) => {
+                self.meeting_action_error = None;
+                self.meeting_search_text.remove(&id);
+                if self.preview {
+                    self.meetings.retain(|manifest| manifest.id != id);
+                } else {
+                    self.reload_meetings();
+                }
+                let next = self.meetings.first().map(|manifest| manifest.id.clone());
+                self.selected_meeting = None;
+                if let Some(next) = next {
+                    self.select_meeting(next);
+                } else {
+                    self.load_selected_meeting();
+                }
+            }
+            Err(error) => self.meeting_action_error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn start_meeting_rename(
+        &mut self,
+        id: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.new(|cx| TextInput::new(cx, "Meeting title", &title));
+        let submitted = cx.subscribe(&entity, |this, _, _: &TextSubmitted, cx| {
+            this.finish_meeting_rename(cx);
+        });
+        let dismissed = cx.subscribe(&entity, |this, _, _: &TextDismissed, cx| {
+            this.meeting_rename = None;
+            cx.notify();
+        });
+        entity.focus_handle(cx).focus(window);
+        self.meeting_delete_armed = None;
+        self.meeting_rename = Some((
+            id,
+            ProcessingInput {
+                entity,
+                _subscriptions: vec![submitted, dismissed],
+            },
+        ));
+        cx.notify();
+    }
+
+    fn finish_meeting_rename(&mut self, cx: &mut Context<Self>) {
+        let Some((id, input)) = self.meeting_rename.take() else {
+            return;
+        };
+        let title = input.entity.read(cx).text().to_string();
+        let result = if self.preview {
+            let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+            match self.meetings.iter_mut().find(|manifest| manifest.id == id) {
+                Some(manifest) if !title.is_empty() => {
+                    manifest.title = title;
+                    Ok(())
+                }
+                _ => Err(color_eyre::eyre::eyre!("The title is empty")),
+            }
+        } else {
+            meeting::rename(&id, &title).map(|_| ())
+        };
+        match result {
+            Ok(()) => self.meeting_action_error = None,
+            Err(error) => self.meeting_action_error = Some(format!("{error:#}")),
+        }
+        self.meeting_search_text.remove(&id);
+        if !self.preview {
+            self.reload_meetings();
+        }
+        cx.notify();
+    }
+
+    fn load_meeting_preview(&mut self, preview: &MeetingPreview) {
+        let (meetings, transcripts) = preview_meetings(preview.empty);
+        self.meetings = meetings;
+        self.meeting_preview_transcripts = Some(transcripts);
+        let selected = if preview.recording {
+            meeting::active(&self.meetings)
+        } else {
+            self.meetings
+                .iter()
+                .find(|manifest| manifest.status == MeetingStatus::Complete)
+        }
+        .map(|manifest| manifest.id.clone());
+        if let Some(id) = selected {
+            self.select_meeting(id.clone());
+            if preview.confirm_delete {
+                self.meeting_delete_armed = Some(id);
+            }
         }
     }
 
@@ -6299,52 +6546,91 @@ impl AppWindow {
                 }))
                 .into_any_element(),
         };
+        let header_action = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().w(px(220.0)).child(self.meeting_search.entity.clone()))
+            .child(action)
+            .into_any_element();
 
-        let rows: Vec<AnyElement> = self
-            .meetings
-            .iter()
-            .enumerate()
-            .map(|(index, meeting)| {
-                let id = meeting.id.clone();
-                let selected = self.selected_meeting.as_deref() == Some(id.as_str());
-                let title = meeting::display_title(meeting);
-                let duration = meeting::format_duration(meeting_duration(meeting));
-                let status = meeting_status(meeting.status);
+        let now = now_ms();
+        let visible = self.visible_meetings(cx);
+        let searching = !self.meeting_query(cx).is_empty();
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut current_day = None;
+        for (index, meeting) in visible.iter().enumerate() {
+            let day = meeting::day_label(meeting.created_at_ms, now);
+            if current_day.as_ref() != Some(&day) {
+                rows.push(
+                    compact_section_label(day.clone())
+                        .pt(px(if rows.is_empty() { 4.0 } else { 12.0 }))
+                        .pb_1()
+                        .px_3()
+                        .into_any_element(),
+                );
+                current_day = Some(day);
+            }
+            let id = meeting.id.clone();
+            let selected = self.selected_meeting.as_deref() == Some(id.as_str());
+            let mut meta = vec![
+                meeting::clock(meeting.created_at_ms),
+                meeting_length(meeting_duration(meeting)),
+            ];
+            meta.extend(meeting.app.clone());
+            rows.push(
                 list_row(selected)
                     .id(("meeting", index))
                     .child(
                         div()
                             .w_full()
-                            .overflow_x_hidden()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT))
-                            .truncate()
-                            .child(title),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_x_hidden()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(if selected { TEXT } else { TEXT_SOFT }))
+                                    .truncate()
+                                    .child(meeting::display_title(meeting)),
+                            )
+                            .when_some(
+                                meeting_status_chip(
+                                    meeting.status,
+                                    self.meeting_stop_pending,
+                                    false,
+                                ),
+                                |row, chip| row.child(chip),
+                            ),
                     )
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
+                            .w_full()
+                            .overflow_x_hidden()
                             .text_size(px(10.0))
                             .text_color(rgb(if selected { TEXT_SOFT } else { FAINT }))
-                            .child(status)
-                            .child(duration),
+                            .truncate()
+                            .child(meta.join(" · ")),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_meeting = Some(id.clone());
-                        this.load_selected_meeting();
+                        this.select_meeting(id.clone());
                         cx.notify();
                     }))
-                    .into_any_element()
-            })
-            .collect();
+                    .into_any_element(),
+            );
+        }
 
         let list = pane_list_card(
             "meetings-list",
-            (self.meetings.is_empty() && self.meetings_error.is_none())
-                .then_some("No meetings yet."),
+            (visible.is_empty() && self.meetings_error.is_none()).then_some(if searching {
+                "No meetings match."
+            } else {
+                "No meetings yet."
+            }),
             "Meetings could not be loaded.",
             self.meetings_error.clone(),
             rows,
@@ -6354,17 +6640,20 @@ impl AppWindow {
             .size_full()
             .flex()
             .flex_col()
-            .child(pane_header_with_action("Meetings", Some(action)))
+            .child(pane_header_with_action("Meetings", Some(header_action)))
             .when_some(self.meeting_runtime_error.clone(), |pane, error| {
                 pane.child(
-                    div()
-                        .px_6()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(rgb(LINE))
-                        .text_size(px(12.0))
-                        .text_color(rgb(NEGATIVE))
-                        .child(error),
+                    div().flex().justify_center().px_8().child(
+                        div()
+                            .w_full()
+                            .max_w(px(PANE_CONTENT_WIDTH))
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(LINE))
+                            .text_size(px(12.0))
+                            .text_color(rgb(NEGATIVE))
+                            .child(error),
+                    ),
                 )
             })
             .child(
@@ -6395,79 +6684,236 @@ impl AppWindow {
             .and_then(|id| self.meetings.iter().find(|meeting| meeting.id == id))
             .cloned()
         else {
-            return detail_placeholder("Select a meeting.");
+            return detail_placeholder(if self.meetings.is_empty() {
+                "Record a call to see its notes and transcript here."
+            } else {
+                "Select a meeting."
+            });
         };
         let id = meeting.id.clone();
-        let export_path = meeting.export_path.clone().filter(|path| path.exists());
-        let reveal = canvas_button()
-            .id("reveal-meeting-files")
-            .h(px(30.0))
-            .px_3()
-            .text_size(px(12.0))
-            .child(if export_path.is_some() {
-                "Reveal Markdown"
-            } else {
-                "Reveal Files"
-            })
-            .on_click(cx.listener(move |_, _, _, _| {
-                if let Some(path) = &export_path {
-                    meeting::reveal(path);
-                    return;
-                }
-                match meeting::root() {
-                    Ok(root) => {
-                        match ProcessCommand::new("/usr/bin/open")
-                            .arg(root.join(&id))
-                            .status()
-                        {
-                            Ok(status) if status.success() => {}
-                            Ok(status) => {
-                                tracing::error!(%status, "could not reveal meeting files")
-                            }
-                            Err(error) => {
-                                tracing::error!(%error, "could not reveal meeting files")
-                            }
-                        }
-                    }
-                    Err(error) => tracing::error!(%error, "could not locate meeting files"),
-                }
-            }));
-
-        let notes_running = meeting::notes_in_progress(&meeting.id);
-        let notes_action = (meeting.status == MeetingStatus::Complete
-            && self.apple_intelligence_availability().is_available())
-        .then(|| {
-            if notes_running {
-                return meeting_progress_action("Writing notes...");
-            }
-            let id = meeting.id.clone();
+        let active = meeting.status.is_active();
+        let recording = meeting.status == MeetingStatus::Recording && !self.meeting_stop_pending;
+        let title = meeting::display_title(&meeting);
+        let copied = |what: &'static str| {
+            self.meeting_copied
+                .as_ref()
+                .is_some_and(|(copied_id, copied)| copied_id == &id && *copied == what)
+        };
+        let action = |key: &'static str, label: &'static str| {
             canvas_button()
-                .id("regenerate-meeting-notes")
-                .h(px(30.0))
+                .id(SharedString::from(format!("meeting-action-{key}")))
+                .h(px(28.0))
                 .px_3()
+                .flex_none()
                 .text_size(px(12.0))
-                .child(if meeting.notes.is_some() {
-                    "Regenerate Notes"
-                } else {
-                    "Write Notes"
-                })
+                .child(label)
+        };
+
+        let mut actions: Vec<AnyElement> = Vec::new();
+        if let Some(notes) = meeting.notes.clone() {
+            let id = id.clone();
+            actions.push(
+                action(
+                    "copy-notes",
+                    if copied("notes") {
+                        "Copied"
+                    } else {
+                        "Copy Notes"
+                    },
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Err(error) = this
-                        .meeting_requests
-                        .try_send(MeetingRequest::Summarize(id.clone()))
-                    {
-                        log_meeting_request_error(error);
-                    }
-                    cx.notify();
+                    this.copy_meeting_text(id.clone(), "notes", meeting::notes_markdown(&notes), cx)
                 }))
-                .into_any_element()
+                .into_any_element(),
+            );
+        }
+        if !self.meeting_turns.is_empty() {
+            let id = id.clone();
+            let turns = self.meeting_turns.clone();
+            actions.push(
+                action(
+                    "copy-transcript",
+                    if copied("transcript") {
+                        "Copied"
+                    } else {
+                        "Copy Transcript"
+                    },
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.copy_meeting_text(
+                        id.clone(),
+                        "transcript",
+                        meeting::transcript_markdown(&turns),
+                        cx,
+                    )
+                }))
+                .into_any_element(),
+            );
+        }
+        if !active {
+            let export_path = meeting.export_path.clone().filter(|path| path.exists());
+            let reveal_id = id.clone();
+            actions.push(
+                action(
+                    "reveal",
+                    if export_path.is_some() {
+                        "Reveal Markdown"
+                    } else {
+                        "Reveal Files"
+                    },
+                )
+                .on_click(
+                    cx.listener(move |_, _, _, _| {
+                        reveal_meeting(&reveal_id, export_path.as_deref())
+                    }),
+                )
+                .into_any_element(),
+            );
+        }
+        let notes_running = meeting::notes_in_progress(&meeting.id);
+        if meeting.status == MeetingStatus::Complete
+            && self.apple_intelligence_availability().is_available()
+        {
+            if notes_running {
+                actions.push(meeting_progress_action("Writing notes..."));
+            } else {
+                let id = id.clone();
+                actions.push(
+                    action(
+                        "notes",
+                        if meeting.notes.is_some() {
+                            "Regenerate Notes"
+                        } else {
+                            "Write Notes"
+                        },
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Err(error) = this
+                            .meeting_requests
+                            .try_send(MeetingRequest::Summarize(id.clone()))
+                        {
+                            log_meeting_request_error(error);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                );
+            }
+        }
+        if !active && self.meeting_rename.is_none() {
+            let (id, title) = (id.clone(), title.clone());
+            actions.push(
+                action("rename", "Rename")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_meeting_rename(id.clone(), title.clone(), window, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if !active && !notes_running {
+            let armed = self.meeting_delete_armed.as_deref() == Some(id.as_str());
+            let delete_id = id.clone();
+            actions.push(
+                action(
+                    "delete",
+                    match (
+                        armed,
+                        meeting
+                            .export_path
+                            .as_ref()
+                            .is_some_and(|path| path.exists()),
+                    ) {
+                        (false, _) => "Delete",
+                        (true, true) => "Trash Recording & Markdown",
+                        (true, false) => "Trash Recording",
+                    },
+                )
+                .when(armed, |button| {
+                    button
+                        .border_color(rgb(DANGER_BORDER))
+                        .bg(rgb(DANGER_SURFACE))
+                        .text_color(rgb(NEGATIVE))
+                })
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.trash_meeting(delete_id.clone(), cx)),
+                )
+                .into_any_element(),
+            );
+            if armed {
+                actions.push(
+                    action("cancel-delete", "Cancel")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.meeting_delete_armed = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+
+        let title_row: AnyElement = match &self.meeting_rename {
+            Some((rename_id, input)) if rename_id == &id => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().min_w(px(0.0)).child(input.entity.clone()))
+                .child(
+                    action("save-title", "Save")
+                        .on_click(cx.listener(|this, _, _, cx| this.finish_meeting_rename(cx))),
+                )
+                .child(
+                    action("cancel-title", "Cancel").on_click(cx.listener(|this, _, _, cx| {
+                        this.meeting_rename = None;
+                        cx.notify();
+                    })),
+                )
+                .into_any_element(),
+            _ => div()
+                .text_size(px(20.0))
+                .line_height(px(26.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title)
+                .into_any_element(),
+        };
+
+        let mut meta = vec![
+            meeting::day_label(meeting.created_at_ms, now_ms()),
+            meeting::clock(meeting.created_at_ms),
+            meeting::format_duration(meeting_duration(&meeting)),
+        ];
+        meta.extend(meeting.app.clone());
+
+        let errors = [
+            self.meeting_action_error.clone(),
+            meeting.error.clone(),
+            meeting
+                .export_error
+                .clone()
+                .map(|error| format!("Markdown not saved: {error}")),
+            meeting
+                .notes_error
+                .clone()
+                .filter(|_| !notes_running)
+                .map(|error| format!("Notes: {error}")),
+            meeting
+                .live_transcription_error
+                .clone()
+                .filter(|_| active)
+                .map(|error| format!("Live draft unavailable: {error}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+        let notes = meeting.notes.clone().map(render_meeting_notes).or_else(|| {
+            notes_running.then(|| {
+                div()
+                    .pb_5()
+                    .text_size(px(12.0))
+                    .text_color(rgb(MUTED))
+                    .child("Writing notes with Apple Intelligence...")
+            })
         });
-        let notes_error = meeting
-            .notes_error
-            .clone()
-            .filter(|_| !notes_running)
-            .map(|error| format!("Notes: {error}"));
-        let notes = meeting.notes.clone().map(render_meeting_notes);
 
         let transcript = match &self.meeting_transcript {
             MeetingTranscript::Empty => empty_message("No transcript selected."),
@@ -6481,79 +6927,55 @@ impl AppWindow {
                         "Building the final transcript..."
                     }
                     MeetingStatus::Recording => "Listening for speech...",
-                    MeetingStatus::Transcribing => {
-                        "The live draft is empty. Building the final transcript..."
-                    }
-                    MeetingStatus::Complete => "The final transcript is empty.",
+                    MeetingStatus::Transcribing => "Building the final transcript...",
+                    MeetingStatus::Complete => "No speech was transcribed.",
                     MeetingStatus::Interrupted | MeetingStatus::Failed => {
                         "No recoverable transcript is available."
                     }
                 })
             }
             MeetingTranscript::Loaded(lines) => div()
-                .children(lines.iter().enumerate().map(|(index, line)| {
-                    div()
-                        .id(("transcript-line", index))
-                        .flex()
-                        .flex_col()
-                        .when_some(line.pause_before_ms, |row, pause| {
-                            row.child(
-                                div()
-                                    .py_3()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(FAINT))
-                                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE)))
-                                    .child(format!("{} pause", meeting::format_duration(pause)))
-                                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE))),
-                            )
-                        })
-                        .child(
-                            div()
-                                .py_4()
-                                .flex()
-                                .items_start()
-                                .gap_4()
-                                .border_b_1()
-                                .border_color(rgb(LINE))
-                                .child(
-                                    div()
-                                        .w(px(116.0))
-                                        .flex_none()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(MUTED))
-                                        .child(line.source.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(13.0))
-                                        .line_height(px(20.0))
-                                        .text_color(rgb(TEXT_SOFT))
-                                        .child(line.text.clone()),
-                                ),
-                        )
-                }))
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .children(
+                    lines
+                        .iter()
+                        .enumerate()
+                        .map(|(index, line)| transcript_turn(index, line)),
+                )
+                .when(recording, |turns| {
+                    turns.child(
+                        div()
+                            .pt_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(11.0))
+                            .text_color(rgb(FAINT))
+                            .child(div().size(px(6.0)).rounded_full().bg(rgb(NEGATIVE)))
+                            .child("Listening..."),
+                    )
+                })
                 .into_any_element(),
             MeetingTranscript::Unavailable(error) => {
                 error_message("Transcript unavailable.", error.clone())
             }
         };
-        let transcript_state = match meeting.status {
-            MeetingStatus::Starting => "STARTING CAPTURE",
-            MeetingStatus::Recording if meeting.live_transcription_error.is_some() => {
-                "LIVE DRAFT UNAVAILABLE"
+        let transcript_label = match meeting.status {
+            MeetingStatus::Starting | MeetingStatus::Recording if !self.meeting_stop_pending => {
+                "LIVE TRANSCRIPT"
             }
-            MeetingStatus::Recording if self.meeting_stop_pending => "FINALIZING",
-            MeetingStatus::Recording => "LIVE DRAFT",
-            MeetingStatus::Transcribing => "FINALIZING",
-            MeetingStatus::Complete => "FINAL TRANSCRIPT",
+            MeetingStatus::Starting | MeetingStatus::Recording | MeetingStatus::Transcribing => {
+                "DRAFT TRANSCRIPT"
+            }
+            MeetingStatus::Complete => "TRANSCRIPT",
             MeetingStatus::Interrupted | MeetingStatus::Failed => "RECOVERED DRAFT",
         };
 
         div()
+            .debug_selector(|| "meeting-detail".into())
             .flex_1()
             .min_w(px(0.0))
             .h_full()
@@ -6563,103 +6985,85 @@ impl AppWindow {
             .child(
                 div()
                     .px_6()
-                    .py_5()
+                    .pt_5()
+                    .pb_4()
                     .flex()
-                    .items_start()
-                    .justify_between()
+                    .flex_col()
+                    .gap_2()
                     .border_b_1()
                     .border_color(rgb(LINE))
+                    .child(title_row)
                     .child(
                         div()
                             .flex()
-                            .flex_col()
+                            .items_center()
                             .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(20.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(meeting::display_title(&meeting)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap_4()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(
-                                        if self.meeting_stop_pending
-                                            && meeting.status == MeetingStatus::Recording
-                                        {
-                                            "Finalizing"
-                                        } else {
-                                            meeting_status(meeting.status)
-                                        },
-                                    )
-                                    .child(meeting::format_duration(meeting_duration(&meeting))),
-                            )
+                            .text_size(px(11.0))
+                            .text_color(rgb(MUTED))
                             .when_some(
-                                meeting
-                                    .error
-                                    .clone()
-                                    .or_else(|| {
-                                        meeting
-                                            .export_error
-                                            .clone()
-                                            .map(|error| format!("Markdown not saved: {error}"))
-                                    })
-                                    .or(notes_error),
-                                |header, error| {
-                                    header.child(
-                                        div()
-                                            .max_w(px(620.0))
-                                            .text_size(px(11.0))
-                                            .line_height(px(17.0))
-                                            .text_color(rgb(NEGATIVE))
-                                            .child(error),
-                                    )
-                                },
+                                meeting_status_chip(
+                                    meeting.status,
+                                    self.meeting_stop_pending,
+                                    true,
+                                ),
+                                |row, chip| row.child(chip),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_x_hidden()
+                                    .truncate()
+                                    .child(meta.join(" · ")),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .gap_2()
-                            .when_some(notes_action, |actions, action| actions.child(action))
-                            .child(reveal),
-                    ),
+                    .when(!actions.is_empty(), |header| {
+                        header.child(
+                            div()
+                                .debug_selector(|| "meeting-actions".into())
+                                .pt_2()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .children(actions),
+                        )
+                    }),
             )
             .child(
                 div()
                     .id("meeting-transcript")
                     .flex_1()
+                    .flex()
+                    .flex_col()
                     .overflow_y_scroll()
                     .track_scroll(&self.meeting_transcript_scroll)
                     .px_6()
+                    .pt_5()
                     .pb_6()
+                    .children(errors.into_iter().map(|error| {
+                        div()
+                            .mb_4()
+                            .px_3()
+                            .py_2()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(rgb(DANGER_BORDER))
+                            .bg(rgb(DANGER_SURFACE))
+                            .text_size(px(11.0))
+                            .line_height(px(17.0))
+                            .text_color(rgb(NEGATIVE))
+                            .child(error)
+                    }))
                     .when_some(notes, |content, notes| content.child(notes))
                     .child(
                         div()
-                            .h(px(42.0))
+                            .pb_3()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .text_size(px(10.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(MUTED))
-                            .when(
-                                meeting.status == MeetingStatus::Recording
-                                    && !self.meeting_stop_pending,
-                                |label| {
-                                    label
-                                        .child(div().size(px(6.0)).rounded_full().bg(rgb(NEGATIVE)))
-                                },
-                            )
-                            .child(transcript_state)
-                            .when_some(meeting.live_transcription_error.clone(), |label, error| {
-                                label.child(
-                                    div().text_color(rgb(NEGATIVE)).child(format!("  {error}")),
-                                )
+                            .child(compact_section_label(transcript_label).px_0())
+                            .when(recording, |label| {
+                                label.child(div().size(px(6.0)).rounded_full().bg(rgb(NEGATIVE)))
                             }),
                     )
                     .child(transcript),
@@ -8728,17 +9132,6 @@ fn command_scope(scope: &CommandScope) -> String {
     }
 }
 
-fn meeting_status(status: MeetingStatus) -> &'static str {
-    match status {
-        MeetingStatus::Starting => "Starting",
-        MeetingStatus::Recording => "Recording",
-        MeetingStatus::Transcribing => "Finalizing",
-        MeetingStatus::Complete => "Complete",
-        MeetingStatus::Interrupted => "Interrupted",
-        MeetingStatus::Failed => "Failed",
-    }
-}
-
 fn pane_list_card(
     id: &'static str,
     empty: Option<&'static str>,
@@ -8804,57 +9197,420 @@ fn meeting_action_button(id: &'static str, label: &'static str) -> gpui::Statefu
 }
 
 fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
-    let section = |label: &'static str, items: Vec<String>| {
+    let section = |label: &'static str, items: Vec<Div>| {
         div()
             .flex()
             .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .h(px(28.0))
-                    .flex()
-                    .items_end()
-                    .text_size(px(10.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(MUTED))
-                    .child(label),
-            )
-            .children(items.into_iter().map(|item| {
-                div()
-                    .flex()
-                    .gap_2()
-                    .text_size(px(13.0))
-                    .line_height(px(20.0))
-                    .text_color(rgb(TEXT_SOFT))
-                    .child(div().flex_none().text_color(rgb(FAINT)).child("•"))
-                    .child(div().flex_1().min_w(px(0.0)).child(item))
-            }))
+            .gap(px(6.0))
+            .child(compact_section_label(label).px_0().pb_1())
+            .children(items)
+    };
+    let bullet = |marker: Div, text: String| {
+        div()
+            .flex()
+            .items_start()
+            .gap_2()
+            .text_size(px(13.0))
+            .line_height(px(20.0))
+            .text_color(rgb(TEXT_SOFT))
+            .child(marker)
+            .child(div().flex_1().min_w(px(0.0)).child(text))
+    };
+    let dot = || {
+        div()
+            .flex_none()
+            .w(px(12.0))
+            .pt(px(8.0))
+            .flex()
+            .justify_center()
+            .child(div().size(px(4.0)).rounded_full().bg(rgb(FAINT)))
+    };
+    let checkbox = || {
+        div().flex_none().w(px(12.0)).pt(px(4.0)).child(
+            div()
+                .size(px(11.0))
+                .rounded(px(3.0))
+                .border_1()
+                .border_color(rgb(MUTED)),
+        )
     };
     let actions = notes
         .action_items
         .iter()
-        .map(|item| match &item.owner {
-            Some(owner) => format!("{} — {owner}", item.task),
-            None => item.task.clone(),
+        .map(|item| {
+            bullet(checkbox(), item.task.clone()).when_some(item.owner.clone(), |row, owner| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .mt(px(1.0))
+                        .h(px(18.0))
+                        .px(px(6.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.0))
+                        .bg(rgb(CANVAS))
+                        .border_1()
+                        .border_color(rgb(LINE))
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .child(owner),
+                )
+            })
         })
         .collect::<Vec<_>>();
     div()
-        .pt_2()
-        .pb_4()
+        .mb_5()
+        .pb_5()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_5()
         .border_b_1()
         .border_color(rgb(LINE))
         .when(!notes.summary.is_empty(), |block| {
-            block.child(section("SUMMARY", notes.summary.clone()))
+            block.child(section(
+                "SUMMARY",
+                notes
+                    .summary
+                    .iter()
+                    .map(|point| bullet(dot(), point.clone()))
+                    .collect(),
+            ))
         })
         .when(!actions.is_empty(), |block| {
             block.child(section("ACTION ITEMS", actions))
         })
         .when(!notes.decisions.is_empty(), |block| {
-            block.child(section("DECISIONS", notes.decisions.clone()))
+            block.child(section(
+                "DECISIONS",
+                notes
+                    .decisions
+                    .iter()
+                    .map(|decision| bullet(dot(), decision.clone()))
+                    .collect(),
+            ))
         })
+        .when(notes.chunks < notes.total_chunks, |block| {
+            block.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(FAINT))
+                    .child(format!(
+                        "Long meeting: notes cover {} of {} sections.",
+                        notes.chunks, notes.total_chunks
+                    )),
+            )
+        })
+}
+
+/// A compact status chip; `Ready` appears only in the detail header, so the
+/// list stays quiet for finished meetings.
+fn meeting_status_chip(status: MeetingStatus, stop_pending: bool, show_ready: bool) -> Option<Div> {
+    let (label, color, surface, border) = match status {
+        MeetingStatus::Recording if stop_pending => {
+            ("Transcribing", ACCENT_SOFT, ACCENT_SURFACE, 0x2c3560)
+        }
+        MeetingStatus::Starting | MeetingStatus::Recording => {
+            ("Recording", NEGATIVE, DANGER_SURFACE, DANGER_BORDER)
+        }
+        MeetingStatus::Transcribing => ("Transcribing", ACCENT_SOFT, ACCENT_SURFACE, 0x2c3560),
+        MeetingStatus::Complete if show_ready => ("Ready", POSITIVE, POSITIVE_SURFACE, 0x24452f),
+        MeetingStatus::Complete => return None,
+        MeetingStatus::Interrupted => ("Interrupted", MUTED, CANVAS, LINE),
+        MeetingStatus::Failed => ("Failed", NEGATIVE, DANGER_SURFACE, DANGER_BORDER),
+    };
+    let live =
+        matches!(status, MeetingStatus::Starting | MeetingStatus::Recording) && !stop_pending;
+    Some(
+        div()
+            .flex_none()
+            .h(px(18.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(rgb(border))
+            .bg(rgb(surface))
+            .text_size(px(10.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(color))
+            .when(live, |chip| {
+                chip.child(div().size(px(5.0)).rounded_full().bg(rgb(NEGATIVE)))
+            })
+            .child(label),
+    )
+}
+
+/// `42 min`, `1 h 05 min`, or `< 1 min`.
+fn meeting_length(milliseconds: u64) -> String {
+    let minutes = milliseconds / 60_000;
+    match minutes {
+        0 => "< 1 min".into(),
+        1..=59 => format!("{minutes} min"),
+        _ => format!("{} h {:02} min", minutes / 60, minutes % 60),
+    }
+}
+
+fn transcript_lines(turns: &[TranscriptEntry]) -> Vec<TranscriptLine> {
+    turns
+        .iter()
+        .scan(None, |previous_end: &mut Option<u64>, turn| {
+            let pause_before_ms = previous_end
+                .map(|end| turn.start_ms.saturating_sub(end))
+                .filter(|pause| *pause >= 30_000);
+            *previous_end = Some(previous_end.map_or(turn.end_ms, |end| end.max(turn.end_ms)));
+            Some(TranscriptLine {
+                source: turn.source,
+                clock: meeting::format_duration(turn.start_ms),
+                text: turn.text.clone(),
+                pause_before_ms,
+            })
+        })
+        .collect()
+}
+
+/// One conversational turn: the other side on the left, the user on the
+/// right in the accent color.
+fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement {
+    let mine = line.source == MeetingSource::Microphone;
+    div()
+        .id(("transcript-line", index))
+        .flex()
+        .flex_col()
+        .when_some(line.pause_before_ms, |row, pause| {
+            row.child(
+                div()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_size(px(10.0))
+                    .text_color(rgb(FAINT))
+                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE)))
+                    .child(format!("{} pause", meeting_length(pause)))
+                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE))),
+            )
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .when(mine, |turn| turn.items_end())
+                .when(!mine, |turn| turn.items_start())
+                .child(
+                    div()
+                        .px_1()
+                        .flex()
+                        .gap_2()
+                        .text_size(px(10.0))
+                        .text_color(rgb(FAINT))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(if mine { ACCENT_SOFT } else { MUTED }))
+                                .child(line.source.label()),
+                        )
+                        .child(line.clock.clone()),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || format!("meeting-bubble-{index}"))
+                        .max_w(relative(0.82))
+                        .px_3()
+                        .py_2()
+                        .rounded(px(10.0))
+                        .border_1()
+                        .when(mine, |bubble| {
+                            bubble
+                                .border_color(rgb(0x2c3560))
+                                .bg(rgb(ACCENT_SURFACE))
+                                .text_color(rgb(TEXT))
+                        })
+                        .when(!mine, |bubble| {
+                            bubble
+                                .border_color(rgb(LINE))
+                                .bg(rgb(CANVAS))
+                                .text_color(rgb(TEXT_SOFT))
+                        })
+                        .text_size(px(13.0))
+                        .line_height(px(20.0))
+                        .child(line.text.clone()),
+                ),
+        )
+        .into_any_element()
+}
+
+fn reveal_meeting(id: &str, export_path: Option<&std::path::Path>) {
+    if let Some(path) = export_path {
+        meeting::reveal(path);
+        return;
+    }
+    match meeting::root() {
+        Ok(root) => match ProcessCommand::new("/usr/bin/open")
+            .arg(root.join(id))
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => tracing::error!(%status, "could not reveal meeting files"),
+            Err(error) => tracing::error!(%error, "could not reveal meeting files"),
+        },
+        Err(error) => tracing::error!(%error, "could not locate meeting files"),
+    }
+}
+
+/// Deterministic meetings for the Meetings preview: one recording, one with
+/// notes, one without, and one that failed.
+fn preview_meetings(empty: bool) -> (Vec<MeetingManifest>, HashMap<String, Vec<TranscriptEntry>>) {
+    if empty {
+        return (Vec::new(), HashMap::new());
+    }
+    let now = now_ms();
+    let minute = 60_000;
+    let manifest =
+        |id: &str, title: &str, status, started: u64, duration: u64, app: Option<&str>| {
+            MeetingManifest {
+                schema_version: 1,
+                id: id.into(),
+                title: title.into(),
+                status,
+                created_at_ms: started,
+                ended_at_ms: (status != MeetingStatus::Recording).then_some(started + duration),
+                duration_ms: (status != MeetingStatus::Recording).then_some(duration),
+                system: Default::default(),
+                microphone: Default::default(),
+                live_dropped_packets: 0,
+                live_transcription_error: None,
+                error: None,
+                app: app.map(Into::into),
+                export_path: None,
+                export_error: None,
+                echo_suppressed_utterances: 0,
+                notes: None,
+                notes_error: None,
+            }
+        };
+    let recording_start = now - 7 * minute - 12_000;
+    let mut live = manifest(
+        "preview-live",
+        &meeting::default_title(Some("Zoom"), recording_start),
+        MeetingStatus::Recording,
+        recording_start,
+        0,
+        Some("Zoom"),
+    );
+    live.created_at_ms = recording_start;
+    let synced_start = now - 3 * 60 * minute;
+    let mut synced = manifest(
+        "preview-notes",
+        &meeting::default_title(Some("Zoom"), synced_start),
+        MeetingStatus::Complete,
+        synced_start,
+        38 * minute + 20_000,
+        Some("Zoom"),
+    );
+    synced.notes = Some(meeting::MeetingNotes {
+        title: "Arcade launch plan".into(),
+        summary: vec![
+            "One login for every Anomaly Arcade game, with friends and quick joins.".into(),
+            "Aim for twenty to thirty games over the next couple of months.".into(),
+            "The build screen needs a proposal before more polish.".into(),
+        ],
+        action_items: vec![
+            meeting::ActionItem {
+                task: "Write the build screen proposal".into(),
+                owner: Some("You".into()),
+            },
+            meeting::ActionItem {
+                task: "Finish the StarCraft prototype".into(),
+                owner: Some("Ryan".into()),
+            },
+            meeting::ActionItem {
+                task: "Try a WebGPU prototype of the gravity well".into(),
+                owner: None,
+            },
+        ],
+        decisions: vec!["Ship the shared login before adding more games.".into()],
+        generated_at_ms: synced_start + 39 * minute,
+        elapsed_ms: 12_000,
+        chunks: 1,
+        total_chunks: 1,
+    });
+    let design_start = now - 27 * 60 * minute;
+    let design = manifest(
+        "preview-design",
+        "Design review",
+        MeetingStatus::Complete,
+        design_start,
+        24 * minute,
+        Some("FaceTime"),
+    );
+    let failed_start = now - 29 * 60 * minute;
+    let mut failed = manifest(
+        "preview-failed",
+        &meeting::default_title(None, failed_start),
+        MeetingStatus::Failed,
+        failed_start,
+        2 * minute,
+        None,
+    );
+    failed.error = Some("ScreenCaptureKit stopped the capture.".into());
+
+    let turn = |source, seconds: u64, text: &str| TranscriptEntry {
+        source,
+        start_ms: seconds * 1_000,
+        end_ms: seconds * 1_000 + 2_500,
+        text: text.into(),
+    };
+    use MeetingSource::{Microphone as You, System as Them};
+    let conversation = vec![
+        turn(
+            Them,
+            1,
+            "Basically, I want Anomaly Arcade to be one login where you add friends and jump into any game.",
+        ),
+        turn(Them, 4, "I need to finish my StarCraft game, too."),
+        turn(You, 9, "Oh nice. How far along is it?"),
+        turn(
+            Them,
+            13,
+            "Close. I feel like over a couple of months we could make twenty to thirty games.",
+        ),
+        turn(You, 20, "That's basically a new version of Steam."),
+        turn(
+            Them,
+            24,
+            "If we're seeing Roblox, the idea should be to become Roblox.",
+        ),
+        turn(
+            You,
+            31,
+            "Apple has a new thing where you hold two phones together and there's this pulse and gravity well.",
+        ),
+        turn(
+            You,
+            34,
+            "Could be a nice mini gravity well for the transitions.",
+        ),
+        turn(Them, 40, "Prototype it in WebGPU, whatever's faster."),
+        turn(
+            You,
+            95,
+            "The build screen looks rough, by the way. We need a proposal for it.",
+        ),
+        turn(
+            Them,
+            101,
+            "Agreed. Write it up and I'll review it tomorrow.",
+        ),
+    ];
+    let transcripts = HashMap::from([
+        ("preview-live".to_string(), conversation[..7].to_vec()),
+        ("preview-notes".to_string(), conversation.clone()),
+        ("preview-design".to_string(), conversation[2..6].to_vec()),
+    ]);
+    (vec![live, synced, design, failed], transcripts)
 }
 
 fn meeting_progress_action(label: &'static str) -> AnyElement {
@@ -9052,10 +9808,126 @@ mod tests {
                 update_available: false,
                 meetings_enabled: false,
                 screen_recording_missing: false,
+                meeting_recording: false,
+                confirm_meeting_delete: false,
+                meetings_empty: false,
             }),
             window,
             cx,
         )
+    }
+
+    fn meetings_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
+        AppWindow::new(
+            PathBuf::from("unused-preview-events.ndjson"),
+            crate::config::voice_control(),
+            sync_channel(1).0,
+            crate::dictation_indicator::channel().0,
+            None,
+            None,
+            Some(AppWindowPreview {
+                pane: DeveloperPane::Meetings,
+                transcription_picker: None,
+                onboarding: false,
+                confirm_model_deletion: false,
+                collapse_mode_processing: false,
+                open_transformation_picker: false,
+                select_global_mode: false,
+                voice_action_enabled: false,
+                opencode_unavailable: false,
+                permissions_missing: false,
+                model_missing: false,
+                command_model_missing: false,
+                open_history_retention: false,
+                confirm_release_microphone: false,
+                update_available: false,
+                meetings_enabled: true,
+                screen_recording_missing: false,
+                meeting_recording: false,
+                confirm_meeting_delete: false,
+                meetings_empty: false,
+            }),
+            window,
+            cx,
+        )
+    }
+
+    #[gpui::test]
+    fn meeting_turns_alternate_sides_inside_the_detail(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(meetings_fixture);
+        for width in [MINIMUM_WIDTH, WINDOW_WIDTH, 1400.0] {
+            cx.simulate_resize(size(px(width), px(MINIMUM_HEIGHT)));
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let detail = cx.debug_bounds("meeting-detail").expect("detail rendered");
+            let them = cx.debug_bounds("meeting-bubble-0").expect("first turn");
+            let you = cx.debug_bounds("meeting-bubble-1").expect("second turn");
+            let actions = cx.debug_bounds("meeting-actions").expect("actions");
+            for bounds in [them, you, actions] {
+                assert!(
+                    bounds.left() >= detail.left() && bounds.right() <= detail.right(),
+                    "{width}: {bounds:?} outside {detail:?}"
+                );
+            }
+            assert!(them.left() < you.left(), "{width}: Them sits left of You");
+            assert!(you.right() > them.right(), "{width}: You sits right");
+            assert!(
+                detail.right() - you.right() <= px(25.0),
+                "{width}: You is right-aligned"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn meeting_search_delete_and_rename_work_on_the_selected_meeting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(meetings_fixture);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.selected_meeting.as_deref(), Some("preview-notes"));
+                view.meeting_search
+                    .entity
+                    .update(cx, |input, cx| input.set_text("gravity", cx));
+                view.refresh_meeting_search(cx);
+                let visible = view
+                    .visible_meetings(cx)
+                    .into_iter()
+                    .map(|meeting| meeting.id.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(visible, ["preview-live", "preview-notes"]);
+                view.meeting_search
+                    .entity
+                    .update(cx, |input, cx| input.set_text("", cx));
+
+                view.start_meeting_rename(
+                    "preview-design".into(),
+                    "Design review".into(),
+                    window,
+                    cx,
+                );
+                let (_, input) = view.meeting_rename.as_ref().unwrap();
+                input
+                    .entity
+                    .update(cx, |input, cx| input.set_text("  Motion   review ", cx));
+                view.finish_meeting_rename(cx);
+                assert!(view.meeting_rename.is_none());
+                let design = view
+                    .meetings
+                    .iter()
+                    .find(|m| m.id == "preview-design")
+                    .unwrap();
+                assert_eq!(meeting::display_title(design), "Motion review");
+
+                view.trash_meeting("preview-notes".into(), cx);
+                assert_eq!(view.meeting_delete_armed.as_deref(), Some("preview-notes"));
+                assert_eq!(view.meetings.len(), 4, "the first click only asks");
+                view.trash_meeting("preview-notes".into(), cx);
+                assert_eq!(view.meetings.len(), 3);
+                assert!(view.meetings.iter().all(|m| m.id != "preview-notes"));
+                assert_eq!(view.selected_meeting.as_deref(), Some("preview-live"));
+            });
+        });
     }
 
     #[gpui::test]

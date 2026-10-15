@@ -227,6 +227,15 @@ enum Command {
         /// Show missing Screen & System Audio Recording permission for Meetings.
         #[arg(long)]
         screen_recording_missing: bool,
+        /// For `meetings`: select the meeting that is still recording.
+        #[arg(long)]
+        meeting_recording: bool,
+        /// For `meetings`: ask to delete the selected meeting.
+        #[arg(long)]
+        confirm_meeting_delete: bool,
+        /// For `meetings`: show the pane before any meeting was recorded.
+        #[arg(long)]
+        meetings_empty: bool,
         /// For `meeting-offer`: show the call-ended or transcript-ready capsule.
         #[arg(long, value_enum, default_value = "offer")]
         meeting_panel: MeetingPanelPreview,
@@ -482,6 +491,9 @@ fn main() -> Result<()> {
             update_available,
             meetings_enabled,
             screen_recording_missing,
+            meeting_recording,
+            confirm_meeting_delete,
+            meetings_empty,
             meeting_panel,
         } => {
             if matches!(target, AppPreviewTarget::MeetingOffer) {
@@ -549,6 +561,9 @@ fn main() -> Result<()> {
                     update_available,
                     meetings_enabled,
                     screen_recording_missing,
+                    meeting_recording,
+                    confirm_meeting_delete,
+                    meetings_empty,
                 }),
             )
         }

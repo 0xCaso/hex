@@ -279,7 +279,6 @@ pub(super) fn transcribe(
         if Instant::now() >= next_updates[stream] {
             write_updates(
                 &mut model,
-                stream,
                 packet.source,
                 source_offset(source_origins, stream),
                 &time_adjustments[stream],
@@ -295,7 +294,6 @@ pub(super) fn transcribe(
         let stream = source_index(source);
         if let Err(error) = write_updates(
             &mut model,
-            stream,
             source,
             source_offset(source_origins, stream),
             &time_adjustments[stream],
@@ -447,7 +445,6 @@ fn add_silence(
 
 fn write_updates(
     model: &mut Moonshine,
-    stream: usize,
     source: MeetingSource,
     source_offset_us: u64,
     time_adjustments: &[(u64, u64)],
@@ -455,6 +452,7 @@ fn write_updates(
     writer: &mut BufWriter<File>,
     finish: bool,
 ) -> Result<()> {
+    let stream = source_index(source);
     let updates = if finish {
         model.finish_stream(stream)?
     } else {
