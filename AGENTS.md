@@ -174,6 +174,12 @@ substitute for source inspection or a second roadmap.
 - `meeting_notes`: post-publication map/reduce meeting notes (title, summary,
   action items, decisions) with bounded chunks and deadline, manifest storage,
   and marker-delimited in-place Markdown updates.
+- `meeting_query`: read-only meeting queries for agents (`meeting::query`):
+  lock-aware listing, in-memory BM25 full-text search with stemming and fuzzy
+  matching, transcript paging, stored notes, and Markdown rendering. It never
+  writes to the meetings folder.
+- `meeting_mcp`: the thin `rmcp` stdio adapter behind `hex mcp`, exposing
+  `meeting_query` as read-only tools and `hex-meeting://` resources.
 - `apple_intelligence`: the weak-linked FoundationModels Swift bridge:
   availability, context size, and guided-generation notes at utility priority.
 - `microphone_activity`: permission-light CoreAudio process input observation.
@@ -355,6 +361,11 @@ CoreAudio formats, AppleScript details, or event serialization.
   total deadline. Failures record `notes_error` and leave the Markdown
   untouched. Notes never rename the file and rewrite only the heading HEX wrote
   and the `<!-- hex:notes -->` block.
+- `hex mcp` is read-only and available in release builds regardless of the
+  Meetings opt-in. It dispatches before process logging, the instance lock,
+  GUI, or permission setup; never writes, recovers, or indexes on disk inside
+  the meetings folder; runs no model; and makes no network request. Stdout
+  carries only MCP messages.
 - Live meeting drafts remain available if final transcription fails. Final
   publication is atomic; adjacent same-source entries within three seconds form
   one displayed turn labeled `You` or `Them`. Speaker echo never shows as `You`:
@@ -465,6 +476,7 @@ cargo run -- listen
 cargo run -- status
 cargo run -- meeting record --title "Design sync"
 cargo run -- meeting probe
+cargo run -- mcp --meetings-dir tests/fixtures/meetings
 cargo run -- meeting watch --preview
 cargo run -- app --preview-dictation
 cargo run -- preview onboarding

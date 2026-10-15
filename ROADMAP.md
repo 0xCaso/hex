@@ -225,6 +225,15 @@ noise suppression to the transcribed track, runs a second voice processor
 beside the call app's, and drops ScreenCaptureKit's shared capture clock. Revisit
 only if signal-level suppression proves insufficient, with a per-device opt-in.
 
+`hex mcp` serves meetings to agents read-only over stdio (full-text BM25
+with stemming and fuzzy matching, transcripts, stored notes). Next: on-device
+semantic search only when full-text misses real paraphrased queries
+(NaturalLanguage embeddings through a Swift bridge, cached under
+`~/Library/Caches/voice-control/meeting-index`), EventKit attendees in
+`list_meetings`, and a one-shot Granola CSV import
+([granola-import.md](docs/plans/granola-import.md)). Keep it a CLI subcommand;
+the npm-package guidance above applies only to a developer-control wrapper.
+
 Give durable transcript entries stable identities so live-to-final reconciliation,
 incremental UI refresh, and meeting-delta paste can advance without rereading
 broad history. Keep `You` and `Them` source labels and the recoverable live

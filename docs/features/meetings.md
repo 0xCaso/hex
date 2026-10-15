@@ -18,6 +18,7 @@ Settings > MEETINGS > Meetings (beta)               // meetings.opt-in; off by d
 └── Off -> Controller idles; no microphone-activity inspection, pane, or shortcut
 
 Debug builds -> Always available (DEVELOPER_FEATURES_ENABLED)
+Agents -> hex mcp (read-only MCP server; works whether or not Meetings is on)
 ```
 
 Requires the selected local dictation model, Microphone, and Screen & System
@@ -280,6 +281,83 @@ notes without saving; `hex meeting summarize <id>` writes them like Regenerate.
 Observed on the Mac Studio (macOS 27.0.1, context 8,192 tokens) with a synthetic
 19.5-minute, 1,963-word transcript: one call, 11–14 s; with `--chunk-chars 4000`,
 3 chunks + 1–2 reduces, ~42 s. Small chunks label more owners `You` wrongly.
+
+### Agent Access (MCP)
+
+```ts
+hex mcp [--meetings-dir <path>]                     // meetings.mcp; release builds
+├── MCP over stdio; independent of the Meetings opt-in (read-only)
+├── Dispatches before process logging, the instance lock, GUI, and permissions
+│   └── Safe beside the running app; logs only to stderr (HEX_MCP_LOG)
+├── Default folder: Application Support/voice-control/meetings
+│   └── --meetings-dir -> any mirrored copy (rsync of that folder)
+└── Tools (all readOnlyHint)
+    ├── list_meetings(since?, until?, query?, limit?, include_in_progress?)
+    │   └── id · title (generated when present) · ISO start · mm:ss · status ·
+    │       transcript kind · participants "You, Them (<app>)" · notes yes/no
+    ├── search_transcripts(query, since?, until?, meeting_id?, limit?, fuzzy?)
+    │   └── per-meeting counts + ranked passages: id, title, speaker,
+    │       mm:ss @ ISO time, snippet with **matches**, before/after lines
+    ├── get_transcript(meeting_id, start?, end?, speaker?, max_chars?, cursor?)
+    │   └── merged You/Them turns "[mm:ss · HH:MM:SS] Them: …" + next_cursor
+    └── get_meeting_notes(meeting_id)
+        └── stored summary / [owner] action items / decisions, or an explicit
+            "No Apple Intelligence notes are stored" + get_transcript hint
+Resources: hex-meeting://<id> -> Markdown (metadata, notes, transcript)
+```
+
+Read-only and private: the server opens files for reading only, never writes,
+repairs, or recovers anything in the meetings folder (unlike `meeting::list`,
+which persists recovered statuses), creates no index or cache on disk, runs no
+model, and makes no network request. It never reads the exported Markdown in
+`~/Documents`, so SSH sessions need no Documents access. Transcripts leave the
+Mac only through whatever transport the MCP client uses (stdio, or SSH).
+
+Concurrency: a recorder holds `active.lock`; the server probes it with a
+read-only, non-blocking shared `flock` and releases it immediately. Held ->
+`recording (in progress)` with the rolling transcript plus the live draft
+(`meeting_live::live_view`, echo-filtered), labeled provisional. Not held ->
+the app's recovery rules apply without writing: published `transcript.ndjson`
+is final, an unfinished draft is `interrupted`. Stale lock files from finished
+recordings read as not held. A mirror cannot see the Pro's lock, so a meeting
+still recording there appears `interrupted` with its draft so far. Unreadable
+manifests are listed as skipped folders; unreadable NDJSON lines are skipped and
+counted; an unterminated last line is treated as a write in progress.
+
+Search: in-memory, rebuilt per meeting when its files' sizes or times change.
+Passages are same-speaker runs of up to 60 words (3 s turn gap) plus one per
+stored notes block. Text is NFKD-folded (case and diacritics), tokenized, and
+lightly stemmed (`scheduled`/`scheduling` -> `schedul`). BM25 (k1 1.2, b 0.75)
+over expanded terms: exact 1.0, prefix 0.8, edit distance 1 (2 from 8 letters)
+0.7, Soundex 0.45 for 3-5 letter words (`Dacks` -> `Dax`); partial-term
+coverage and adjacent-term bonuses. `"Quoted words"` are required exact
+(stemmed) phrases; `fuzzy: false` keeps only exact stems.
+
+Semantic search is not shipped. On-device candidates are Apple NaturalLanguage
+`NLContextualEmbedding` (asset download, macOS 14+) or the older static
+`NLEmbedding` sentence model, through a Swift bridge like `apple_speech`, with a
+cache under `~/Library/Caches/voice-control/meeting-index` keyed by meeting
+fingerprints. Full-text with stemming and fuzzy matching answered the real
+queries below; embeddings wait until a query fails for lack of paraphrase.
+
+Sources: [meeting_query.rs](../../src/meeting_query.rs) (`meeting::query`,
+queries and rendering) and [meeting_mcp.rs](../../src/meeting_mcp.rs) (`rmcp`
+3.5 adapter); `run_mcp` in [main.rs](../../src/main.rs). Checks (synthetic
+fixtures in `tests/fixtures/meetings`): `meeting::query::tests::*` (listing and
+skipped folders, filters, misspelling tolerance and ranking, stemming, accents,
+required phrases, context, drafts, cursor paging, notes, held lock,
+`queries_never_write_to_the_meetings_folder`, time parsing) and
+`tests/meetings_mcp.rs` (initialize with protocol 2025-06-18, tools/list with
+schemas and read-only annotations, tools/call, resources/read, stdout carries
+only JSON-RPC, no Application Support state created).
+
+Observed (2026-10-15, Mac Studio, release build, read-only copy of the Pro's 8
+meetings without WAVs): first launch of a freshly signed binary 440 ms to
+`initialize` (Gatekeeper), then 8 ms; `list_meetings` 4-7 ms cold; searches
+0.5-1.2 ms; a 51-minute `get_transcript` 0.5 ms; `resources/read` 0.6 ms. Not
+yet exercised over `ssh pro` against the installed app, which predates `hex mcp`.
+
+Granola import: see [granola-import.md](../plans/granola-import.md).
 
 ## Gaps
 
