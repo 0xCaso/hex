@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::time::Instant;
@@ -856,6 +856,7 @@ fn run_inference_worker(
     };
     let mut speculative = SpeculativeTranscript::default();
     while let Ok(command) = commands.recv() {
+        let _busy = DictationInference::begin();
         let job = match command {
             InferenceCommand::Reload(selection) => {
                 if let Err(error) = transcriber.activate(&selection) {
@@ -1017,6 +1018,45 @@ pub(crate) fn prioritize_inference_thread() {
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn prioritize_inference_thread() {}
+
+static DICTATION_INFERENCE: AtomicUsize = AtomicUsize::new(0);
+
+struct DictationInference;
+
+impl DictationInference {
+    fn begin() -> Self {
+        DICTATION_INFERENCE.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for DictationInference {
+    fn drop(&mut self) {
+        DICTATION_INFERENCE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Whether dictation is capturing or running inference. Meeting
+/// transcription waits for this to clear before each chunk so it never
+/// competes with a dictation job for the model hardware.
+pub(crate) fn dictation_busy() -> bool {
+    DICTATION_INFERENCE.load(Ordering::Acquire) > 0
+        || crate::recording_environment::intentional_recording_active()
+}
+
+/// Runs the calling thread at utility QoS for background transcription.
+pub(crate) fn deprioritize_background_thread() {
+    const QOS_CLASS_UTILITY: u32 = 0x11;
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+    // SAFETY: This configures only the calling thread using the public macOS
+    // pthread QoS API. Relative priority zero is valid for this class.
+    let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) };
+    if status != 0 {
+        tracing::warn!(status, "could not lower background transcription QoS");
+    }
+}
 
 fn queue_error(error: TrySendError<impl Sized>) -> &'static str {
     match error {
@@ -1617,7 +1657,7 @@ mod tests {
 
         let mut seen = HashSet::new();
         let (text, pasted) = prepare_meeting_delta(&entries, &seen).unwrap();
-        assert_eq!(text, "You: First.\n\nComputer: Reply.\n\nYou: Second.");
+        assert_eq!(text, "You: First.\n\nThem: Reply.\n\nYou: Second.");
         seen.extend(pasted);
         assert!(prepare_meeting_delta(&entries, &seen).is_err());
 
@@ -1632,7 +1672,7 @@ mod tests {
         let (text, pasted) = prepare_meeting_delta(&appended, &seen).unwrap();
         assert_eq!(
             text,
-            "Computer: Late completion.\n\nYou: Third.\n\nComputer: Follow-up."
+            "Them: Late completion.\n\nYou: Third.\n\nThem: Follow-up."
         );
         seen.extend(pasted);
         assert!(prepare_meeting_delta(&appended, &seen).is_err());

@@ -1,5 +1,6 @@
 use super::*;
 use crate::events::TranscriptPhase;
+use hound::WavReader;
 
 #[test]
 fn decodes_float_and_aligned_24_bit_integer_samples() {
@@ -314,6 +315,10 @@ fn capture_failures_are_persisted_instead_of_looking_interrupted() {
         live_dropped_packets: 0,
         live_transcription_error: None,
         error: None,
+        app: None,
+        export_path: None,
+        export_error: None,
+        echo_suppressed_utterances: 0,
     };
     write_manifest(&directory, &manifest).unwrap();
 
@@ -458,4 +463,38 @@ fn live_transcription_replays_both_recorded_tracks() {
         );
     }
     fs::remove_dir_all(output).unwrap();
+}
+
+#[test]
+fn rolling_entries_replace_the_live_draft_for_the_time_they_cover() {
+    let entry = |source, start_ms, end_ms, text: &str| TranscriptEntry {
+        source,
+        start_ms,
+        end_ms,
+        text: text.into(),
+    };
+    let rolling = [
+        entry(MeetingSource::System, 0, 20_000, "Final system."),
+        entry(MeetingSource::Microphone, 1_000, 9_000, "Final mic."),
+    ];
+    let live = vec![
+        entry(MeetingSource::System, 5_000, 6_000, "draft system"),
+        entry(MeetingSource::Microphone, 8_000, 8_500, "draft overlap"),
+        entry(MeetingSource::Microphone, 9_500, 10_000, "draft mic tail"),
+        entry(MeetingSource::System, 21_000, 22_000, "draft system tail"),
+    ];
+    let merged = live::merge_rolling(&rolling, live.clone());
+    assert_eq!(
+        merged
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Final system.",
+            "Final mic.",
+            "draft mic tail",
+            "draft system tail"
+        ]
+    );
+    assert_eq!(live::merge_rolling(&[], live.clone()), live);
 }

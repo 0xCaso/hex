@@ -38,6 +38,8 @@ pub struct TranscriptReader {
     live_pending: Vec<u8>,
     live_events: HashMap<(MeetingSource, u64), Event>,
     final_entries: Option<Vec<TranscriptEntry>>,
+    rolling_modified: Option<std::time::SystemTime>,
+    rolling_entries: Vec<TranscriptEntry>,
 }
 
 impl TranscriptReader {
@@ -61,7 +63,25 @@ impl TranscriptReader {
         }
 
         self.read_live_tail(&directory.join("transcript.live.ndjson"))?;
-        Ok(project_latest(self.live_events.values()))
+        self.read_rolling(&directory.join(super::transcript::ROLLING_FILE))?;
+        Ok(merge_rolling(
+            &self.rolling_entries,
+            project_latest(self.live_events.values()),
+        ))
+    }
+
+    fn read_rolling(&mut self, path: &Path) -> Result<()> {
+        let modified = match fs::metadata(path) {
+            Ok(metadata) => metadata.modified().ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if modified.is_some() && modified == self.rolling_modified {
+            return Ok(());
+        }
+        self.rolling_entries = read_ndjson(path)?;
+        self.rolling_modified = modified;
+        Ok(())
     }
 
     pub(super) fn read_live_tail(&mut self, path: &Path) -> Result<()> {
@@ -108,6 +128,34 @@ impl TranscriptReader {
     pub(super) fn has_pending_bytes(&self) -> bool {
         !self.live_pending.is_empty()
     }
+}
+
+/// Rolling final-model entries replace the Moonshine draft for the time they
+/// cover; the draft fills in only after each source's last rolling entry.
+pub(super) fn merge_rolling(
+    rolling: &[TranscriptEntry],
+    live: Vec<TranscriptEntry>,
+) -> Vec<TranscriptEntry> {
+    if rolling.is_empty() {
+        return live;
+    }
+    let covered = |source| {
+        rolling
+            .iter()
+            .filter(|entry| entry.source == source)
+            .map(|entry| entry.end_ms)
+            .max()
+    };
+    let covered = [
+        covered(MeetingSource::System),
+        covered(MeetingSource::Microphone),
+    ];
+    let mut entries = rolling.to_vec();
+    entries.extend(live.into_iter().filter(|entry| {
+        covered[source_index(entry.source)].is_none_or(|covered| entry.start_ms >= covered)
+    }));
+    entries.sort_by_key(|entry| entry.start_ms);
+    entries
 }
 
 pub(super) fn transcribe(

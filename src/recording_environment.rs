@@ -141,6 +141,7 @@ impl RecordingEnvironmentController {
     }
 
     pub fn begin(&self) -> RecordingEnvironmentSession {
+        INTENTIONAL_RECORDINGS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let _ = self.commands.send(EnvironmentCommand::Start);
         RecordingEnvironmentSession {
             commands: self.commands.clone(),
@@ -154,8 +155,18 @@ pub struct RecordingEnvironmentSession {
 
 impl Drop for RecordingEnvironmentSession {
     fn drop(&mut self) {
+        INTENTIONAL_RECORDINGS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         let _ = self.commands.send(EnvironmentCommand::Stop);
     }
+}
+
+static INTENTIONAL_RECORDINGS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether an intentional dictation capture is in progress. Background work
+/// such as meeting transcription defers to it.
+pub fn intentional_recording_active() -> bool {
+    INTENTIONAL_RECORDINGS.load(std::sync::atomic::Ordering::Acquire) > 0
 }
 
 pub fn prevent_sleep() -> Option<PreventSleep> {

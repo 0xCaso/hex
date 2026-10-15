@@ -14,6 +14,8 @@ static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
 static INCREMENTAL_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
+static MEETINGS_ENABLED: AtomicBool = AtomicBool::new(false);
+static MEETING_OUTPUT_FOLDER: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 static HOTKEYS: OnceLock<RwLock<RuntimeHotkeys>> = OnceLock::new();
@@ -406,6 +408,36 @@ impl Default for RuntimeHotkeys {
     }
 }
 
+/// Opt-in meeting recording. Detection, the Meetings pane, and the meeting
+/// paste shortcut stay off in release builds until `enabled` is set.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct MeetingSettings {
+    pub enabled: bool,
+    /// Folder for finished Markdown transcripts; `None` uses the default.
+    pub output_folder: Option<PathBuf>,
+}
+
+impl MeetingSettings {
+    pub fn available(&self) -> bool {
+        crate::DEVELOPER_FEATURES_ENABLED || self.enabled
+    }
+
+    pub fn resolved_output_folder(&self) -> PathBuf {
+        self.output_folder
+            .clone()
+            .filter(|folder| !folder.as_os_str().is_empty())
+            .unwrap_or_else(default_meeting_output_folder)
+    }
+}
+
+pub fn default_meeting_output_folder() -> PathBuf {
+    dirs::document_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Hex Meetings")
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingAudioBehavior {
@@ -548,6 +580,7 @@ pub struct AppSettings {
     pub dictation_processing: DictationProcessingSettings,
     pub voice_action: VoiceActionSettings,
     pub history_retention: crate::history::HistoryRetention,
+    pub meetings: MeetingSettings,
     #[serde(skip_serializing)]
     pub text_replacements: Vec<TextReplacement>,
 }
@@ -581,6 +614,7 @@ impl Default for AppSettings {
             dictation_processing: DictationProcessingSettings::default(),
             voice_action: VoiceActionSettings::default(),
             history_retention: crate::history::HistoryRetention::default(),
+            meetings: MeetingSettings::default(),
             text_replacements: Vec::new(),
         }
     }
@@ -788,6 +822,12 @@ impl AppSettings {
             Ordering::Relaxed,
         );
         INCREMENTAL_TRANSCRIPTION.store(self.incremental_transcription, Ordering::Relaxed);
+        MEETINGS_ENABLED.store(self.meetings.available(), Ordering::Release);
+        *MEETING_OUTPUT_FOLDER
+            .get_or_init(Default::default)
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(self.meetings.resolved_output_folder());
         *HOTKEYS
             .get_or_init(Default::default)
             .write()
@@ -861,7 +901,9 @@ impl AppSettings {
                 .enabled
                 .then(|| self.edit_hotkey.runtime()),
             paste_last: self.paste_last_hotkey.as_ref().map(HotkeyBinding::runtime),
-            paste_meeting: crate::DEVELOPER_FEATURES_ENABLED
+            paste_meeting: self
+                .meetings
+                .available()
                 .then(|| HotkeyBinding::paste_meeting_default().runtime()),
         }
     }
@@ -988,6 +1030,21 @@ pub fn incremental_transcription() -> bool {
     INCREMENTAL_TRANSCRIPTION.load(Ordering::Relaxed)
 }
 
+/// Whether meeting detection and recording may run: always in developer
+/// builds, otherwise only after the user opts in.
+pub fn meetings_enabled() -> bool {
+    MEETINGS_ENABLED.load(Ordering::Acquire)
+}
+
+pub fn meeting_output_folder() -> PathBuf {
+    MEETING_OUTPUT_FOLDER
+        .get_or_init(Default::default)
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_else(default_meeting_output_folder)
+}
+
 pub fn runtime_hotkeys() -> RuntimeHotkeys {
     *HOTKEYS
         .get_or_init(Default::default)
@@ -1091,6 +1148,14 @@ mod tests {
         assert!(settings.voice_action.model.is_none());
         assert!(settings.voice_action.variant.is_none());
         assert_eq!(settings.voice_action.deadline_seconds, 60);
+        assert!(!settings.meetings.enabled);
+        assert_eq!(settings.meetings.output_folder, None);
+        assert!(
+            settings
+                .meetings
+                .resolved_output_folder()
+                .ends_with("Hex Meetings")
+        );
         assert!(settings.text_replacements.is_empty());
     }
 
@@ -1705,6 +1770,12 @@ mod tests {
             #[cfg(not(debug_assertions))]
             assert_eq!(hotkeys.paste_meeting, None);
         }
+        let mut opted_in = AppSettings::default();
+        opted_in.meetings.enabled = true;
+        assert_eq!(
+            opted_in.runtime_hotkeys().paste_meeting,
+            Some(HotkeyBinding::paste_meeting_default().runtime())
+        );
     }
 
     #[test]
