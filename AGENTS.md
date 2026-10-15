@@ -169,6 +169,11 @@ substitute for source inspection or a second roadmap.
   deduplication, echo suppression, and Markdown rendering.
 - `meeting_live`: bounded dual-stream Moonshine draft transcription and
   byte-offset transcript tailing.
+- `meeting_notes`: post-publication map/reduce meeting notes (title, summary,
+  action items, decisions) with bounded chunks and deadline, manifest storage,
+  and marker-delimited in-place Markdown updates.
+- `apple_intelligence`: the weak-linked FoundationModels Swift bridge:
+  availability, context size, and guided-generation notes at utility priority.
 - `microphone_activity`: permission-light CoreAudio process input observation.
 - `meeting_detection`: pure provider classification, debounce, per-call snooze,
   and call-ended presence.
@@ -342,6 +347,11 @@ CoreAudio formats, AppleScript details, or event serialization.
   source that falls behind is rebuilt from its WAV after Stop.
 - Meeting recording prevents idle sleep but does not apply dictation mute or
   pause-media behavior.
+- Apple Intelligence meeting notes run only after final publication, on a
+  utility-QoS thread that yields to dictation, within a bounded chunk count and
+  total deadline. Failures record `notes_error` and leave the Markdown
+  untouched. Notes never rename the file and rewrite only the heading HEX wrote
+  and the `<!-- hex:notes -->` block.
 - Live meeting drafts remain available if final transcription fails. Final
   publication is atomic; adjacent same-source entries within three seconds form
   one displayed turn labeled `You` or `Them`. Microphone utterances that repeat

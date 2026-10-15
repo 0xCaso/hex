@@ -13,7 +13,8 @@ Linked checks are locators unless an executed result is recorded below.
 Settings > MEETINGS > Meetings (beta)               // meetings.opt-in; off by default
 ├── On -> Meetings pane, menu-bar items, call detection, Option-Control-V
 │   ├── Screen & System Audio Recording missing -> "Open Settings" row
-│   └── Transcript folder -> ~/Documents/Hex Meetings by default; Reveal / choose
+│   ├── Transcript folder -> ~/Documents/Hex Meetings by default; Reveal / choose
+│   └── Summarize with Apple Intelligence -> on by default; one-line availability
 └── Off -> Controller idles; no microphone-activity inspection, pane, or shortcut
 
 Debug builds -> Always available (DEVELOPER_FEATURES_ENABLED)
@@ -131,6 +132,55 @@ Option-Control-V -> Paste meeting turns added since the last paste
 Checks: `markdown_lists_metadata_and_labeled_turns` and
 `export_never_overwrites_and_uses_safe_names`.
 
+### Notes (Apple Intelligence)
+
+```ts
+Final publication complete, setting on, model available   // meetings.notes
+  -> meeting-notes thread, utility QoS; waits (≤30 s) while dictation is busy
+  -> Coalesced turns "[mm:ss] You|Them: text" -> chunks
+     ├── Chunk budget = (context − 1,800 tokens) × 3 chars (8,192 → ~19k chars)
+     ├── More than 12 chunks -> 12 sampled evenly; Markdown says so
+     ├── Map: one guided generation (@Generable) per chunk
+     │   └── Context exceeded -> split that chunk in half once
+     └── Reduce: batches that fit one chunk until one set remains
+         └── Action items are the union of the chunks' items (≤12)
+  -> 4-minute total deadline; each call ≤90 s
+  -> Manifest: notes { title ≤8 words, summary ≤5, action items + owner, decisions ≤5 }
+  -> Markdown copy, same file name, atomic replace
+     ├── Heading -> generated title, only while it still reads HEX's last title
+     ├── <!-- hex:notes --> Summary / Action items / Decisions above ## Transcript
+     ├── Text outside the block is preserved; changed mid-write -> not written
+     └── Missing file -> manifest only
+  -> Failure / timeout -> notes_error; Markdown untouched; recording stays Complete
+
+Unavailable (not eligible / Apple Intelligence off / model not ready / macOS < 26)
+  -> Settings row says why; nothing runs
+Meetings pane -> generated title in list and detail; Summary / Action items /
+  Decisions above the transcript; "Write Notes" / "Regenerate Notes" / "Writing notes..."
+Transcript ready capsule -> "Writing notes with Apple Intelligence…", then
+  "Ready · <title>" when notes arrive while it is open
+```
+
+Title rule: the generated title replaces only a default `<App> call — 2:30 PM`
+title; named meetings keep their name. The file is never renamed, so links,
+open editors, and Reveal keep working.
+
+Sources: [meeting_notes.rs](../../src/meeting_notes.rs),
+[apple_intelligence.rs](../../src/apple_intelligence.rs), and the
+FoundationModels bridge [apple_intelligence.swift](../../src/apple_intelligence.swift),
+weak-linked from [build.rs](../../build.rs). Checks in `meeting::notes::tests`:
+`chunks_map_then_reduce_into_one_set_of_notes`, `an_oversized_chunk_is_split_once`,
+`failures_and_the_deadline_stop_generation`,
+`notes_are_inserted_above_the_transcript_and_regenerate_idempotently`,
+`user_edits_outside_the_notes_block_are_preserved`, and
+`notes_title_replaces_only_default_titles`. They use a fake model.
+
+Real model (debug CLI): `hex meeting summarize <file.md> [--chunk-chars N]` prints
+notes without saving; `hex meeting summarize <id>` writes them like Regenerate.
+Observed on the Mac Studio (macOS 27.0.1, context 8,192 tokens) with a synthetic
+19.5-minute, 1,963-word transcript: one call, 11–14 s; with `--chunk-chars 4000`,
+3 chunks + 1–2 reduces, ~42 s. Small chunks label more owners `You` wrongly.
+
 ## Gaps
 
 - No executed end-to-end recording with a real call, Screen Recording grant, or
@@ -140,3 +190,6 @@ Checks: `markdown_lists_metadata_and_labeled_turns` and
   rolling chunks only as they complete (about every 20–30 s).
 - Settings and capsule previews launched, but screenshot capture failed on the
   build host (`could not create image from window`); layout is visually unverified.
+  This includes the notes setting row, notes block, and Regenerate button.
+- Notes have not run after a real recording in the app; the CLI path exercised
+  the real model, manifest update, and Markdown rewrite.
