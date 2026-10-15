@@ -155,6 +155,58 @@ policy check, not native inference-quality proof. Padding is now included in
 `inference_ms`; `prepare_ms` covers clip conversion and diagnostic retention.
 
 ```ts
+Settings > Transcribe during pauses = On (default)  // dictate.incremental
+Intentional hotkey capture (Dictation or Voice Action shortcut)
+  -> Pause >= 600 ms after a piece >= 3 s, or >= 300 ms after >= 8 s
+     // speech = 20 ms frame >= 12 dB above an adaptive floor, never below -55 dBFS
+     -> Cut mid-pause -> Offer the piece to the inference worker, never blocking capture
+        ├── Worker idle -> Transcribe the piece in the background; nothing pastes
+        └── A piece already queued or running -> Keep the audio for the next piece
+Release -> One accepted job for the whole clip
+  ├── Every kept cut has a piece transcript, same model, not voice-delimited
+  │    -> Transcribe only the tail -> Join pieces + tail
+  │       // after , ; : - lowercase the next word (not I/acronyms);
+  │       // otherwise close an unpunctuated piece before a capital
+  └── Missing/failed/stale piece, model change, or voice-delimited capture
+       -> Transcribe the full clip exactly as with the setting Off
+  -> Mode processing, paste, last dictation, history once on the final text
+Short tap, Escape, or new capture -> Piece transcripts are never used
+Delayed release -> Cuts after the physical release are dropped with their pieces
+Programmatic/voice-delimited captures and Linux -> Never segmented
+```
+
+Source: [pause_segmenter.rs](../../src/pause_segmenter.rs), `offer_segment` in
+[dictation.rs](../../src/dictation.rs), the audio owner in
+[dictation_audio.rs](../../src/dictation_audio.rs), and `SegmentSink`,
+`SpeculativeTranscript`, `transcribe_clip`, and `join_segments` in
+[parakeet.rs](../../src/parakeet.rs). The queue keeps two slots for final jobs;
+at most one piece is admitted at a time. Logs record `joined incremental
+transcription` with `pieces`/`tail_ms`, or `incremental transcription fell back to
+the full clip` with a `reason`. Checks: the `pause_segmenter` tests (cut placement,
+minimum length, long-piece pauses, noise floor, digital silence);
+`segmented_pieces_match_the_final_clip_across_resampler_delays`,
+`delayed_release_drops_cuts_after_the_physical_release`,
+`rejected_pieces_merge_into_the_next_piece`, and
+`short_taps_and_cancelled_captures_never_offer_pieces` in dictation.rs;
+`hotkey_captures_hand_pieces_off_without_blocking_and_others_do_not` in
+dictation_audio.rs; and `final_job_transcribes_only_the_tail_after_complete_pieces`,
+`incomplete_stale_or_mismatched_pieces_fall_back_to_the_full_clip`,
+`a_new_capture_discards_pieces_from_a_cancelled_capture`,
+`piece_admission_never_takes_a_final_job_slot`, and
+`join_segments_continues_clauses_and_closes_sentences` in parakeet.rs. These use
+synthetic audio and fake transcription; they do not drive the threads end to end.
+
+**Benchmark-only, October 14, 2026, Mac Studio, Unified English Q8, Metal:** the
+opt-in `incremental_join_tracks_offline_transcription` feeds 16 kHz recordings
+through the production capture, segmenter, plan, and join with the real model,
+sequentially rather than in real time. On 24/77/99-second recordings it cut 3/7/6
+pieces; release-time tail inference took 69/119/133 ms versus 208/715/1,270 ms for
+the full clip, with 0/2/0 word differences from the full-clip transcript (66/235/280
+words). An earlier real-time prototype measured 46–220 ms versus 0.7–3.3 s on
+77–99-second clips. Neither is physical capture or paste on a MacBook Pro, and a
+piece boundary can still change a word or its punctuation.
+
+```ts
 Listening idle                            // dictate.model-memory
 ├── Keep the selected model weights warm // avoids loading on each dictation
 └── Completed offline inference
@@ -183,6 +235,28 @@ The ignored `dictation_protocol_audio` native fixture was also run with the sele
 Unified English model. Before and after session rotation it reached the same existing
 second-pass mismatch (`say stop` decoded as `say stay`) on the question fixture, so
 that run is not claimed as a passing transcription regression check.
+
+```ts
+Accepted job on a GPU device             // dictate.inference-threads
+├── Inference thread -> macOS user-interactive QoS
+└── GGUF session -> One CPU decoder thread, no ggml worker pool
+    // CPU-only devices keep the backend's default thread count
+```
+
+Source: `session_options` in [gguf_session.rs](../../src/gguf_session.rs) and
+`prioritize_inference_thread` in [parakeet.rs](../../src/parakeet.rs); check
+`gpu_sessions_bound_decoder_threads_and_cpu_sessions_keep_library_default`.
+Parakeet's per-token TDT decoder runs on CPU even with Metal encoding. ggml's
+default pool (up to 8 spin-waiting threads) is created with plain `pthread_create`,
+so its workers start at default QoS rather than inheriting the inference thread's.
+
+**Observed October 14, 2026, standalone `transcribe-cpp` 0.2.4 bench on a Mac
+Studio (18 cores) already busy with other work, Unified English Q8, Metal:** under
+36 extra `yes` processes, user-interactive QoS medians for 3/30/90-second clips were
+170/703/1,819 ms with one thread, 136/1,907/4,940 ms with two, and 178/4,304/13,519 ms
+with four. Without the extra load, one thread measured 83/364/1,631 ms and two
+64/705/2,889 ms. This is backend timing, not physical capture/paste on the
+reporter's MacBook Pro, and not Linux runtime proof.
 
 ```ts
 Finish
@@ -343,6 +417,9 @@ TextEdit process were stopped afterward.
 - **Voice Action is distinct:** its
   [cold modifier-order gap](voice-action.md#cold-modifier-order) is not covered by
   ordinary cold-dictation checks.
+- **Incremental transcription:** `dictate.incremental` has benchmark and
+  synthetic evidence only. Real microphones, room noise, Bluetooth inputs, and
+  inference under load have not been observed with piece handoff during capture.
 - **Paste consumption:** current paste policy waits a fixed interval rather than
   acknowledging target consumption. Internal ordering does not establish
   correctness for an arbitrarily slow target application.

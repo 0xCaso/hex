@@ -5,6 +5,7 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler, WindowFunction};
 
 use crate::audio::CaptureInstant;
+use crate::pause_segmenter::PauseSegmenter;
 
 #[cfg(target_os = "macos")]
 use crate::recording_environment::{RecordingEnvironmentController, RecordingEnvironmentSession};
@@ -325,11 +326,39 @@ fn uppercase_initial(text: &str) -> String {
 
 pub struct DictationClip {
     samples: Vec<f32>,
+    /// Ascending 16 kHz offsets of pieces handed to the transcription worker
+    /// during capture. Every cut lies strictly inside `samples`.
+    cuts: Vec<usize>,
+    capture_generation: Option<u64>,
+}
+
+/// Completed speech between two pauses of a segmented capture.
+pub struct CaptureSegment {
+    pub capture_generation: u64,
+    pub index: usize,
+    pub samples: Vec<f32>,
 }
 
 impl DictationClip {
     pub fn duration_ms(&self) -> u64 {
         self.samples.len() as u64 * 1_000 / u64::from(PARAKEET_SAMPLE_RATE)
+    }
+
+    pub fn cuts(&self) -> &[usize] {
+        &self.cuts
+    }
+
+    pub fn capture_generation(&self) -> Option<u64> {
+        self.capture_generation
+    }
+
+    #[cfg(test)]
+    pub fn for_test(samples: Vec<f32>, cuts: Vec<usize>, capture_generation: Option<u64>) -> Self {
+        Self {
+            samples,
+            cuts,
+            capture_generation,
+        }
     }
 
     #[cfg(any(test, target_os = "linux"))]
@@ -382,8 +411,16 @@ struct Recording {
     recorded_through: Option<CaptureInstant>,
     input_buffer: Vec<f32>,
     resampler: Option<Fft<f32>>,
+    segments: Option<Segments>,
     #[cfg(target_os = "macos")]
     environment: RecordingEnvironmentState,
+}
+
+struct Segments {
+    capture_generation: u64,
+    segmenter: PauseSegmenter,
+    /// Accepted cuts in final clip coordinates (after the resampler delay).
+    cuts: Vec<usize>,
 }
 
 #[cfg(target_os = "macos")]
@@ -440,6 +477,7 @@ impl Recording {
             recorded_through: None,
             input_buffer: Vec::with_capacity(Self::CHUNK_SIZE),
             resampler,
+            segments: None,
             #[cfg(target_os = "macos")]
             environment: RecordingEnvironmentState::Disabled,
         })
@@ -469,6 +507,40 @@ impl Recording {
     fn push_through(&mut self, samples: &[f32], captured_through: CaptureInstant) {
         self.push(samples);
         self.recorded_through = Some(captured_through);
+    }
+
+    /// Scans resampled audio produced since the last call. A piece is cut only
+    /// once the capture is intentional; it is recorded only if `offer` accepts
+    /// it, otherwise its audio stays with the next piece.
+    fn offer_segment(&mut self, offer: impl FnOnce(CaptureSegment) -> bool) {
+        let Self {
+            intentional: true,
+            samples,
+            resampler,
+            segments: Some(segments),
+            ..
+        } = self
+        else {
+            return;
+        };
+        let output_delay = resampler.as_ref().map_or(0, Fft::output_delay);
+        let available = &samples[output_delay.min(samples.len())..];
+        let scanned = segments.segmenter.consumed();
+        if available.len() <= scanned {
+            return;
+        }
+        let Some(cut) = segments.segmenter.push(&available[scanned..]) else {
+            return;
+        };
+        let start = segments.cuts.last().copied().unwrap_or(0);
+        let segment = CaptureSegment {
+            capture_generation: segments.capture_generation,
+            index: segments.cuts.len(),
+            samples: available[start..cut].to_vec(),
+        };
+        if offer(segment) {
+            segments.cuts.push(cut);
+        }
     }
 
     fn finish(mut self, ended_at: Option<CaptureInstant>) -> Vec<f32> {
@@ -681,8 +753,25 @@ impl DictationCapture {
         self.recording = None;
     }
 
+    /// Cuts the current capture into pieces at pauses once it is intentional.
+    pub fn segment_capture(&mut self, capture_generation: u64) {
+        if let Some(recording) = &mut self.recording {
+            recording.segments = Some(Segments {
+                capture_generation,
+                segmenter: PauseSegmenter::default(),
+                cuts: Vec::new(),
+            });
+        }
+    }
+
+    pub fn offer_segment(&mut self, offer: impl FnOnce(CaptureSegment) -> bool) {
+        if let Some(recording) = &mut self.recording {
+            recording.offer_segment(offer);
+        }
+    }
+
     pub fn finish(&mut self, now: CaptureInstant) -> Finish {
-        let Some(recording) = self.recording.take() else {
+        let Some(mut recording) = self.recording.take() else {
             return Finish::Discard;
         };
         if !recording.intentional
@@ -691,8 +780,18 @@ impl DictationCapture {
             return Finish::Discard;
         }
 
+        let segments = recording.segments.take();
+        let samples = recording.finish(Some(now));
+        let (mut cuts, capture_generation) = segments
+            .map(|segments| (segments.cuts, Some(segments.capture_generation)))
+            .unwrap_or_default();
+        // A delayed release trims audio captured afterwards; pieces reaching
+        // into that audio are no longer part of the clip.
+        cuts.retain(|&cut| cut < samples.len());
         Finish::Transcribe(DictationClip {
-            samples: recording.finish(Some(now)),
+            samples,
+            cuts,
+            capture_generation,
         })
     }
 }
@@ -922,6 +1021,159 @@ mod tests {
             assert_eq!(samples.len(), expected);
             assert!(samples.last().is_some_and(|sample| *sample > 0.25));
         }
+    }
+
+    /// Speech with pauses ending near 4.3 s and 9.3 s, at `sample_rate`.
+    fn paused_speech(sample_rate: u32) -> Vec<f32> {
+        let speech = crate::pause_segmenter::tests::utterance(
+            &[(4_000, 1_000), (4_000, 1_000), (2_000, 0)],
+            -70.0,
+        );
+        let ratio = f64::from(PARAKEET_SAMPLE_RATE) / f64::from(sample_rate);
+        let frames = speech.len() * sample_rate as usize / PARAKEET_SAMPLE_RATE as usize;
+        (0..frames)
+            .map(|frame| {
+                let position = frame as f64 * ratio;
+                let index = position as usize;
+                let next = speech.get(index + 1).copied().unwrap_or(speech[index]);
+                let fraction = (position - index as f64) as f32;
+                speech[index] * (1.0 - fraction) + next * fraction
+            })
+            .collect()
+    }
+
+    /// Feeds 10 ms chunks through an intentional segmented capture.
+    fn record_segmented(
+        capture: &mut DictationCapture,
+        audio: &[f32],
+        offer: &mut impl FnMut(CaptureSegment) -> bool,
+    ) -> CaptureInstant {
+        let start = capture_time();
+        capture.start(start);
+        capture.segment_capture(7);
+        assert!(capture.become_intentional(start + MINIMUM_HOLD_DURATION));
+        let mut through = start;
+        for chunk in audio.chunks(capture.sample_rate as usize / 100) {
+            through = through + Duration::from_millis(10);
+            capture.ingest(chunk, through);
+            capture.offer_segment(&mut *offer);
+        }
+        through
+    }
+
+    #[test]
+    fn segmented_pieces_match_the_final_clip_across_resampler_delays() {
+        for sample_rate in [16_000, 44_100, 48_000] {
+            let mut capture = DictationCapture::new(sample_rate);
+            let mut pieces = Vec::new();
+            let through =
+                record_segmented(&mut capture, &paused_speech(sample_rate), &mut |segment| {
+                    pieces.push(segment);
+                    true
+                });
+            let Finish::Transcribe(clip) = capture.finish(through) else {
+                panic!("expected transcription")
+            };
+            assert_eq!(clip.capture_generation(), Some(7));
+            assert_eq!(clip.cuts().len(), 2, "{sample_rate} Hz: {:?}", clip.cuts());
+            assert_eq!(pieces.len(), 2);
+            for (index, (piece, &cut)) in pieces.iter().zip(clip.cuts()).enumerate() {
+                let start = index
+                    .checked_sub(1)
+                    .map_or(0, |previous| clip.cuts()[previous]);
+                assert_eq!(piece.index, index);
+                assert_eq!(piece.capture_generation, 7);
+                assert!(
+                    piece.samples == clip.samples[start..cut],
+                    "{sample_rate} Hz piece {index} must equal its final-clip span"
+                );
+            }
+            for (cut, expected_ms) in clip.cuts().iter().zip([4_300, 9_300]) {
+                let cut_ms = (*cut as u64 * 1_000 / u64::from(PARAKEET_SAMPLE_RATE)) as i64;
+                assert!(
+                    (cut_ms - expected_ms).abs() <= 40,
+                    "{sample_rate} Hz: {cut_ms}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_release_drops_cuts_after_the_physical_release() {
+        let mut capture = DictationCapture::new(48_000);
+        let mut offered = 0;
+        record_segmented(&mut capture, &paused_speech(48_000), &mut |_| {
+            offered += 1;
+            true
+        });
+        assert_eq!(offered, 2);
+        let Finish::Transcribe(clip) = capture.finish(capture_time() + Duration::from_secs(8))
+        else {
+            panic!("expected transcription")
+        };
+        assert_eq!(clip.duration_ms(), 8_000);
+        assert_eq!(clip.cuts().len(), 1);
+        assert!(clip.cuts()[0] < clip.samples.len());
+    }
+
+    #[test]
+    fn rejected_pieces_merge_into_the_next_piece() {
+        let mut capture = DictationCapture::new(16_000);
+        let mut offers = Vec::new();
+        let through = record_segmented(&mut capture, &paused_speech(16_000), &mut |segment| {
+            offers.push((segment.index, segment.samples.len()));
+            offers.len() > 1
+        });
+        let Finish::Transcribe(clip) = capture.finish(through) else {
+            panic!("expected transcription")
+        };
+        // The first piece was refused, so the second offer also starts at zero.
+        assert_eq!(offers.len(), 2);
+        assert_eq!(offers[1].0, 0);
+        assert!(offers[1].1 > offers[0].1);
+        assert_eq!(clip.cuts(), [offers[1].1]);
+    }
+
+    #[test]
+    fn short_taps_and_cancelled_captures_never_offer_pieces() {
+        let audio = paused_speech(16_000);
+        let start = capture_time();
+        let mut short = DictationCapture::new(16_000);
+        short.start(start);
+        short.segment_capture(1);
+        for chunk in audio.chunks(160) {
+            short.ingest(chunk, start + Duration::from_millis(100));
+            short.offer_segment(|_| panic!("unintentional capture must not cut"));
+        }
+        assert!(matches!(
+            short.finish(start + Duration::from_millis(100)),
+            Finish::Discard
+        ));
+
+        let mut cancelled = DictationCapture::new(16_000);
+        cancelled.start(start);
+        cancelled.segment_capture(2);
+        assert!(cancelled.become_intentional(start + MINIMUM_HOLD_DURATION));
+        cancelled.ingest(&audio[..16_000], start + Duration::from_secs(1));
+        cancelled.cancel();
+        for chunk in audio[16_000..].chunks(160) {
+            cancelled.ingest(chunk, start + Duration::from_secs(2));
+            cancelled.offer_segment(|_| panic!("cancelled capture must not cut"));
+        }
+    }
+
+    #[test]
+    fn unsegmented_captures_report_no_pieces() {
+        let mut capture = DictationCapture::new(16_000);
+        let start = capture_time();
+        capture.start(start);
+        capture.ingest(&paused_speech(16_000), start + Duration::from_secs(11));
+        capture.offer_segment(|_| panic!("unsegmented capture must not cut"));
+        let Finish::Transcribe(clip) = capture.finish(start + Duration::from_secs(11)) else {
+            panic!("expected transcription")
+        };
+        assert!(clip.cuts().is_empty());
+        assert_eq!(clip.capture_generation(), None);
     }
 
     #[test]

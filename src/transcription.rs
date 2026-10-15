@@ -131,6 +131,13 @@ impl WarmTranscriber {
         })
     }
 
+    /// The warm model, only if it already serves `selection`.
+    pub fn active_for(&mut self, selection: &TranscriptionSelection) -> Option<&mut Transcriber> {
+        self.active
+            .as_mut()
+            .filter(|model| model.matches_selection(selection))
+    }
+
     pub fn activate(&mut self, selection: &TranscriptionSelection) -> Result<&mut Transcriber> {
         if !self
             .active

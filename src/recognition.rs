@@ -335,6 +335,11 @@ pub fn listen(
     let mut recognition_origin = None::<RecognitionOrigin>;
     let recording_environment = RecordingEnvironmentController::start();
     let (mut microphone_revision, microphone) = crate::app_settings::microphone_selection();
+    let dictation_worker = DictationWorker::start(
+        input_monitor.activity.clone(),
+        transformations.clone(),
+        history,
+    );
     let input = DictationAudio::open(
         device_override,
         microphone_revision,
@@ -342,12 +347,8 @@ pub fn listen(
         recording_environment,
         input_monitor.pending_events(),
         microphone_policy.release_while_idle,
+        dictation_worker.segment_sink(),
     )?;
-    let dictation_worker = DictationWorker::start(
-        input_monitor.activity.clone(),
-        transformations.clone(),
-        history,
-    );
     let (mut transcription_revision, _) = crate::app_settings::transcription_selection();
     let mut action_executor: Option<ActionExecutor> = None;
     let mut personal_host_enabled =
