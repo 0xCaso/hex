@@ -89,6 +89,7 @@ impl ActivationStability {
 
 enum FinishResult {
     Discarded,
+    Silent,
     Submitted,
     Rejected(String),
 }
@@ -2073,12 +2074,18 @@ fn finish_dictation(
     events: &mut EventLog,
     indicator: Option<&DictationIndicatorSender>,
 ) -> Result<FinishResult> {
-    let Finish::Transcribe(clip) = capture.finish(ended_at)? else {
-        events.dictation(DictationPhase::Discarded, "")?;
-        if let Some(indicator) = indicator {
-            indicator.send(DictationIndicatorEvent::Discarded);
+    let clip = match capture.finish(ended_at)? {
+        Finish::Transcribe(clip) if !clip.is_near_silent() => clip,
+        finish => {
+            events.dictation(DictationPhase::Discarded, "")?;
+            if let Some(indicator) = indicator {
+                indicator.send(DictationIndicatorEvent::Discarded);
+            }
+            return Ok(match finish {
+                Finish::Discard => FinishResult::Discarded,
+                Finish::Transcribe(_) => FinishResult::Silent,
+            });
         }
-        return Ok(FinishResult::Discarded);
     };
     feedback::play(Tone::DictationStop);
     events.emit(&VoiceEvent::State {
@@ -2229,6 +2236,7 @@ fn finish_outcome(result: &FinishResult) -> CommandOutcome {
     match result {
         FinishResult::Submitted => CommandOutcome::Executed,
         FinishResult::Discarded => CommandOutcome::Failed("capture was too short".into()),
+        FinishResult::Silent => CommandOutcome::Failed("capture was silent".into()),
         FinishResult::Rejected(error) => CommandOutcome::Failed(error.clone()),
     }
 }

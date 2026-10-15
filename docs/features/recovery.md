@@ -155,10 +155,39 @@ press B -> asynchronous open B
 
 release-when-idle enabled + capture idle -> stop retries
 warm mode enabled during pending capture -> preserve capture; retry after cancellation
+
+cold open -> selected microphone fails to open
+  -> retry it twice, 100 ms apart -> then automatic selection (logged)
+ready stream fails while the press is held
+  ├── before the 300 ms hold threshold -> back to pending, reopen for the same press
+  │     ├── release before ready -> discard
+  │     └── ready -> capture from the original press -> expected output
+  └── after the threshold -> fail with "Microphone capture was interrupted"
+CoreAudio processor overload (Xrun) -> warn and keep the stream // not a failure
 ```
 Checks in [dictation_audio.rs](../../src/dictation_audio.rs):
 `cold_capture_restart_rejects_late_open_results_and_closes_after_finish`,
-`enabling_warm_microphone_preserves_pending_capture_and_recovers_after_cancellation`.
+`enabling_warm_microphone_preserves_pending_capture_and_recovers_after_cancellation`,
+`cold_stream_failure_before_hold_threshold_reopens_for_the_same_press`,
+`cold_stream_failure_after_hold_threshold_still_fails_the_capture`; in
+[audio.rs](../../src/audio.rs): `overload_glitches_do_not_interrupt_the_stream`,
+`cold_open_retries_the_selected_microphone_before_falling_back`.
+
+**Fixed after 2.1.25 ([#130](https://github.com/anomalyco/hex/issues/130)):** the
+first hold after minutes of idle failed with the error tone. The reporter's logs
+show the cold stream reporting "A buffer underrun or overrun occurred" 20–76 ms
+after opening. cpal 0.18 reports that as `ErrorKind::Xrun` from CoreAudio's
+`kAudioDeviceProcessorOverload` listener; the stream keeps running, but HEX
+treated every error callback as fatal. In release-when-idle mode the owner then
+closed the device without retrying, and recognition suspended the held gesture.
+Overloads and refused real-time promotion are now logged and ignored; actual
+sample gaps over 50 ms still fail the capture as a discontinuity. An interruption
+before the hold threshold re-pends the same press instead of failing it. The same
+logs show a cold open falling back from the selected microphone to automatic
+selection; whether that device was missing or failed its first open is unknown,
+so the cold open retries the selection before the existing fallback.
+Not verified: the reporter's hardware, whether 200 ms of retries is long enough
+for their device, or a physical cold open after idle.
 Proof limit: controlled asynchronous opener and capture ownership, not onset
 latency or the macOS microphone indicator. Cold Voice Action has a separate gap
 below.
@@ -314,8 +343,14 @@ did not verify the new visible warning or bare-Escape fallback.
 GUI startup -> require OS main thread -> initialize_layout // recover.keyboard-layout
   -> publish complete snapshot BEFORE settings/workers/GPUI
      ├── cached character -> keycode
-     └── missing ASCII character -> filled from ASCII-capable layout
+     ├── missing ASCII character -> filled from ASCII-capable layout
+     └── Command layer (UCKeyTranslate with cmdKey) -> separate map
                                      // no worker-side TIS/TSM query
+
+Synthetic shortcut with Command (⌘V)
+  ├── Command layer has the character -> that keycode // "Dvorak – QWERTY ⌘"
+  └── otherwise -> plain snapshot as above
+Shortcuts without Command and recorded hotkeys -> plain snapshot only
 
 Headless lookup without snapshot -> shared native lock -> current layout query
   -> current layout misses ASCII character -> ASCII-capable fallback
@@ -338,6 +373,15 @@ characters keep the lowest key code, just like the current-layout snapshot.
 `non_latin_snapshot_gets_shortcut_letters_without_replacing_active_keys` covers
 the merge policy with Cyrillic/Hebrew fixtures; native layout and physical paste
 verification remain separate.
+
+Layouts can also switch arrangement while Command is held. "Dvorak – QWERTY ⌘"
+types `v` from keycode 47, but ⌘+47 is ⌘. there; ⌘V is keycode 9. Resolving ⌘V
+from the plain layer posted ⌘. and the target beeped (kitlangton/Hex#162). The
+snapshot and headless lookups now resolve Command shortcuts from the layout's
+Command layer first. Ordinary layouts map letters identically on both layers.
+`command_shortcuts_resolve_against_the_command_layer` covers the selection and
+fallback with Dvorak-QWERTY⌘, QWERTY, and non-Latin fixtures; it does not query
+a real Dvorak layout or post a paste.
 
 **Executed September 1, 2026:** [keyboard_layout.rs](../../tests/keyboard_layout.rs)
 includes the production module and runs four scenarios in fresh child processes,

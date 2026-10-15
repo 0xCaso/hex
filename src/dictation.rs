@@ -17,6 +17,12 @@ pub const MINIMUM_HOLD_DURATION: Duration = Duration::from_millis(300);
 const MINIMUM_PARAKEET_DURATION: Duration = Duration::from_millis(1500);
 const INITIAL_RECORDING_CAPACITY: Duration = Duration::from_secs(10);
 const PARAKEET_SAMPLE_RATE: u32 = 16_000;
+/// A capture whose loudest 30 ms window stays below this level is treated as
+/// empty rather than transcribed, because models hallucinate closing phrases
+/// such as "thank you" on silence. Deliberately conservative: whispered speech
+/// sits well above it, so only a quiet room's noise floor is discarded.
+const SILENCE_THRESHOLD_DBFS: f32 = -50.0;
+const SILENCE_WINDOW_SAMPLES: usize = 480;
 
 use crate::spoken_text::normalize;
 
@@ -359,6 +365,40 @@ impl DictationClip {
             cuts,
             capture_generation,
         }
+    }
+
+    /// The loudest 30 ms window's DC-removed RMS level in dBFS, over the
+    /// captured audio only (before any model padding).
+    fn loudest_window_dbfs(&self) -> f32 {
+        let loudest = self
+            .samples
+            .chunks(SILENCE_WINDOW_SAMPLES)
+            .map(|window| {
+                let count = window.len() as f64;
+                let mean = window.iter().map(|&sample| f64::from(sample)).sum::<f64>() / count;
+                let variance = window
+                    .iter()
+                    .map(|&sample| (f64::from(sample) - mean).powi(2))
+                    .sum::<f64>()
+                    / count;
+                variance.sqrt()
+            })
+            .fold(0.0, f64::max);
+        (20.0 * loudest.max(1e-6).log10()) as f32
+    }
+
+    pub fn is_near_silent(&self) -> bool {
+        let level_dbfs = self.loudest_window_dbfs();
+        let silent = level_dbfs < SILENCE_THRESHOLD_DBFS;
+        if silent {
+            tracing::info!(
+                level_dbfs,
+                threshold_dbfs = SILENCE_THRESHOLD_DBFS,
+                audio_ms = self.duration_ms(),
+                "discarded near-silent dictation without transcribing it"
+            );
+        }
+        silent
     }
 
     #[cfg(any(test, target_os = "linux"))]
@@ -749,6 +789,19 @@ impl DictationCapture {
         became_intentional
     }
 
+    /// The start of an active recording that has not yet passed the hold threshold.
+    pub fn tentative_start(&self) -> Option<CaptureInstant> {
+        self.recording
+            .as_ref()
+            .filter(|recording| {
+                !recording.intentional
+                    && recording.recorded_through.is_none_or(|through| {
+                        through.duration_since(recording.started_at) < MINIMUM_HOLD_DURATION
+                    })
+            })
+            .map(|recording| recording.started_at)
+    }
+
     pub fn cancel(&mut self) {
         self.recording = None;
     }
@@ -803,6 +856,33 @@ fn samples_for(duration: Duration, sample_rate: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tone(amplitude: f32, samples: usize) -> impl Iterator<Item = f32> {
+        (0..samples).map(move |index| {
+            amplitude * (2.0 * std::f32::consts::PI * 220.0 * index as f32 / 16_000.0).sin()
+        })
+    }
+
+    #[test]
+    fn silence_gate_discards_only_near_silent_captures() {
+        let clip = |samples: Vec<f32>| DictationClip::for_test(samples, Vec::new(), None);
+
+        assert!(clip(vec![0.0; 16_000]).is_near_silent());
+        assert!(clip(Vec::new()).is_near_silent());
+        // A -66 dBFS noise floor and a constant DC offset carry no speech.
+        assert!(clip(tone(0.000_7, 16_000).collect()).is_near_silent());
+        assert!(clip(vec![0.2; 16_000]).is_near_silent());
+
+        // 100 ms of whisper-level (-43 dBFS RMS) audio inside a second of
+        // silence is kept.
+        let mut quiet_speech = vec![0.0; 8_000];
+        quiet_speech.extend(tone(0.01, 1_600));
+        quiet_speech.extend(vec![0.0; 6_400]);
+        let quiet_speech = clip(quiet_speech);
+        assert!(!quiet_speech.is_near_silent());
+        assert!((quiet_speech.loudest_window_dbfs() - -43.0).abs() < 0.5);
+        assert!(!clip(tone(0.1, 16_000).collect()).is_near_silent());
+    }
 
     fn capture_time() -> CaptureInstant {
         CaptureInstant::from_nanos(60_000_000_000)

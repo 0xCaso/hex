@@ -591,6 +591,7 @@ Linux beta                               // not macOS feature parity
 ├── Escape -> Cancel active capture, not newest accepted job
 │   └── X11 grab conflict -> Try plain Escape; otherwise warn without stopping dictation
 ├── Microphone failure -> Listener exits, not macOS automatic recovery
+│   └── Overload (Xrun) glitch -> Logged; not a failure
 └── Paste -> Retain transcript clipboard, not restore previous contents
 ```
 
@@ -718,6 +719,7 @@ layout evidence.
 TypeScript SDK + macOS local service
 ├── Caller records audio -> Explicit helper -> Raw transcription
 ├── Running desktop capture API -> Separate microphone ownership protocol
+│   └── No silence gate                  // raw model output, unlike hotkey dictation
 └── Distribution
     ├── SDK 0.3.0 -> Published
     └── Turnkey signed helper -> Unfinished

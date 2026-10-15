@@ -506,21 +506,21 @@ impl Owner {
                 let _ = reply.send(true);
             }
             Command::BecomeIntentional { at, reply } => {
+                self.drain_through(at);
                 let became_intentional = if let Some(pending) = &mut self.pending_capture {
                     pending.mark_intentional(at);
                     false
                 } else {
-                    self.drain_through(at);
                     self.capture.become_intentional(at)
                 };
                 let _ = reply.send(became_intentional);
             }
             Command::Finish { at, reply } => {
+                self.drain_through(at);
                 let finish = if self.pending_capture.take().is_some() {
                     self.input.cancel_open();
                     Finish::Discard
                 } else {
-                    self.drain_through(at);
                     self.capture.finish(at)
                 };
                 self.state.recording.store(false, Ordering::Release);
@@ -625,6 +625,25 @@ impl Owner {
             RecoveringAudioInputEvent::Interrupted => {
                 self.last_captured_through = None;
                 self.next_recognition_generation();
+                // A cold stream that fails before the hold threshold has lost
+                // at most the press's first moments. Reopen for the same press,
+                // like any other pending cold capture, instead of failing it.
+                if self.release_while_idle
+                    && let Some(at) = self.capture.tentative_start()
+                {
+                    tracing::warn!(
+                        "microphone stream failed before the hold threshold; reopening for the same press"
+                    );
+                    self.capture.cancel();
+                    self.close_input();
+                    self.pending_capture = Some(PendingCapture {
+                        at,
+                        kind: CaptureKind::Hotkey,
+                        intentional_at: None,
+                    });
+                    self.input.request_open();
+                    return;
+                }
                 let was_recording = self.capture.is_recording();
                 let capture_generation = self.state.capture_generation.load(Ordering::Acquire);
                 self.capture.cancel();
@@ -1318,6 +1337,121 @@ mod tests {
         input.cancel().unwrap();
         assert!(!input.is_recording());
         assert!(!input.is_recovering());
+    }
+
+    #[test]
+    fn cold_stream_failure_before_hold_threshold_reopens_for_the_same_press() {
+        for mode in ["reopen", "release-pending", "release-during-drain"] {
+            let (mut owner, input, first_samples) = owner_for_test(false);
+            owner.release_while_idle = true;
+            let pressed_at = capture_time();
+            start(&mut owner, pressed_at);
+            let generation = input.capture_generation();
+            let event = owner.input.recv_timeout(Duration::ZERO, false);
+            owner.handle_input(event);
+            assert!(matches!(
+                input.try_recv_event(),
+                Some(DictationAudioEvent::Reopened)
+            ));
+
+            if mode == "release-during-drain" {
+                drop(first_samples);
+                assert!(matches!(
+                    control(&mut owner, |reply| Command::Finish {
+                        at: pressed_at + Duration::from_millis(250),
+                        reply,
+                    }),
+                    Finish::Discard
+                ));
+                owner.reconcile_input();
+                assert!(!input.is_recording());
+                assert!(!owner.input.is_opening());
+                assert!(input.try_recv_event().is_none());
+                continue;
+            }
+
+            // #130: the freshly opened stream fails ~150 ms into the held press.
+            owner.handle_input(RecoveringAudioInputEvent::Interrupted);
+            owner.reconcile_input();
+            assert!(input.is_recording(), "the held press must survive");
+            assert!(input.try_recv_event().is_none(), "no failure is reported");
+            assert!(owner.input.is_opening(), "the press reopens the microphone");
+
+            let (second_input, second_opened) = RecoveringAudioInput::pending_for_test();
+            owner.input = second_input;
+            if mode == "release-pending" {
+                assert!(matches!(
+                    control(&mut owner, |reply| Command::Finish {
+                        at: pressed_at + Duration::from_millis(250),
+                        reply,
+                    }),
+                    Finish::Discard
+                ));
+                owner.reconcile_input();
+                assert!(!input.is_recording());
+                assert!(!owner.input.is_opening());
+                assert!(second_opened.send((0, Err("late".into()))).is_err());
+                continue;
+            }
+            assert!(!control(&mut owner, |reply| Command::BecomeIntentional {
+                at: pressed_at + crate::dictation::MINIMUM_HOLD_DURATION,
+                reply,
+            }));
+            let (second_stream, samples) = crate::audio::AudioInput::channel_for_test();
+            second_opened.send((0, Ok(second_stream))).unwrap();
+            let event = owner.input.recv_timeout(Duration::ZERO, false);
+            owner.handle_input(event);
+            assert!(matches!(
+                input.try_recv_event(),
+                Some(DictationAudioEvent::ReadyIntentional { capture_generation })
+                    if capture_generation == generation
+            ));
+            let finished_at = pressed_at + Duration::from_millis(700);
+            samples.send((vec![0.25; 4_800], finished_at)).unwrap();
+            let Finish::Transcribe(clip) = control(&mut owner, |reply| Command::Finish {
+                at: finished_at,
+                reply,
+            }) else {
+                panic!("the reopened press must still produce its clip");
+            };
+            assert_eq!(clip.duration_ms(), 100);
+        }
+    }
+
+    #[test]
+    fn cold_stream_failure_after_hold_threshold_still_fails_the_capture() {
+        for mark_intentional in [false, true] {
+            let (mut owner, input, _unused_samples) = owner_for_test(false);
+            owner.release_while_idle = true;
+            let pressed_at = capture_time();
+            start(&mut owner, pressed_at);
+            let event = owner.input.recv_timeout(Duration::ZERO, false);
+            owner.handle_input(event);
+            let threshold_at = pressed_at + crate::dictation::MINIMUM_HOLD_DURATION;
+            if mark_intentional {
+                assert!(owner.capture.become_intentional(threshold_at));
+            } else {
+                owner.handle_input(RecoveringAudioInputEvent::Chunk {
+                    samples: vec![0.25; 14_400],
+                    captured_through: threshold_at,
+                });
+            }
+            assert!(matches!(
+                input.try_recv_event(),
+                Some(DictationAudioEvent::Reopened)
+            ));
+
+            // Speech may already be recorded, so dropping it silently would paste a fragment.
+            owner.handle_input(RecoveringAudioInputEvent::Interrupted);
+            assert!(!input.is_recording());
+            assert!(matches!(
+                input.try_recv_event(),
+                Some(DictationAudioEvent::Interrupted {
+                    was_recording: true,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
