@@ -432,6 +432,8 @@ pub struct AppWindowPreview {
     pub open_history_retention: bool,
     pub confirm_release_microphone: bool,
     pub update_available: bool,
+    pub meetings_enabled: bool,
+    pub screen_recording_missing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -488,7 +490,7 @@ impl Pane {
         Self::Activity,
     ];
 
-    fn all(developer_features: bool) -> Vec<Self> {
+    fn all(developer_features: bool, meetings: bool) -> Vec<Self> {
         Self::ALL
             .into_iter()
             .filter(|pane| match pane {
@@ -497,7 +499,8 @@ impl Pane {
                 | Self::Commands
                 | Self::VoiceAction
                 | Self::History => true,
-                Self::HudLab | Self::Meetings | Self::Activity => developer_features,
+                Self::Meetings => developer_features || meetings,
+                Self::HudLab | Self::Activity => developer_features,
             })
             .collect()
     }
@@ -997,6 +1000,9 @@ pub struct AppWindow {
     double_tap_only_visibility: ToggleSpring,
     dock_icon_toggle: ToggleSpring,
     incremental_toggle: ToggleSpring,
+    meetings_toggle: ToggleSpring,
+    screen_recording_permitted: bool,
+    meeting_folder_error: Option<String>,
     sound_volume_spring: ToggleSpring,
     recording_audio_spring: ToggleSpring,
     variant_picker_open: Option<ModelPickerTarget>,
@@ -1118,7 +1124,7 @@ impl AppWindow {
                             window.update_status = crate::sparkle::UpdateStatus::Idle;
                             crate::sparkle::clear_confirmation();
                         }
-                        if crate::DEVELOPER_FEATURES_ENABLED
+                        if window.settings.meetings.available()
                             && (window.meeting_refresh_started_ms.is_some()
                                 || meeting::active(&window.meetings).is_some())
                         {
@@ -1156,6 +1162,8 @@ impl AppWindow {
                 ..AppSettings::default()
             };
             settings.voice_action.enabled = preview.voice_action_enabled;
+            settings.meetings.enabled =
+                preview.meetings_enabled || matches!(preview.pane, DeveloperPane::Meetings);
             if let Some((language, _)) = &preview.transcription_picker
                 && let Some(choice) = preview_choices(language).first()
             {
@@ -1444,6 +1452,12 @@ impl AppWindow {
             ),
             dock_icon_toggle: ToggleSpring::new(settings.show_dock_icon),
             incremental_toggle: ToggleSpring::new(settings.incremental_transcription),
+            meetings_toggle: ToggleSpring::new(settings.meetings.enabled),
+            screen_recording_permitted: match &preview {
+                Some(preview) => !preview.screen_recording_missing,
+                None => crate::meeting::screen_recording_permitted(),
+            },
+            meeting_folder_error: None,
             sound_volume_spring: ToggleSpring::at(sound_volume_index(&settings) as f32),
             recording_audio_spring: ToggleSpring::at(recording_audio_index(
                 settings.recording_audio_behavior,
@@ -1592,7 +1606,7 @@ impl AppWindow {
             history_copied: None,
         };
         if !window.preview {
-            if crate::DEVELOPER_FEATURES_ENABLED {
+            if window.settings.meetings.available() {
                 window.reload_meetings();
                 if meeting::active(&window.meetings).is_some() {
                     window.pane = Pane::Meetings;
@@ -1617,7 +1631,7 @@ impl AppWindow {
     /// selections. This is also called whenever an existing shell is reopened.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if !self.preview {
-            if crate::DEVELOPER_FEATURES_ENABLED {
+            if self.settings.meetings.available() {
                 self.reload_meetings();
             }
             self.reload_events();
@@ -1654,6 +1668,14 @@ impl AppWindow {
 
     pub(crate) fn show_settings(&mut self, cx: &mut Context<Self>) {
         self.select_pane(Pane::Settings, cx);
+    }
+
+    pub(crate) fn show_meetings(&mut self, cx: &mut Context<Self>) {
+        if self.settings.meetings.available() {
+            self.select_pane(Pane::Meetings, cx);
+        } else {
+            self.show_settings(cx);
+        }
     }
 
     pub(crate) fn show_transcription_models(&mut self, cx: &mut Context<Self>) {
@@ -1824,6 +1846,13 @@ impl AppWindow {
             }
             if self.setup_visible {
                 self.setup_visible = false;
+                changed = true;
+            }
+        }
+        if self.settings.meetings.available() {
+            let permitted = crate::meeting::screen_recording_permitted();
+            if permitted != self.screen_recording_permitted {
+                self.screen_recording_permitted = permitted;
                 changed = true;
             }
         }
@@ -2639,18 +2668,21 @@ impl AppWindow {
     }
 
     fn render_navigation(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let items = Pane::all(crate::DEVELOPER_FEATURES_ENABLED)
-            .into_iter()
-            .enumerate()
-            .map(|(index, pane)| {
-                let selected = self.pane == pane;
-                navigation_item(pane.icon(), selected)
-                    .id(("app-nav", index))
-                    .child(pane.label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_pane(pane, cx);
-                    }))
-            });
+        let items = Pane::all(
+            crate::DEVELOPER_FEATURES_ENABLED,
+            self.settings.meetings.available(),
+        )
+        .into_iter()
+        .enumerate()
+        .map(|(index, pane)| {
+            let selected = self.pane == pane;
+            navigation_item(pane.icon(), selected)
+                .id(("app-nav", index))
+                .child(pane.label())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_pane(pane, cx);
+                }))
+        });
 
         sidebar_frame()
             .w(px(SIDEBAR_WIDTH))
@@ -3473,6 +3505,7 @@ impl AppWindow {
             .clamp(0.0, 1.0);
         let dock_icon_position = self.dock_icon_toggle.render_position(window);
         let incremental_position = self.incremental_toggle.render_position(window);
+        let meetings_section = self.render_meeting_settings(window, cx);
         let launch_at_login_position = self.launch_at_login_toggle.render_position(window);
         let microphone_label = self
             .settings
@@ -3782,6 +3815,8 @@ impl AppWindow {
                                         .id("paste-last-hotkey-setting"),
                                     )
                             )
+                            .child(settings_section_label("MEETINGS"))
+                            .child(meetings_section)
                             .child(settings_section_label("APPLICATION"))
                             .child(
                                 settings_panel()
@@ -3844,6 +3879,148 @@ impl AppWindow {
                                     ),
                             ),
         )
+    }
+
+    fn render_meeting_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let enabled = self.settings.meetings.enabled;
+        let position = self.meetings_toggle.render_position(window);
+        let folder = self.settings.meetings.resolved_output_folder();
+        let folder_label = folder
+            .strip_prefix(dirs::home_dir().unwrap_or_default())
+            .map(|relative| format!("~/{}", relative.display()))
+            .unwrap_or_else(|_| folder.display().to_string());
+        let permission_control = if self.screen_recording_permitted {
+            setup_ready_badge()
+        } else {
+            header_button("Open Settings")
+                .id("meeting-screen-recording")
+                .bg(rgb(CANVAS))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !crate::meeting::request_screen_recording() {
+                        crate::meeting::open_screen_recording_settings();
+                    }
+                    this.permission_refresh_at = Instant::now();
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        settings_panel()
+            .child(
+                settings_row(
+                    "Meetings (beta)",
+                    "Offer to record calls and save local transcripts",
+                    toggle(position),
+                )
+                .when(!enabled, |row| row.border_b_0())
+                .id("meetings-setting")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let enabled = !this.settings.meetings.enabled;
+                    if this.update_settings(cx, |settings| settings.meetings.enabled = enabled) {
+                        this.meetings_toggle.set_enabled(enabled);
+                        if enabled {
+                            this.screen_recording_permitted =
+                                this.preview || crate::meeting::screen_recording_permitted();
+                            if !this.preview {
+                                this.reload_meetings();
+                            }
+                        } else if this.pane == Pane::Meetings {
+                            this.pane = Pane::Settings;
+                        }
+                    }
+                })),
+            )
+            .when(enabled, |panel| {
+                panel
+                    .child(settings_row(
+                        "Screen & System Audio Recording",
+                        if self.screen_recording_permitted {
+                            "Captures the other participants' audio"
+                        } else {
+                            "Required to hear the other participants. Allow HEX, then reopen it."
+                        },
+                        permission_control,
+                    ))
+                    .child(
+                        settings_row(
+                            "Transcript folder",
+                            "Finished meetings are saved here as Markdown",
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    canvas_button()
+                                        .id("reveal-meeting-folder")
+                                        .h(px(32.0))
+                                        .px_2p5()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(MUTED))
+                                        .child("Reveal")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let folder =
+                                                this.settings.meetings.resolved_output_folder();
+                                            match std::fs::create_dir_all(&folder) {
+                                                Ok(()) => crate::meeting::reveal(&folder),
+                                                Err(error) => {
+                                                    this.meeting_folder_error =
+                                                        Some(error.to_string());
+                                                }
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    disclosure_button(folder_label)
+                                        .id("meeting-folder-setting")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.choose_meeting_folder(cx);
+                                        })),
+                                ),
+                        )
+                        .border_b_0(),
+                    )
+                    .when_some(self.meeting_folder_error.clone(), |panel, error| {
+                        panel.child(
+                            div()
+                                .px_4()
+                                .py_2()
+                                .text_size(px(11.0))
+                                .text_color(rgb(NEGATIVE))
+                                .child(error),
+                        )
+                    })
+            })
+    }
+
+    fn choose_meeting_folder(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Use Folder".into()),
+        });
+        cx.spawn(async move |window, cx| {
+            let result = receiver
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = window.update(cx, |window, cx| match result {
+                Ok(Some(paths)) => {
+                    if let Some(folder) = paths.into_iter().next() {
+                        window.meeting_folder_error = None;
+                        window.update_settings(cx, |settings| {
+                            settings.meetings.output_folder = Some(folder);
+                        });
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    window.meeting_folder_error = Some(error);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn toggle_microphone_picker(&mut self, cx: &mut Context<Self>) {
@@ -6190,13 +6367,22 @@ impl AppWindow {
             return detail_placeholder("Select a meeting.");
         };
         let id = meeting.id.clone();
+        let export_path = meeting.export_path.clone().filter(|path| path.exists());
         let reveal = canvas_button()
             .id("reveal-meeting-files")
             .h(px(30.0))
             .px_3()
             .text_size(px(12.0))
-            .child("Reveal Files")
+            .child(if export_path.is_some() {
+                "Reveal Markdown"
+            } else {
+                "Reveal Files"
+            })
             .on_click(cx.listener(move |_, _, _, _| {
+                if let Some(path) = &export_path {
+                    meeting::reveal(path);
+                    return;
+                }
                 match meeting::root() {
                     Ok(root) => {
                         match ProcessCommand::new("/usr/bin/open")
@@ -6293,9 +6479,9 @@ impl AppWindow {
             MeetingStatus::Recording if meeting.live_transcription_error.is_some() => {
                 "LIVE DRAFT UNAVAILABLE"
             }
-            MeetingStatus::Recording if self.meeting_stop_pending => "FINALIZING WITH PARAKEET V2",
+            MeetingStatus::Recording if self.meeting_stop_pending => "FINALIZING",
             MeetingStatus::Recording => "LIVE DRAFT",
-            MeetingStatus::Transcribing => "FINALIZING WITH PARAKEET V2",
+            MeetingStatus::Transcribing => "FINALIZING",
             MeetingStatus::Complete => "FINAL TRANSCRIPT",
             MeetingStatus::Interrupted | MeetingStatus::Failed => "RECOVERED DRAFT",
         };
@@ -6344,16 +6530,24 @@ impl AppWindow {
                                     )
                                     .child(meeting::format_duration(meeting_duration(&meeting))),
                             )
-                            .when_some(meeting.error.clone(), |header, error| {
-                                header.child(
-                                    div()
-                                        .max_w(px(620.0))
-                                        .text_size(px(11.0))
-                                        .line_height(px(17.0))
-                                        .text_color(rgb(NEGATIVE))
-                                        .child(error),
-                                )
-                            }),
+                            .when_some(
+                                meeting.error.clone().or_else(|| {
+                                    meeting
+                                        .export_error
+                                        .clone()
+                                        .map(|error| format!("Markdown not saved: {error}"))
+                                }),
+                                |header, error| {
+                                    header.child(
+                                        div()
+                                            .max_w(px(620.0))
+                                            .text_size(px(11.0))
+                                            .line_height(px(17.0))
+                                            .text_color(rgb(NEGATIVE))
+                                            .child(error),
+                                    )
+                                },
+                            ),
                     )
                     .child(reveal),
             )
@@ -7701,7 +7895,7 @@ fn hotkey_binding_conflicts(
     {
         others.push(paste.clone());
     }
-    if crate::DEVELOPER_FEATURES_ENABLED {
+    if settings.meetings.available() {
         others.push(HotkeyBinding::paste_meeting_default());
     }
     crate::app_settings::hotkey_conflicts(binding, others)
@@ -8723,6 +8917,8 @@ mod tests {
                 open_history_retention: false,
                 confirm_release_microphone: false,
                 update_available: false,
+                meetings_enabled: false,
+                screen_recording_missing: false,
             }),
             window,
             cx,
@@ -9539,7 +9735,7 @@ mod tests {
     #[test]
     fn production_navigation_keeps_commands_available_as_an_opt_in() {
         assert_eq!(
-            Pane::all(false),
+            Pane::all(false, false),
             vec![
                 Pane::Settings,
                 Pane::Modes,
@@ -9548,12 +9744,24 @@ mod tests {
                 Pane::History,
             ]
         );
+        assert_eq!(
+            Pane::all(false, true),
+            vec![
+                Pane::Settings,
+                Pane::Modes,
+                Pane::Commands,
+                Pane::VoiceAction,
+                Pane::History,
+                Pane::Meetings,
+            ],
+            "the meetings opt-in adds only the Meetings pane"
+        );
     }
 
     #[test]
     fn developer_navigation_appends_developer_panes_in_order() {
         assert_eq!(
-            Pane::all(true),
+            Pane::all(true, false),
             vec![
                 Pane::Settings,
                 Pane::Modes,

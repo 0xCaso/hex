@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, eyre};
 use gpui::{
-    App, Application, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render, Rgba,
-    SystemMenuType, Timer, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
+    App, Application, Bounds, ClipboardItem, Context, IntoElement, KeyBinding, Menu, MenuItem,
+    Render, Rgba, SystemMenuType, Timer, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 
 use crate::app_settings::AppSettings;
@@ -21,15 +21,17 @@ use crate::dictation_indicator::DictationIndicatorEvent;
 use crate::dictation_indicator::{self, DictationIndicatorUi};
 use crate::meeting::{self, MeetingRequest};
 use crate::meeting_detection::{
-    MeetingCandidate, MeetingDetector, MeetingSource, candidate_from_microphone,
+    CallPresence, MeetingCandidate, MeetingDetector, MeetingSource, candidate_from_microphone,
 };
 use crate::microphone_activity::active_microphone_applications;
 use crate::transcription_preparation::TranscriptionPreparation;
 use crate::{config, recognition};
 
-const WINDOW_WIDTH: f32 = 344.0;
-const WINDOW_HEIGHT: f32 = 144.0;
-const WINDOW_MARGIN: f32 = 18.0;
+const PANEL_WIDTH: f32 = 420.0;
+const PANEL_HEIGHT: f32 = 64.0;
+const WINDOW_MARGIN: f32 = 12.0;
+const OFFER_TIMEOUT: Duration = Duration::from_secs(20);
+const READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 enum ControllerCommand {
     Record(MeetingCandidate),
@@ -42,16 +44,29 @@ enum ControllerEvent {
     Starting,
     RecordingStarted,
     Transcribing,
-    Finished,
+    CallEnded { app: String },
+    Finished(Box<meeting::MeetingManifest>),
     Failed { title: String, error: String },
 }
 
 struct ActiveRecording {
     title: String,
+    application: Option<String>,
+    app_label: String,
+    presence: CallPresence,
     stop: Arc<AtomicBool>,
     started: Receiver<()>,
     reported_started: bool,
     worker: JoinHandle<Result<meeting::MeetingManifest>>,
+}
+
+/// The meeting state mirrored into the menu bar.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MeetingMenuState {
+    Idle,
+    Starting,
+    Recording { started: Instant },
+    Transcribing,
 }
 
 struct MeetingUi {
@@ -87,7 +102,7 @@ impl MeetingUi {
     /// attempted against any already-open window.
     fn show_meeting_window(
         &self,
-        offer: Option<WindowHandle<MeetingOffer>>,
+        offer: Option<WindowHandle<MeetingPanel>>,
         open_failure: &'static str,
         cx: &mut App,
         update: impl FnOnce(&mut AppWindow, &mut Context<AppWindow>),
@@ -148,6 +163,62 @@ pub enum Launch {
     MeetingWatch { offer_preview: bool },
     /// One isolated, deterministic UI preview without app services.
     Shell(crate::app_window::AppWindowPreview),
+    /// One meeting capsule without app services or detection.
+    MeetingPanelPreview(PanelPreview),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PanelPreview {
+    Offer,
+    CallEnded,
+    Ready,
+}
+
+fn run_panel_preview(preview: PanelPreview) -> Result<()> {
+    let kind = match preview {
+        PanelPreview::Offer => PanelKind::Offer(MeetingCandidate {
+            key: "preview".into(),
+            title: "Zoom meeting".into(),
+            source: MeetingSource::Zoom,
+            application: None,
+            named: false,
+        }),
+        PanelPreview::CallEnded => PanelKind::CallEnded { app: "Zoom".into() },
+        PanelPreview::Ready => {
+            let mut manifest: meeting::MeetingManifest =
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 1,
+                    "id": "preview",
+                    "title": "Zoom call — 2:30 PM",
+                    "status": "complete",
+                    "created_at_ms": crate::events::now_ms(),
+                    "ended_at_ms": null,
+                    "duration_ms": 1_934_000,
+                    "system": {"file": "system.wav", "samples": 0, "dropped_packets": 0},
+                    "microphone": {"file": "microphone.wav", "samples": 0, "dropped_packets": 0},
+                    "error": null
+                }))?;
+            manifest.export_path = Some(PathBuf::from(
+                "~/Documents/Hex Meetings/2026-10-15 1430 Zoom call — 2-30 PM.md",
+            ));
+            PanelKind::Ready(Box::new(manifest))
+        }
+    };
+    let (commands, _receiver) = mpsc::sync_channel(8);
+    Application::new().run(move |cx| {
+        cx.bind_keys([KeyBinding::new(
+            "cmd-q",
+            crate::app_window::QuitApplication,
+            None,
+        )]);
+        cx.on_action(|_: &crate::app_window::QuitApplication, cx| cx.quit());
+        let deadline = matches!(preview, PanelPreview::Offer).then_some(OFFER_TIMEOUT * 30);
+        if let Err(error) = open_panel(kind, commands, deadline, cx) {
+            tracing::error!(%error, "could not open meeting panel preview");
+            cx.quit();
+        }
+    });
+    Ok(())
 }
 
 fn should_open_app_on_launch(
@@ -164,6 +235,7 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
         return Err(eyre!("desktop startup requires the main thread"));
     }
     let (listener, dictation_preview, preview, shell_preview) = match launch {
+        Launch::MeetingPanelPreview(preview) => return run_panel_preview(preview),
         Launch::App(listener) => (Some(listener), false, false, None),
         Launch::DictationHudPreview => (None, true, false, None),
         #[cfg(debug_assertions)]
@@ -258,34 +330,35 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             }
         });
     }
-    let controller_worker = (!shell_preview.is_some()
-        && !dictation_preview
-        && crate::DEVELOPER_FEATURES_ENABLED)
-        .then(|| {
-            let controller_events = event_sender.clone();
-            thread::spawn(move || {
-                if preview {
-                    let _ = controller_events.send(ControllerEvent::Offer(MeetingCandidate {
-                        key: "preview".into(),
-                        title: "Design sync".into(),
-                        source: MeetingSource::Zoom,
-                    }));
-                }
-                if let Err(error) = controller_loop(
-                    shutdown,
-                    controller_events.clone(),
-                    command_receiver,
-                    meeting_request_receiver,
-                    meeting_project_root,
-                ) {
-                    tracing::error!(%error, "meeting controller stopped");
-                    let _ = controller_events.send(ControllerEvent::Failed {
-                        title: "Meeting detection stopped".into(),
-                        error: error.to_string(),
-                    });
-                }
-            })
-        });
+    // The controller idles without inspecting microphone activity until the
+    // user opts in to meetings (always available in developer builds).
+    let controller_worker = (!shell_preview.is_some() && !dictation_preview).then(|| {
+        let controller_events = event_sender.clone();
+        thread::spawn(move || {
+            if preview {
+                let _ = controller_events.send(ControllerEvent::Offer(MeetingCandidate {
+                    key: "preview".into(),
+                    title: "Design sync".into(),
+                    source: MeetingSource::Zoom,
+                    application: None,
+                    named: true,
+                }));
+            }
+            if let Err(error) = controller_loop(
+                shutdown,
+                controller_events.clone(),
+                command_receiver,
+                meeting_request_receiver,
+                meeting_project_root,
+            ) {
+                tracing::error!(%error, "meeting controller stopped");
+                let _ = controller_events.send(ControllerEvent::Failed {
+                    title: "Meeting detection stopped".into(),
+                    error: error.to_string(),
+                });
+            }
+        })
+    });
 
     let recognition_meeting_requests = meeting_request_sender.clone();
     let (recognition_start_sender, recognition_start_receiver) = if listener.is_some() {
@@ -298,8 +371,7 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
         let recognition_events = event_log.clone().expect("listener event log must exist");
         let failure_indicator = indicator_sender.clone();
         let recognition_indicator = indicator_sender.clone();
-        let meeting_requests =
-            crate::DEVELOPER_FEATURES_ENABLED.then(|| recognition_meeting_requests.clone());
+        let meeting_requests = Some(recognition_meeting_requests.clone());
         let recognition_history = history.clone();
         let start = recognition_start_receiver.expect("listener start receiver must exist");
         thread::spawn(move || {
@@ -557,9 +629,11 @@ async fn drive_ui(
     indicator_enabled: bool,
     cx: &mut gpui::AsyncApp,
 ) {
-    let mut offer_window: Option<WindowHandle<MeetingOffer>> = None;
+    let mut offer_window: Option<WindowHandle<MeetingPanel>> = None;
     let mut dictation_indicator = indicator_enabled.then(DictationIndicatorUi::new);
     let mut model_menu_refresh_at = Instant::now();
+    let mut meeting_state = MeetingMenuState::Idle;
+    let mut meeting_menu_refresh_at = Instant::now();
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -634,6 +708,22 @@ async fn drive_ui(
                 crate::status_item::StatusItemAction::CheckForUpdates => {
                     crate::sparkle::check_for_updates();
                 }
+                crate::status_item::StatusItemAction::StartMeeting => {
+                    if let Err(error) = ui.meeting_requests.try_send(MeetingRequest::Start) {
+                        tracing::warn!(%error, "could not start meeting from status item");
+                    }
+                }
+                crate::status_item::StatusItemAction::StopMeeting => {
+                    if let Err(error) = ui.commands.try_send(ControllerCommand::Stop) {
+                        tracing::warn!(%error, "could not stop meeting from status item");
+                    }
+                }
+                crate::status_item::StatusItemAction::OpenMeetings => match ui.open_or_focus(cx) {
+                    Ok(handle) => {
+                        let _ = handle.update(cx, |window, _, cx| window.show_meetings(cx));
+                    }
+                    Err(error) => tracing::error!(%error, "could not open Meetings"),
+                },
                 crate::status_item::StatusItemAction::Quit => {
                     ui.transcription_preparation.cancel();
                     cx.quit();
@@ -680,41 +770,72 @@ async fn drive_ui(
             let result = cx.update(|cx| match event {
                 ControllerEvent::Offer(candidate) => {
                     close_window(offer_window.take(), cx);
-                    offer_window = open_offer(candidate, ui.commands.clone(), cx).ok();
+                    offer_window = open_panel(
+                        PanelKind::Offer(candidate),
+                        ui.commands.clone(),
+                        Some(OFFER_TIMEOUT),
+                        cx,
+                    )
+                    .ok();
                 }
-                ControllerEvent::Starting => ui.show_meeting_window(
-                    offer_window.take(),
-                    "could not open HEX for starting meeting",
-                    cx,
-                    |window, cx| window.meeting_starting(cx),
-                ),
-                ControllerEvent::RecordingStarted => ui.show_meeting_window(
-                    offer_window.take(),
-                    "could not open HEX for active meeting",
-                    cx,
-                    |window, cx| window.meeting_started(cx),
-                ),
+                ControllerEvent::Starting => {
+                    close_window(offer_window.take(), cx);
+                    meeting_state = MeetingMenuState::Starting;
+                    update_app_window(&ui.app_window, cx, |window, cx| window.meeting_starting(cx));
+                }
+                ControllerEvent::RecordingStarted => {
+                    meeting_state = MeetingMenuState::Recording {
+                        started: Instant::now(),
+                    };
+                    update_app_window(&ui.app_window, cx, |window, cx| window.meeting_started(cx));
+                }
+                ControllerEvent::CallEnded { app } => {
+                    close_window(offer_window.take(), cx);
+                    offer_window =
+                        open_panel(PanelKind::CallEnded { app }, ui.commands.clone(), None, cx)
+                            .ok();
+                }
                 ControllerEvent::Transcribing => {
+                    close_window(offer_window.take(), cx);
+                    meeting_state = MeetingMenuState::Transcribing;
                     update_app_window(&ui.app_window, cx, |window, cx| {
                         window.meeting_updated(cx);
                     });
                 }
-                ControllerEvent::Finished => {
+                ControllerEvent::Finished(manifest) => {
+                    meeting_state = MeetingMenuState::Idle;
                     update_app_window(&ui.app_window, cx, |window, cx| {
                         window.meeting_finished(cx);
                     });
+                    close_window(offer_window.take(), cx);
+                    offer_window = open_panel(
+                        PanelKind::Ready(manifest),
+                        ui.commands.clone(),
+                        Some(READY_TIMEOUT),
+                        cx,
+                    )
+                    .ok();
                 }
-                ControllerEvent::Failed { title, error } => ui.show_meeting_window(
-                    offer_window.take(),
-                    "could not open HEX for meeting failure",
-                    cx,
-                    |window, cx| window.meeting_failed(title, error, cx),
-                ),
+                ControllerEvent::Failed { title, error } => {
+                    meeting_state = MeetingMenuState::Idle;
+                    ui.show_meeting_window(
+                        offer_window.take(),
+                        "could not open HEX for meeting failure",
+                        cx,
+                        |window, cx| window.meeting_failed(title, error, cx),
+                    )
+                }
             });
             if let Err(error) = result {
                 tracing::error!(%error, "could not update meeting UI");
                 return;
             }
+            meeting_menu_refresh_at = Instant::now();
+        }
+        if ui.status_actions.is_some() && Instant::now() >= meeting_menu_refresh_at {
+            let enabled = crate::app_settings::meetings_enabled();
+            let _ = cx.update(|_| crate::status_item::update_meeting(&meeting_state, enabled));
+            meeting_menu_refresh_at = Instant::now() + Duration::from_millis(500);
         }
         Timer::after(Duration::from_millis(16)).await;
     }
@@ -820,29 +941,28 @@ fn controller_loop(
     tracing::info!("GPUI meeting watcher started");
 
     while !shutdown.load(Ordering::Relaxed) {
+        let enabled = crate::app_settings::meetings_enabled();
         let requested_commands = meeting_requests
             .try_iter()
             .take(8)
             .map(|request| match request {
-                MeetingRequest::Start => ControllerCommand::Record(MeetingCandidate {
-                    key: "manual".into(),
-                    title: "Meeting".into(),
-                    source: MeetingSource::Manual,
-                }),
+                MeetingRequest::Start => ControllerCommand::Record(MeetingCandidate::manual()),
                 MeetingRequest::Stop => ControllerCommand::Stop,
             });
         for command in commands.try_iter().take(8).chain(requested_commands) {
             match command {
+                ControllerCommand::Record(_) if !enabled => {
+                    tracing::warn!("ignored a meeting recording request while meetings are off");
+                }
                 ControllerCommand::Record(candidate) if recording.is_none() => {
                     let stop = Arc::new(AtomicBool::new(false));
                     let worker_stop = stop.clone();
                     let (started_sender, started) = mpsc::sync_channel(1);
-                    let title = candidate.title;
-                    let worker_title = title.clone();
+                    let start = candidate.recording_start();
                     let worker_project_root = project_root.clone();
                     let worker = thread::spawn(move || {
                         meeting::record(
-                            Some(worker_title),
+                            start,
                             &worker_stop,
                             &worker_project_root,
                             Some(started_sender),
@@ -850,7 +970,10 @@ fn controller_loop(
                     });
                     let _ = events.send(ControllerEvent::Starting);
                     recording = Some(ActiveRecording {
-                        title,
+                        title: candidate.title,
+                        application: candidate.application,
+                        app_label: candidate.source.label().into(),
+                        presence: CallPresence::default(),
                         stop,
                         started,
                         reported_started: false,
@@ -886,7 +1009,7 @@ fn controller_loop(
                 .take()
                 .ok_or_else(|| eyre!("recording disappeared"))?;
             let event = match active.worker.join() {
-                Ok(Ok(_manifest)) => ControllerEvent::Finished,
+                Ok(Ok(manifest)) => ControllerEvent::Finished(Box::new(manifest)),
                 Ok(Err(error)) => ControllerEvent::Failed {
                     title: active.title,
                     error: error.to_string(),
@@ -899,8 +1022,38 @@ fn controller_loop(
             let _ = events.send(event);
         }
 
-        if recording.is_none() {
-            let microphone_apps = active_microphone_applications()?;
+        if let Some(active) = &mut recording
+            && active.reported_started
+            && !active.stop.load(Ordering::Relaxed)
+            && let Some(application) = active.application.as_deref()
+        {
+            // A failed query must not end the controller while it owns a recording.
+            let present = match active_microphone_applications() {
+                Ok(applications) => applications
+                    .iter()
+                    .any(|candidate| candidate.canonical_bundle_id() == Some(application)),
+                Err(error) => {
+                    tracing::warn!(%error, "could not inspect microphone activity during a meeting");
+                    true
+                }
+            };
+            if active.presence.observe(present) {
+                tracing::info!(application, "meeting application released the microphone");
+                let _ = events.send(ControllerEvent::CallEnded {
+                    app: active.app_label.clone(),
+                });
+            }
+        }
+
+        if recording.is_none() && enabled {
+            let microphone_apps = match active_microphone_applications() {
+                Ok(applications) => applications,
+                Err(error) => {
+                    tracing::warn!(%error, "could not inspect microphone activity");
+                    thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+            };
             let observed = microphone_apps
                 .iter()
                 .map(|application| (application.pid, application.bundle_id.clone()))
@@ -954,13 +1107,14 @@ fn controller_loop(
     Ok(())
 }
 
-fn popup_options(cx: &App) -> WindowOptions {
-    let window_size = size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT));
+fn panel_options(cx: &App) -> WindowOptions {
+    let window_size = size(px(PANEL_WIDTH), px(PANEL_HEIGHT));
     let (display_id, bounds) = cx.primary_display().map_or_else(
         || (None, Bounds::centered(None, window_size, cx)),
         |display| {
+            // Below the menu bar, beside the status items like a notification.
             let origin = display.bounds().top_right()
-                - point(px(WINDOW_WIDTH + WINDOW_MARGIN), px(-WINDOW_MARGIN));
+                - point(px(PANEL_WIDTH + WINDOW_MARGIN), px(-(WINDOW_MARGIN + 28.0)));
             (
                 Some(display.id()),
                 Bounds {
@@ -985,17 +1139,31 @@ fn popup_options(cx: &App) -> WindowOptions {
     }
 }
 
-fn open_offer(
-    candidate: MeetingCandidate,
+/// Opens a focus-free capsule. A timed panel closes itself; an expired offer
+/// is simply dismissed, and nothing starts or stops on a timeout.
+fn open_panel(
+    kind: PanelKind,
     commands: SyncSender<ControllerCommand>,
+    timeout: Option<Duration>,
     cx: &mut App,
-) -> gpui::Result<WindowHandle<MeetingOffer>> {
-    cx.open_window(popup_options(cx), |_, cx| {
-        cx.new(|_| MeetingOffer {
-            candidate,
+) -> gpui::Result<WindowHandle<MeetingPanel>> {
+    let deadline = timeout.map(|timeout| (Instant::now(), timeout));
+    let handle = cx.open_window(panel_options(cx), |_, cx| {
+        cx.new(|_| MeetingPanel {
+            kind,
             commands,
+            deadline,
+            copied: false,
         })
-    })
+    })?;
+    if let Some(timeout) = timeout {
+        cx.spawn(async move |cx| {
+            Timer::after(timeout).await;
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        })
+        .detach();
+    }
+    Ok(handle)
 }
 
 fn close_window<T: Render + 'static>(window: Option<WindowHandle<T>>, cx: &mut App) {
@@ -1016,95 +1184,204 @@ fn update_app_window(
     }
 }
 
-struct MeetingOffer {
-    candidate: MeetingCandidate,
+enum PanelKind {
+    Offer(MeetingCandidate),
+    CallEnded { app: String },
+    Ready(Box<meeting::MeetingManifest>),
+}
+
+struct MeetingPanel {
+    kind: PanelKind,
     commands: SyncSender<ControllerCommand>,
+    deadline: Option<(Instant, Duration)>,
+    copied: bool,
 }
 
-impl Render for MeetingOffer {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let dismiss = self.commands.clone();
-        let record = self.commands.clone();
-        let candidate = self.candidate.clone();
-        let is_preview = candidate.key == "preview";
-        panel()
-            .child(header("MEETING DETECTED"))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(18.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(0xf1f1f1))
-                            .child(self.candidate.title.clone()),
-                    )
-                    .child(div().text_sm().text_color(rgb(0x8f8f8f)).child(format!(
-                        "{} · Tell participants before recording",
-                        self.candidate.source.label()
-                    ))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .items_end()
-                    .justify_end()
-                    .gap_2()
-                    .child(secondary_button("not-now", "Not Now", move |window| {
-                        if dismiss.try_send(ControllerCommand::Dismiss).is_ok() {
+impl Render for MeetingPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let remaining = self.deadline.map(|(opened, timeout)| {
+            1.0 - (opened.elapsed().as_secs_f32() / timeout.as_secs_f32()).clamp(0.0, 1.0)
+        });
+        if remaining.is_some() {
+            window.request_animation_frame();
+        }
+        let (dot, title, subtitle, actions) = match &self.kind {
+            PanelKind::Offer(candidate) => {
+                let dismiss = self.commands.clone();
+                let record = self.commands.clone();
+                let candidate = candidate.clone();
+                let is_preview = candidate.key == "preview";
+                let title = if candidate.named {
+                    candidate.title.clone()
+                } else {
+                    format!("{} call detected", candidate.source.label())
+                };
+                let seconds = self
+                    .deadline
+                    .map(|(opened, timeout)| timeout.saturating_sub(opened.elapsed()).as_secs() + 1)
+                    .unwrap_or_default();
+                (
+                    rgb(0xd4d4d4),
+                    title,
+                    format!("Record locally? Tell participants · {seconds}s"),
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(secondary_button("not-now", "Not Now", move |window, _| {
+                            let _ = dismiss.try_send(ControllerCommand::Dismiss);
                             window.remove_window();
-                        }
-                    }))
-                    .child(primary_button("record", "Record Locally", move |window| {
-                        let command = if is_preview {
-                            ControllerCommand::Dismiss
-                        } else {
-                            ControllerCommand::Record(candidate.clone())
-                        };
-                        if record.try_send(command).is_ok() {
-                            window.remove_window();
-                        }
-                    })),
-            )
-    }
-}
-
-fn panel() -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .size_full()
-        .gap_2()
-        .p_3()
-        .bg(rgb(0x121212))
-        .border_1()
-        .border_color(rgb(0x303030))
-        .rounded_lg()
-        .shadow_lg()
-}
-
-fn header(label: &'static str) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(div().size(px(6.0)).rounded_full().bg(rgb(0xd4d4d4)))
-        .child(
+                        }))
+                        .child(primary_button("record", "Record", move |window, _| {
+                            let command = if is_preview {
+                                ControllerCommand::Dismiss
+                            } else {
+                                ControllerCommand::Record(candidate.clone())
+                            };
+                            if record.try_send(command).is_ok() {
+                                window.remove_window();
+                            }
+                        })),
+                )
+            }
+            PanelKind::CallEnded { app } => {
+                let stop = self.commands.clone();
+                (
+                    rgb(0xff5f57),
+                    format!("{app} left the call"),
+                    "HEX is still recording.".into(),
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(secondary_button(
+                            "keep-recording",
+                            "Keep Recording",
+                            |window, _| {
+                                window.remove_window();
+                            },
+                        ))
+                        .child(primary_button(
+                            "stop-meeting",
+                            "Stop & Transcribe",
+                            move |window, _| {
+                                if stop.try_send(ControllerCommand::Stop).is_ok() {
+                                    window.remove_window();
+                                }
+                            },
+                        )),
+                )
+            }
+            PanelKind::Ready(manifest) => {
+                let path = manifest.export_path.clone();
+                let reveal_path = path.clone();
+                let copy_path = path.clone();
+                let entity = cx.entity();
+                let subtitle = match (&path, &manifest.export_error) {
+                    (Some(path), _) => path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    (None, Some(error)) => format!("Markdown not saved: {error}"),
+                    (None, None) => "Saved in Meetings".into(),
+                };
+                (
+                    rgb(0x5ac46a),
+                    "Meeting transcript ready".into(),
+                    subtitle,
+                    div()
+                        .flex()
+                        .gap_2()
+                        .when_some(copy_path, |actions, path| {
+                            let label = if self.copied { "Copied" } else { "Copy" };
+                            actions.child(secondary_button(
+                                "copy-transcript",
+                                label,
+                                move |_, cx| match std::fs::read_to_string(&path) {
+                                    Ok(markdown) => {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(markdown));
+                                        entity.update(cx, |panel, cx| {
+                                            panel.copied = true;
+                                            cx.notify();
+                                        });
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(%error, "could not copy meeting transcript")
+                                    }
+                                },
+                            ))
+                        })
+                        .when_some(reveal_path, |actions, path| {
+                            actions.child(primary_button(
+                                "reveal-transcript",
+                                "Reveal",
+                                move |window, _| {
+                                    meeting::reveal(&path);
+                                    window.remove_window();
+                                },
+                            ))
+                        }),
+                )
+            }
+        };
+        div().size_full().p(px(4.0)).child(
             div()
-                .text_size(px(10.0))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(0x9a9a9a))
-                .child(label),
+                .relative()
+                .size_full()
+                .flex()
+                .items_center()
+                .gap_3()
+                .pl_4()
+                .pr_2()
+                .bg(rgb(0x161616))
+                .border_1()
+                .border_color(rgb(0x303030))
+                .rounded_full()
+                .shadow_lg()
+                .overflow_hidden()
+                .child(div().flex_none().size(px(8.0)).rounded_full().bg(dot))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xf1f1f1))
+                                .overflow_x_hidden()
+                                .truncate()
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(0x8f8f8f))
+                                .overflow_x_hidden()
+                                .truncate()
+                                .child(subtitle),
+                        ),
+                )
+                .child(actions.flex_none())
+                .when_some(remaining, |panel, remaining| {
+                    panel.child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .h(px(2.0))
+                            .w(px((PANEL_WIDTH - 8.0) * remaining))
+                            .bg(rgb(0x5a5a5a)),
+                    )
+                }),
         )
+    }
 }
 
 fn primary_button(
     id: &'static str,
     label: &'static str,
-    on_click: impl Fn(&mut Window) + 'static,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     button(id, label, rgb(0xe8e8e8), rgb(0x111111), on_click)
 }
@@ -1112,9 +1389,9 @@ fn primary_button(
 fn secondary_button(
     id: &'static str,
     label: &'static str,
-    on_click: impl Fn(&mut Window) + 'static,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    button(id, label, rgb(0x242424), rgb(0xbdbdbd), on_click)
+    button(id, label, rgb(0x262626), rgb(0xbdbdbd), on_click)
 }
 
 fn button(
@@ -1122,7 +1399,7 @@ fn button(
     label: &'static str,
     background: Rgba,
     foreground: Rgba,
-    on_click: impl Fn(&mut Window) + 'static,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -1131,15 +1408,15 @@ fn button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_sm()
+        .rounded_full()
         .bg(background)
-        .text_sm()
+        .text_size(px(12.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(foreground)
         .hover(|style| style.opacity(0.86))
         .active(|style| style.opacity(0.8))
         .child(label)
-        .on_click(move |_, window, _| on_click(window))
+        .on_click(move |_, window, cx| on_click(window, cx))
 }
 
 #[cfg(debug_assertions)]

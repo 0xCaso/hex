@@ -219,6 +219,15 @@ enum Command {
         /// Show the sidebar update action without starting the updater.
         #[arg(long)]
         update_available: bool,
+        /// Opt in to Meetings so Settings shows its section and the pane.
+        #[arg(long)]
+        meetings_enabled: bool,
+        /// Show missing Screen & System Audio Recording permission for Meetings.
+        #[arg(long)]
+        screen_recording_missing: bool,
+        /// For `meeting-offer`: show the call-ended or transcript-ready capsule.
+        #[arg(long, value_enum, default_value = "offer")]
+        meeting_panel: MeetingPanelPreview,
     },
     /// Listen and transcribe until interrupted.
     Listen {
@@ -346,6 +355,15 @@ enum AppPreviewTarget {
     Activity,
     History,
     TranscriptionPicker,
+    MeetingOffer,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, ValueEnum)]
+enum MeetingPanelPreview {
+    Offer,
+    CallEnded,
+    Ready,
 }
 
 #[cfg(target_os = "macos")]
@@ -440,7 +458,20 @@ fn main() -> Result<()> {
             open_history_retention,
             confirm_release_microphone,
             update_available,
+            meetings_enabled,
+            screen_recording_missing,
+            meeting_panel,
         } => {
+            if matches!(target, AppPreviewTarget::MeetingOffer) {
+                return meeting_watcher::run(
+                    &SHUTDOWN,
+                    meeting_watcher::Launch::MeetingPanelPreview(match meeting_panel {
+                        MeetingPanelPreview::Offer => meeting_watcher::PanelPreview::Offer,
+                        MeetingPanelPreview::CallEnded => meeting_watcher::PanelPreview::CallEnded,
+                        MeetingPanelPreview::Ready => meeting_watcher::PanelPreview::Ready,
+                    }),
+                );
+            }
             if matches!(target, AppPreviewTarget::DictationHud) {
                 return meeting_watcher::run(
                     &SHUTDOWN,
@@ -466,7 +497,7 @@ fn main() -> Result<()> {
                 AppPreviewTarget::Meetings => developer_control::DeveloperPane::Meetings,
                 AppPreviewTarget::Activity => developer_control::DeveloperPane::Activity,
                 AppPreviewTarget::History => developer_control::DeveloperPane::History,
-                AppPreviewTarget::DictationHud => unreachable!(),
+                AppPreviewTarget::DictationHud | AppPreviewTarget::MeetingOffer => unreachable!(),
             };
             let model_state = match model_state {
                 AppPreviewModelState::Actual => app_window::PreviewModelState::Actual,
@@ -494,6 +525,8 @@ fn main() -> Result<()> {
                     open_history_retention,
                     confirm_release_microphone,
                     update_available,
+                    meetings_enabled,
+                    screen_recording_missing,
                 }),
             )
         }
@@ -610,7 +643,13 @@ fn main() -> Result<()> {
             command: MeetingCommand::Record { title },
         } => {
             app_settings::AppSettings::load()?;
-            meeting::record(title, &SHUTDOWN, &root, None).map(|_| ())
+            meeting::record(
+                meeting::MeetingStart { title, app: None },
+                &SHUTDOWN,
+                &root,
+                None,
+            )
+            .map(|_| ())
         }
         #[cfg(debug_assertions)]
         Command::Meeting {
