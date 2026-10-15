@@ -211,9 +211,19 @@ selection, structured capture-gap observations, active-WAV repair, and resumable
 final transcription. Status, final-publication recovery, the call-ended prompt,
 and the menu-bar recording state already exist; do not replace them.
 
-Add transcript search; scrolling and follow-live behavior are already
-implemented. Validate echo suppression thresholds against real speaker-mode
-recordings.
+Search over titles, notes, and final transcripts, scrolling, and follow-live
+are implemented. Echo suppression is tuned on one real speaker-mode call
+(`hex meeting echo <dir>`); validate it on more rooms, volumes, and
+headphones, and record capture arrival times so offline replays need no
+`--microphone-offset-ms`.
+
+Acoustic echo cancellation (Voice Processing IO) was evaluated and deferred:
+it would replace ScreenCaptureKit's raw microphone with an AVAudioEngine or
+`kAudioUnitSubType_VoiceProcessingIO` input, which ducks other audio, switches
+Bluetooth headsets to the low-quality call profile, applies its own gain and
+noise suppression to the transcribed track, runs a second voice processor
+beside the call app's, and drops ScreenCaptureKit's shared capture clock. Revisit
+only if signal-level suppression proves insufficient, with a per-device opt-in.
 
 Give durable transcript entries stable identities so live-to-final reconciliation,
 incremental UI refresh, and meeting-delta paste can advance without rereading

@@ -76,11 +76,15 @@ are unverified.
 
 ```ts
 While recording                                      // meetings.rolling
-  -> Each track -> 16 kHz streaming resampler -> chunker
+  -> Each track -> one-second blocks -> bounded queue (about 5 minutes)
+  -> 16 kHz streaming resampler -> chunker + echo envelope
      ├── First pause after 20 s (pause segmenter) -> chunk boundary
      └── No pause by 30 s -> hard cut; next chunk overlaps 2 s
   -> Utility-QoS worker transcribes a chunk only while dictation is idle
+  -> Timed words -> sentences (punctuation or a 600 ms pause)
   -> transcript.rolling.ndjson replaces the Moonshine draft for covered time
+     └── Queue full -> that track keeps its entries; the draft continues after
+         them; rebuilt from its WAV after Stop
 
 Stop & Transcribe
   -> Flush tails -> finish pending chunks           // usually seconds
@@ -98,14 +102,73 @@ one chunk's inference time, and the second model stays resident while recording.
 Seams: segments starting before the middle of an overlap belong to the earlier
 chunk, and repeated words (two to twelve) at the join are removed.
 
-Echo: a `You` utterance (word segments within 700 ms) or sentence (three or more
-words) is dropped when at least 60% of its words match `Them` speech within
-±1.5 s; words match exactly, or by 60% edit similarity when both have three or
-more letters (`AICK` ≈ `AISDK`). Dropped counts are saved as
-`echo_suppressed_utterances` in the manifest.
+### Echo Suppression
+
+```ts
+Call on speakers -> the microphone hears the remote side 0-300 ms later
+Each microphone utterance or sentence                // meetings.echo
+├── Signal (meeting_echo): 20 ms energy of both tracks on one timeline
+│   ├── Lag (-100..+400 ms) and coupling from envelope correlation over ±60 s
+│   │   └── Correlation < 0.2 (headphones) -> every sound is local
+│   ├── Bleed gain = 35th percentile of mic − delayed system over ±5 s
+│   └── Frame is local when mic > predicted bleed (160 ms reverb) + 9 dB
+│       ├── ≤ 20% local -> Bleed -> dropped, whatever the words
+│       ├── ≥ 50% local -> Local -> kept, even with matching words (double-talk)
+│       └── otherwise   -> decided by words
+└── Words: ≥ 60% match Them speech within ±1.5 s (60% edit similarity) -> echo
+
+Applied in: rolling snapshot, final transcript, live view, Option-Control-V
+Live view (meeting_live::live_view)
+├── Live worker stamps each microphone draft line Bleed / Local
+├── Rolling microphone entries are already judged; not re-judged by words
+└── Undecided draft line overlapping remote speech -> hidden until it completes
+    └── No twin by then -> shown as You
+```
+
+Dropped counts are saved as `echo_suppressed_utterances` in the manifest.
+
+Root cause of `You` twins (Kit's 2026-10-15 call on speakers, Pro): ten minutes
+in, the packet-bounded rolling queue filled (`rolling meeting transcription fell
+behind` for both sources), the rolling snapshot became empty, and the pane
+showed the raw Moonshine draft, which had no echo suppression. Rolling
+transcripts were also one model segment per 20-30 s chunk, so a chunk mixing
+echo and Kit's speech was kept or dropped whole.
+
+Observed (`hex meeting echo <dir> [--microphone-offset-ms 300] [--transcribe]`,
+copied 17-minute recording, Mac Studio):
+
+```ts
+Live draft You lines shown      212 -> 72
+├── Twins of remote lines (word match)          105 -> 2
+├── Kit's lines (240-274 s, 780 s on)            67 -> 67 kept
+└── Other unmatched lines (mostly misheard bleed) 31 -> 3
+   Word matching alone would show 80
+
+Final, parakeet-unified-en
+├── Before: 35 chunk-sized You entries, 10 kept, 25 dropped whole
+└── After: 205 sentences, 74 kept; Kit's 240-274 s and 780 s+ speech kept,
+    about 8 short fragments of uncertain origin kept
+```
+
+Acoustic echo cancellation (Voice Processing IO) was evaluated, not adopted:
+it replaces ScreenCaptureKit's raw microphone with an AVAudioEngine/VPIO input,
+ducks other audio, moves Bluetooth headsets to the call profile, adds gain and
+noise processing to the transcribed track, runs beside the call app's own voice
+processor, and loses ScreenCaptureKit's shared clock. See ROADMAP.md.
 
 Sources: [meeting_transcript.rs](../../src/meeting_transcript.rs),
-`StreamingResampler` in [dictation.rs](../../src/dictation.rs). Checks:
+[meeting_echo.rs](../../src/meeting_echo.rs),
+[meeting_live.rs](../../src/meeting_live.rs),
+`StreamingResampler` in [dictation.rs](../../src/dictation.rs). Echo checks:
+`speaker_bleed_is_classified_as_bleed`, `talking_over_the_remote_side_is_local`,
+`speech_during_remote_silence_is_local`, `headphones_make_every_microphone_sound_local`,
+`the_signal_overrides_word_matching_both_ways`,
+`synthetic_speaker_bleed_is_dropped_and_double_talk_kept`,
+`live_view_hides_microphone_twins_of_remote_speech`,
+`an_undecided_draft_line_waits_while_the_remote_side_speaks`,
+`live_view_keeps_rolling_microphone_entries_that_rolling_already_judged`, and
+`timed_words_become_sentences_at_punctuation_and_pauses` (synthetic signals).
+Other checks:
 `continuous_speech_is_hard_cut_with_overlap_and_covers_every_sample`,
 `chunks_end_at_the_first_pause_after_the_target_length`,
 `overlapping_chunks_join_at_the_middle_of_the_overlap`, `seam_drops_repeated_words`,
@@ -128,6 +191,43 @@ Transcript ready capsule (15 s) -> Copy (Markdown) / Reveal
 Meetings pane -> Reveal Markdown (or Reveal Files when none)
 Option-Control-V -> Paste meeting turns added since the last paste
 ```
+
+### Meetings Pane
+
+```ts
+Header: Search meetings (title, app, notes, final transcript) + Start / Stop
+List (grouped Today / Yesterday / date)
+└── Row: title (generated when present) · time · length · app · status chip
+    └── Recording (red dot) / Transcribing / Interrupted / Failed; Ready in detail
+Detail
+├── Title, status chip, date · time · duration · app
+├── Actions: Copy Notes, Copy Transcript, Reveal Markdown, Write/Regenerate
+│   Notes, Rename, Delete (finished meetings only for the last four)
+├── Errors at the top of the scroll area
+├── Notes: Summary / Action items (checkbox + owner) / Decisions
+└── Transcript: Them left, You right in accent; merged turns; timestamps;
+    30 s+ pause dividers; live view follows the tail; "Listening..." while recording
+
+Rename -> inline field; Enter or Save          // meetings.rename
+  -> manifest title; Markdown heading only while it reads the old title
+  -> file name unchanged; empty title refused
+Delete -> "Trash Recording & Markdown" (or "Trash Recording") / Cancel
+  -> exported Markdown, then Application Support/meetings/<id>, to the Trash
+  -> refused while recording, transcribing, or writing notes   // meetings.delete
+```
+
+Choice: Delete trashes the Markdown copy too, since it holds the transcript;
+both stay recoverable from the Trash. Sources: `render_meetings` in
+[app_window.rs](../../src/app_window.rs), `trash` / `rename` in
+[meeting.rs](../../src/meeting.rs). Checks:
+`deleting_trashes_the_markdown_then_the_recording_and_refuses_while_recording`,
+`renaming_updates_the_manifest_and_an_unedited_markdown_heading`,
+`retitling_replaces_only_a_matching_first_heading`,
+`meeting_search_delete_and_rename_work_on_the_selected_meeting`, and the GPUI
+layout check `meeting_turns_alternate_sides_inside_the_detail`.
+
+Preview: `scripts/capture-preview.sh OUT meetings [--meeting-recording]
+[--confirm-meeting-delete] [--meetings-empty]`.
 
 Checks: `markdown_lists_metadata_and_labeled_turns` and
 `export_never_overwrites_and_uses_safe_names`.
@@ -188,8 +288,15 @@ Observed on the Mac Studio (macOS 27.0.1, context 8,192 tokens) with a synthetic
 - Calendar titles (EventKit) are not implemented.
 - The live Moonshine draft needs the command model; without it, the pane shows
   rolling chunks only as they complete (about every 20–30 s).
-- Settings and capsule previews launched, but screenshot capture failed on the
-  build host (`could not create image from window`); layout is visually unverified.
-  This includes the notes setting row, notes block, and Regenerate button.
+- Settings, capsule, and Meetings pane previews launched, but screenshot capture
+  failed on the build host (`could not create image from window`; the Studio
+  session was locked, `CGSSessionScreenIsLocked 1`). The redesigned pane is
+  verified only by GPUI layout checks, not visually.
+- Echo thresholds are tuned on one speaker-mode call. The offline replay assumed
+  the microphone started 300 ms after the system track because the recording's
+  manifest had no arrival times yet. Real NSFileManager trashing and the native
+  rename field are unexercised in the app.
+- Why the rolling worker stalled for over a minute on the Pro is unknown; slow
+  chunks (> 5 s) are now logged.
 - Notes have not run after a real recording in the app; the CLI path exercised
   the real model, manifest update, and Markdown rewrite.

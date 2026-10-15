@@ -167,8 +167,10 @@ substitute for source inspection or a second roadmap.
 - `meeting_transcript`: streaming 16 kHz resampling, pause-aware overlapping
   chunks, the utility-QoS rolling transcriber that yields to dictation, seam
   deduplication, echo suppression, and Markdown rendering.
-- `meeting_live`: bounded dual-stream Moonshine draft transcription and
-  byte-offset transcript tailing.
+- `meeting_live`: bounded dual-stream Moonshine draft transcription,
+  byte-offset transcript tailing, and the echo-filtered live view.
+- `meeting_echo`: 20 ms energy envelopes of both tracks and the signal-level
+  bleed/local classification of microphone segments.
 - `meeting_notes`: post-publication map/reduce meeting notes (title, summary,
   action items, decisions) with bounded chunks and deadline, manifest storage,
   and marker-delimited in-place Markdown updates.
@@ -343,8 +345,9 @@ CoreAudio formats, AppleScript details, or event serialization.
   visible and stoppable from the menu bar without the Settings window.
 - Meeting transcription never blocks dictation: it runs on its own model session
   at utility QoS, waits while an intentional dictation capture or dictation
-  inference is active, and keeps its packet queue and chunk backlog bounded; a
-  source that falls behind is rebuilt from its WAV after Stop.
+  inference is active, and keeps its queue (one-second audio blocks) and chunk
+  backlog bounded; a source that falls behind keeps what it transcribed and is
+  rebuilt from its WAV after Stop.
 - Meeting recording prevents idle sleep but does not apply dictation mute or
   pause-media behavior.
 - Apple Intelligence meeting notes run only after final publication, on a
@@ -354,13 +357,22 @@ CoreAudio formats, AppleScript details, or event serialization.
   and the `<!-- hex:notes -->` block.
 - Live meeting drafts remain available if final transcription fails. Final
   publication is atomic; adjacent same-source entries within three seconds form
-  one displayed turn labeled `You` or `Them`. Microphone utterances that repeat
-  overlapping remote speech are dropped from the final transcript. Each finished
+  one displayed turn labeled `You` or `Them`. Speaker echo never shows as `You`:
+  the live view, rolling snapshot, live paste, and final transcript drop a
+  microphone utterance when delayed system audio explains its energy, or when
+  its words repeat overlapping remote speech unless the signal shows local
+  speech (double-talk). An undecided draft line waits while the remote side
+  speaks until it completes. Each finished
   meeting is also written as Markdown to the configured folder (default
   `~/Documents/Hex Meetings`) without overwriting existing files; an export
   failure does not fail the meeting.
 - Meeting paste cursors advance only after successful insertion and reset when
   HEX restarts.
+- Deleting a meeting moves its exported Markdown and then its recording folder
+  to the Trash (never `rm`), after a two-step confirmation, and is refused while
+  it records, transcribes, or writes notes. Renaming rewrites the manifest and
+  only a Markdown heading that still reads the previous title; files keep
+  their names.
 - Visible state remains `Transcribing` until every accepted transcription or
   paste output has completed, including ordered post-processing and insertion.
 - The HUD is observational and click-through. It must not alter capture
@@ -487,7 +499,9 @@ preview. Targets include `settings`, `modes`, `voice-action`, `commands`,
 `meetings`, `activity`, `onboarding`, `transcription-picker`, `hud-lab`,
 `dictation-hud`, and `meeting-offer` (with `--meeting-panel call-ended|ready`).
 Pass `--meetings-enabled` and `--screen-recording-missing` to Settings for the
-Meetings section. The Modes preview includes representative activation,
+Meetings section. The `meetings` preview has sample meetings with notes and a
+transcript; add `--meeting-recording` for the live state,
+`--confirm-meeting-delete` for the delete confirmation, or `--meetings-empty`. The Modes preview includes representative activation,
 correction, model-variant, and transformation data so it exercises the complete
 editor. Pass `--collapse-mode-processing` to expose the lower transformation
 and deletion states without scrolling. Use `--open-transformation-picker`,
