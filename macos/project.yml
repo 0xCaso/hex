@@ -29,6 +29,22 @@ targets:
         product: HexMacFeature
     info:
       path: HexMacApp/Info.plist
+      properties:
+        CFBundleDisplayName: Hex
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: "15.0"
+        LSUIElement: true
+        NSAccessibilityUsageDescription: HEX uses Accessibility to paste dictation and read selected text for Voice Action.
+        NSAppleEventsUsageDescription: HEX uses automation to identify the foreground app and browser and pause supported media while you dictate.
+        NSInputMonitoringUsageDescription: HEX uses Input Monitoring to detect your dictation shortcuts in every app.
+        NSMicrophoneUsageDescription: HEX uses your microphone for private local dictation and does not store the captured audio.
+        SUAllowsAutomaticUpdates: false
+        SUAutomaticallyUpdate: false
+        SUEnableAutomaticChecks: true
+        SUFeedURL: https://downloads.hex.kitlangton.dev/appcast.xml
+        SUPublicEDKey: mIek27lttJe8cIBqVZFhh6reRKjpTx1h9ZY9OKWPtuM=
+        SUVerifyUpdateBeforeExtraction: true
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
