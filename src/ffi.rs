@@ -1968,10 +1968,7 @@ impl EngineCore {
                 Ok(())
             }
             HexEngineCommand::PasteMeetingTurns => {
-                if let Some(controls) = &self.recognition_controls {
-                    let _ = controls.try_send(RecognitionControl::PasteLast);
-                }
-                Ok(())
+                Err("Pasting meeting turns is only available through its keyboard shortcut.".into())
             }
             HexEngineCommand::StartMeeting => {
                 if let Some(requests) = &self.meeting_requests {
