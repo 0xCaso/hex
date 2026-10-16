@@ -99,8 +99,18 @@ Release when idle -> Press shortcut                   // dictate.cold-microphone
 Source: `DictationCapture` in [dictation.rs](../../src/dictation.rs); checks:
 `delayed_press_reconstructs_audio_from_the_original_boundary`,
 `delayed_release_removes_audio_captured_after_the_physical_release`,
-`capture_continues_past_sixty_seconds_until_explicitly_finished`.
-These cover sample-buffer/timestamp logic, not a microphone recording.
+`capture_continues_past_sixty_seconds_until_explicitly_finished`,
+`resampled_clips_keep_the_last_word_through_a_delayed_release` (44.1/48 kHz,
+segmented and not). These cover sample-buffer/timestamp logic, not a microphone
+recording. Release trimming is exact, with no post-release grace: a word still
+sounding at release is cut. The opt-in `release_boundary_harness`
+([dictation_tail_tests.rs](../../src/dictation_tail_tests.rs); `HEX_TAIL_MODEL`,
+`HEX_TAIL_WAVS`) replays recordings through the capture timeline at release
+offsets around the last word. On 2026-10-15 with `say` speech and Unified
+English, clips matched the release to the sample; releasing 100 ms before the
+speech ended kept the final word, while 150 ms before it lost the word or its
+final consonant. Incremental on/off and 1 versus default decoder threads gave
+identical results.
 The owner in [dictation_audio.rs](../../src/dictation_audio.rs) has
 `cold_capture_restart_rejects_late_open_results_and_closes_after_finish` and
 `pending_open_uses_physical_press_for_intentional_threshold`: controlled opening

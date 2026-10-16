@@ -1,4 +1,5 @@
 use std::fs::{self, File, OpenOptions};
+use std::path::Path;
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use fs2::FileExt;
@@ -8,8 +9,11 @@ pub struct InstanceLock {
 }
 
 pub fn acquire(name: &str) -> Result<InstanceLock> {
-    let directory = crate::app_paths::support_dir()?;
-    fs::create_dir_all(&directory)?;
+    acquire_in(&crate::app_paths::support_dir()?, name)
+}
+
+fn acquire_in(directory: &Path, name: &str) -> Result<InstanceLock> {
+    fs::create_dir_all(directory)?;
     let path = directory.join(format!("{name}.lock"));
     let file = OpenOptions::new()
         .create(true)
@@ -33,10 +37,12 @@ mod tests {
 
     #[test]
     fn prevents_two_owners_of_the_same_runtime() {
-        let name = format!("test-{}", std::process::id());
-        let first = acquire(&name).unwrap();
-        assert!(acquire(&name).is_err());
+        let directory =
+            std::env::temp_dir().join(format!("hex-instance-lock-{}", std::process::id()));
+        let first = acquire_in(&directory, "test").unwrap();
+        assert!(acquire_in(&directory, "test").is_err());
         drop(first);
-        assert!(acquire(&name).is_ok());
+        assert!(acquire_in(&directory, "test").is_ok());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

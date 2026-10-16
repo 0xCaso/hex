@@ -64,6 +64,14 @@ pub(crate) struct OfflineGgufSession {
 }
 
 impl OfflineGgufSession {
+    #[cfg(test)]
+    pub(crate) fn set_threads_for_test(&mut self, n_threads: i32) -> transcribe_cpp::Result<()> {
+        self.options.n_threads = n_threads;
+        self.session = None;
+        self.session = Some(self.model.session_with(&self.options)?);
+        Ok(())
+    }
+
     pub(crate) fn new(model: transcribe_cpp::Model) -> transcribe_cpp::Result<Self> {
         let options = session_options(model.device()?.device_type);
         let session = model.session_with(&options)?;

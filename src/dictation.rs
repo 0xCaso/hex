@@ -1280,6 +1280,56 @@ mod tests {
     }
 
     #[test]
+    fn resampled_clips_keep_the_last_word_through_a_delayed_release() {
+        for sample_rate in [44_100, 48_000] {
+            let audio = paused_speech(sample_rate);
+            // Release 100 ms before the audio ends, inside the final word,
+            // after the chunk carrying that audio has already arrived.
+            let released_ms = audio.len() as u64 * 1_000 / u64::from(sample_rate) - 100;
+            let released = released_ms as usize * sample_rate as usize / 1_000;
+            let expected = resample_for_parakeet(&audio[..released], sample_rate);
+            let mut clips = Vec::new();
+            for segmented in [false, true] {
+                let mut capture = DictationCapture::new(sample_rate);
+                let start = capture_time();
+                capture.start(start);
+                if segmented {
+                    capture.segment_capture(7);
+                }
+                assert!(capture.become_intentional(start + MINIMUM_HOLD_DURATION));
+                let mut through = start;
+                for chunk in audio.chunks(sample_rate as usize / 100) {
+                    through = through + Duration::from_millis(10);
+                    capture.ingest(chunk, through);
+                    capture.offer_segment(|_| true);
+                }
+                let Finish::Transcribe(clip) =
+                    capture.finish(start + Duration::from_millis(released_ms))
+                else {
+                    panic!("expected transcription")
+                };
+                assert_eq!(clip.cuts().len(), if segmented { 2 } else { 0 });
+                assert_eq!(clip.samples.len(), expected.len(), "{sample_rate} Hz");
+                // Only the final 10 ms may differ: the clip's resampler saw the
+                // real audio after the release where the reference saw silence.
+                let settled = expected.len() - 160;
+                assert!(
+                    clip.samples[..settled]
+                        .iter()
+                        .zip(&expected[..settled])
+                        .all(|(clip, expected)| (clip - expected).abs() < 1e-4),
+                    "{sample_rate} Hz segmented={segmented} lost audio before the release"
+                );
+                clips.push(clip.samples);
+            }
+            assert!(
+                clips[0] == clips[1],
+                "{sample_rate} Hz: segmenting changed the clip"
+            );
+        }
+    }
+
+    #[test]
     fn delayed_release_drops_cuts_after_the_physical_release() {
         let mut capture = DictationCapture::new(48_000);
         let mut offered = 0;
