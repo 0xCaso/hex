@@ -14,9 +14,15 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
     private let developerFeaturesEnabled: Bool
     private var isSettingsWindowVisible: Bool = false
 
+    #if DEBUG
+    nonisolated public static let defaultDeveloperFeaturesEnabled = true
+    #else
+    nonisolated public static let defaultDeveloperFeaturesEnabled = false
+    #endif
+
     public init(
         previewDictationHUD: Bool = CommandLine.arguments.contains("--preview-dictation"),
-        developerFeaturesEnabled: Bool = true
+        developerFeaturesEnabled: Bool = HexAppDelegate.defaultDeveloperFeaturesEnabled
     ) {
         self.previewDictationHUD = previewDictationHUD
         self.developerFeaturesEnabled = developerFeaturesEnabled

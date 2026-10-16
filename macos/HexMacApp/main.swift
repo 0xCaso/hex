@@ -7,7 +7,10 @@ if cliExitCode >= 0 {
     Darwin.exit(cliExitCode)
 }
 
-_ = HexEngineRuntime.initializeKeyboardLayoutOnMainThread()
+guard HexEngineRuntime.initializeKeyboardLayoutOnMainThread() else {
+    FileHandle.standardError.write(Data("hex: could not initialize the keyboard layout on the main thread\n".utf8))
+    Darwin.exit(1)
+}
 
 MainActor.assumeIsolated {
     let app = NSApplication.shared
