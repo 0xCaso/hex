@@ -1258,11 +1258,9 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
         None
     };
 
-    let recognition_worker = if cfg.start_workers
-        && instance_guard.is_some()
-        && !cfg.preview_dictation_hud
-    {
-        event_log.map(|recognition_events| {
+    let recognition_worker =
+        if cfg.start_workers && instance_guard.is_some() && !cfg.preview_dictation_hud {
+            event_log.map(|recognition_events| {
             let failure_indicator = indicator_sender.clone();
             let recognition_indicator = indicator_sender.clone();
             let meeting_requests = Some(meeting_request_sender.clone());
@@ -1300,9 +1298,9 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
                 }
             })
         })
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let preview_worker = if cfg.preview_dictation_hud {
         let preview_sender = indicator_sender.clone();
@@ -1687,6 +1685,15 @@ mod tests {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let header_path = manifest_dir.join("include/hex.h");
         let header = std::fs::read_to_string(&header_path).expect("include/hex.h must exist");
+        let swift_header_path =
+            manifest_dir.join("macos/HexMacPackage/Sources/HexEngineFFI/include/hex.h");
+        if swift_header_path.exists() {
+            let swift_header = std::fs::read_to_string(&swift_header_path).unwrap();
+            assert_eq!(
+                header, swift_header,
+                "macos/HexMacPackage/Sources/HexEngineFFI/include/hex.h drifted from include/hex.h"
+            );
+        }
         let rust_source = std::fs::read_to_string(manifest_dir.join("src/ffi.rs"))
             .expect("src/ffi.rs must exist");
 

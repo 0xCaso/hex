@@ -1,0 +1,4 @@
+module HexEngineFFI {
+    header "hex.h"
+    export *
+}
