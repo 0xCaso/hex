@@ -1,5 +1,52 @@
-// The swarm's tunable values. The hero reads this plain object every frame; the knobs panel,
+// The hero's tunable values. The frame loop and the field read this plain object; the knobs panel,
 // loaded only when someone presses ` (or opens the page with ?tune), writes into it.
+import type { SpringSpec } from "./spring"
+
+const s = (duration: number, bounce = 0): SpringSpec => ({ duration, bounce })
+
+/** Every spring in the hero, by duration and bounce (Kit's palette: default .3/0, calm .4/0, slow .85/0, snappy .25/0). */
+export const motion = {
+  /** Words arriving in the field: fade and 2.5 px blur clearing in place. default */
+  wordsIn: s(0.3),
+  /** The previous take leaving the field, in place. snappy, 17% shorter than words in */
+  textOut: s(0.25),
+  /** The field's height when text needs more room. calm */
+  field: s(0.4),
+  /** The caret's fade, and readout labels swapping in place. default */
+  readout: s(0.3),
+  /** Lights striking: brackets, cut marks, the gauge, the write head. default */
+  lightsOn: s(0.3),
+  /** Lights cooling after the paste. slow */
+  lightsCool: s(0.85),
+  /** Lights leaving at once: the write head at release, the bead as it lands. snappy */
+  lightsOut: s(0.25),
+  /** A bracket closing on its piece, and a piece's end settling on its cut. calm */
+  lock: s(0.4),
+  /** The band swelling where the voice wrote. default */
+  bandRise: s(0.3),
+  /** The band settling back to rest after release. slow */
+  bandSettle: s(0.85),
+  /** The write head coasting through the 200 ms tail after release. calm */
+  headStop: s(0.4),
+  /** The instrument fading in once WebGPU is ready. slow */
+  arrive: s(0.85),
+}
+
+export const timing = {
+  /** Brackets, cut marks and the field's edge light draw on over this long, cubic-bezier(.45, 0, .2, 1). */
+  drawOn: 0.4,
+  /** Between successive words' entrances. */
+  stagger: 0.018,
+}
+
+let version = 0
+const listeners = new Set<() => void>()
+/** For React: re-render when a spring changes in the panel. */
+export function subscribeTuning(fn: () => void) {
+  listeners.add(fn)
+  return () => listeners.delete(fn)
+}
+export const tuningVersion = () => version
 
 export const tuning = {
   cohesion: 0.16,
@@ -29,7 +76,7 @@ export function toggleTuning(onChange: () => void) {
 }
 
 async function load(onChange: () => void) {
-  const [{ defineControls, knob, color, colorHex }, panelModule] = await Promise.all([
+  const [{ defineControls, knob, color, colorHex, spring }, panelModule] = await Promise.all([
     import("knobs"),
     import("knobs/panel"),
   ])
@@ -53,6 +100,14 @@ async function load(onChange: () => void) {
       exposure: knob(tuning.exposure, { min: 0.4, max: 2, step: 0.05, label: "Exposure", group: "Look" }),
       accent: color(tuning.accent, { label: "Accent", group: "Look" }),
       bone: color(tuning.bone, { label: "Lines", group: "Look" }),
+      ...Object.fromEntries(
+        (Object.keys(motion) as (keyof typeof motion)[]).map((k) => [
+          `m_${k}`,
+          spring({ ...motion[k] }, { label: `${LABELS[k]} · ${fmt(motion[k])}`, group: "Motion" }),
+        ]),
+      ),
+      drawOn: knob(timing.drawOn, { min: 0.1, max: 1.2, step: 0.01, unit: "s", label: "Draw on · .4 s", group: "Motion" }),
+      stagger: knob(timing.stagger, { min: 0, max: 0.06, step: 0.001, unit: "s", label: "Word stagger · .018 s", group: "Motion" }),
     },
     { enabled: true, storage: null, ship: () => import("knobs/panel") },
   )
@@ -73,6 +128,12 @@ async function load(onChange: () => void) {
     tuning.exposure = v.exposure
     tuning.accent = colorHex(v.accent)
     tuning.bone = colorHex(v.bone)
+    const values = v as unknown as Record<string, SpringSpec>
+    for (const k of Object.keys(motion) as (keyof typeof motion)[]) motion[k] = values[`m_${k}`] ?? motion[k]
+    timing.drawOn = v.drawOn
+    timing.stagger = v.stagger
+    version++
+    for (const fn of listeners) fn()
     onChange()
   }
   store.subscribe(apply)
@@ -87,3 +148,19 @@ async function load(onChange: () => void) {
     },
   }
 }
+
+const LABELS: Record<keyof typeof motion, string> = {
+  wordsIn: "Words in",
+  textOut: "Text out",
+  field: "Field height",
+  readout: "Caret, readouts",
+  lightsOn: "Lights on",
+  lightsCool: "Lights cool",
+  lightsOut: "Lights out",
+  lock: "Bracket lock",
+  bandRise: "Band rise",
+  bandSettle: "Band settle",
+  headStop: "Head coast",
+  arrive: "Arrive",
+}
+const fmt = (v: SpringSpec) => `${String(v.duration).replace(/^0/, "")}/${v.bounce}`

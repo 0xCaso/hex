@@ -1,0 +1,15 @@
+{
+  "$comment": "motion-lint thresholds for the hero trace (scripts/motion-trace.ts), merged over motion-lint's defaults. Units are CSS px; frames are 1/60 s of page clock.",
+  "global": {
+    "launchSettleMs": 0,
+    "minSide": 2,
+    "minArea": 16,
+    "screenMargin": 0,
+    "maxCandidatesPerTest": 80,
+    "useIntent": false
+  },
+  "ignore": [
+    { "match": "field__caret", "why": "the caret blinks by design" },
+    { "match": "swap", "why": "an invisible grid cell holding a crossfading label; its labels are left-aligned, nothing follows them, and the clock is pinned right" }
+  ]
+}

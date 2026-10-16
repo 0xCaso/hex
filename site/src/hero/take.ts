@@ -21,7 +21,7 @@ export interface Sample {
 /** Seconds of speech that fill the ring once. */
 export const RING_SECONDS = 9
 const MIN_CAPTURE = 0.3
-const RELEASE_TAIL = 0.2
+export const RELEASE_TAIL = 0.2
 /** Release to pasted text in the demo, about what Hex takes for a short tail. */
 export const PASTE_DELAY = 0.24
 const SPEECH = 0.06
@@ -132,22 +132,23 @@ export interface DirectorEvents {
   pieces(n: number): void
 }
 
-/** Plays takes and keeps what the instrument draws: the envelope by angle and the level scope. */
+/**
+ * Plays takes and keeps what they wrote: the envelope by angle (held until the take ends, then the instrument lets
+ * it settle) and the input level for the scope. How any of it moves on screen is the instrument's (instrument.ts).
+ */
 export class Director {
   phase: Phase = "ready"
   take: Take | null = null
-  /** The envelope round the ring, 0–1 per bin. */
+  /** The take's envelope round the ring, 0–1 per bin: where the band should swell. */
   readonly bins: Float32Array
   /** Recent input level, oldest first. */
   readonly levels: Float32Array
-  /** Gauge and bracket light, 0–1. */
-  glow = 0
+  /** The input level now (an envelope follower, 30 ms). */
   level = 0
-  /** The paste's travel, 0–1, or -1. */
-  paste = -1
+  /** Seconds in the current phase. */
+  phaseTime = 0
   private next = 0
   private ids = 0
-  private sincePhase = 0
   private levelClock = 0
   private written = 0
 
@@ -161,13 +162,18 @@ export class Director {
   }
 
   get idleFor() {
-    return this.phase === "ready" || this.phase === "pasted" ? this.sincePhase : 0
+    return this.phase === "ready" || this.phase === "pasted" ? this.phaseTime : 0
+  }
+
+  /** Whether the band should be at rest: no take is being spoken. */
+  get settled() {
+    return this.phase !== "recording"
   }
 
   private setPhase(p: Phase) {
     if (p === this.phase) return
     this.phase = p
-    this.sincePhase = 0
+    this.phaseTime = 0
     this.events.phase(p)
   }
 
@@ -190,7 +196,7 @@ export class Director {
       segmenter: new Segmenter(),
     }
     this.written = 0
-    this.paste = -1
+    this.bins.fill(0)
     this.events.pieces(0)
     this.setPhase("recording")
   }
@@ -204,11 +210,10 @@ export class Director {
       return
     }
     take.releasedAt = take.elapsed
-    this.paste = 0
     this.setPhase("transcribing")
   }
 
-  /** The pieces to bracket, in turns. */
+  /** The take's pieces in turns: one per cut, then the one being spoken (or the tail, after release). */
   pieces(): Piece[] {
     const take = this.take
     if (!take) return []
@@ -218,17 +223,23 @@ export class Director {
       out.push({ from: turnsOf(from), to: turnsOf(c), lockedAt: c })
       from = c
     }
-    const end = take.releasedAt ?? take.elapsed
-    if (end - from > 0.15) out.push({ from: turnsOf(from), to: turnsOf(end), lockedAt: take.releasedAt })
+    const end = take.releasedAt === null ? take.elapsed : take.releasedAt + RELEASE_TAIL
+    out.push({ from: turnsOf(from), to: turnsOf(end), lockedAt: take.releasedAt })
     return out
   }
 
+  /** Where the write head is (turns), and where it comes to rest after release: the 200 ms tail. */
   head() {
-    return turnsOf(this.take?.elapsed ?? 0)
+    const take = this.take
+    if (!take) return { at: 0, rest: null as number | null }
+    return {
+      at: turnsOf(take.elapsed),
+      rest: take.releasedAt === null ? null : turnsOf(take.releasedAt + RELEASE_TAIL),
+    }
   }
 
   step(dt: number) {
-    this.sincePhase += dt
+    this.phaseTime += dt
     const take = this.take
     const recording = this.phase === "recording" && take
     if (take) take.clock += dt
@@ -257,35 +268,17 @@ export class Director {
       }
       this.written = Math.max(this.written, upto)
     }
-    // Unwritten bins (an earlier take's) fade quickly; after release the whole band settles.
-    const settle = this.phase === "transcribing" || this.phase === "pasted" || this.phase === "ready"
-    const kFast = Math.exp(-dt / 0.35)
-    const kSettle = Math.exp(-dt / 1.1)
-    for (let b = 0; b < this.bins.length; b++) {
-      if (settle) this.bins[b]! *= kSettle
-      else if (b >= this.written) this.bins[b]! *= kFast
-    }
 
-    if (this.phase === "transcribing" && take) {
-      this.paste = Math.min(1, this.sincePhase / PASTE_DELAY)
-      if (this.sincePhase >= PASTE_DELAY) {
-        const end = take.releasedAt! + RELEASE_TAIL
-        const words = take.sample.words.filter((w) => w.t1 <= end).map((w) => w.text)
-        if (words.length) {
-          this.events.transcript(take.id, words)
-          this.setPhase("pasted")
-        } else {
-          this.setPhase("ready")
-        }
+    if (this.phase === "transcribing" && take && this.phaseTime >= PASTE_DELAY) {
+      const end = take.releasedAt! + RELEASE_TAIL
+      const words = take.sample.words.filter((w) => w.t1 <= end).map((w) => w.text)
+      if (words.length) {
+        this.events.transcript(take.id, words)
+        this.setPhase("pasted")
+      } else {
+        this.setPhase("ready")
       }
-    } else if (this.paste >= 0) {
-      // The last beads run on into the field, then the trace rests.
-      this.paste = this.sincePhase < 0.3 ? 1 + this.sincePhase * 1.5 : -1
     }
-
-    const lit = this.phase === "recording" || this.phase === "transcribing" ? 1 : 0
-    const tau = lit ? 0.12 : 1.4
-    this.glow += (lit - this.glow) * (1 - Math.exp(-dt / tau))
 
     // The scope: a sample every 25 ms.
     this.levelClock += dt
@@ -297,6 +290,6 @@ export class Director {
   }
 }
 
-function turnsOf(seconds: number) {
+export function turnsOf(seconds: number) {
   return Math.min(0.999, seconds / RING_SECONDS)
 }

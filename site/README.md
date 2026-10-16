@@ -20,11 +20,15 @@ MAGI hero in the knobs examples (`hero-magi*.ts`, `controls-post.wgsl`).
   the envelope gauge, cut marks, the write head, brackets on pieces, the level
   scope and the trace to the text field. `post.wgsl` is the knobs catalog's bloom
   and tone pass.
+- `instrument.ts` moves what the shader draws. Every light, mark and gauge is a
+  spring (`spring.ts`, the knobs solver) stepped from the director each frame, so
+  marks draw on and cool out and retargets keep their velocity.
 - `engine.ts` owns the GPU resources; `Hero.tsx` owns layout (measured from the
   DOM), input, the frame loop and the React readouts.
 - `still.ts` draws a 2D still when WebGPU is missing (or with `?nogpu`).
-- `tuning.ts` holds the swarm's values. Press `` ` `` or open `?tune` to load a
-  knobs panel for them; nothing from knobs loads otherwise.
+- `tuning.ts` holds the swarm's values and every spring by duration and bounce
+  (default .3/0, calm .4/0, slow .85/0, snappy .25/0). Press `` ` `` or open
+  `?tune` to load a knobs panel for them; nothing from knobs loads otherwise.
 
 Rendering stops offscreen and in hidden tabs, and the device pixel ratio is capped
 at 2 (1.5 on narrow screens). With reduced motion, nothing plays on its own and the
@@ -42,6 +46,13 @@ HEX_SITE_URL=http://127.0.0.1:5173 bun scripts/shots.ts   # desktop/mobile, live
 HEX_SITE_URL=http://127.0.0.1:5173 bun scripts/frames.ts  # one take, moment by moment
 HEX_SITE_URL=http://127.0.0.1:5173 bun scripts/check.ts   # reduced motion and the panel
 HEX_SITE_URL=http://127.0.0.1:5173 bun run generate:og    # public/og.png
+```
+
+Motion has two checks with motion-lint (checked out beside hex):
+
+```sh
+bun scripts/motion-sweep.ts                         # the instrument's springs, no browser, deterministic
+bun scripts/motion-trace.ts --label after --clip    # the page on a fake clock: field DOM, lights, a 30 fps clip
 ```
 
 `HEX_SHOTS` chooses the output folder. The separate `.com` site lives in

@@ -14,7 +14,7 @@ const NEAR = 192
 const FAR = 48
 export const BINS = 256
 export const LEVELS_N = 160
-export const UNIFORM_FLOATS = 21 * 4
+export const UNIFORM_FLOATS = 32 * 4
 
 export interface Engine {
   readonly agents: number

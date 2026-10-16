@@ -151,14 +151,18 @@ fn hud(p: vec2f) -> vec3f {
     let len = 3.0 + env * R * 0.09;
     let r0 = R * 1.045;
     let tick = line((k - 0.5) * r * TAU / n, 1.1) * step(r0, r) * step(r, r0 + len);
-    let inTake = step(tu, P.voice.y) * glow;
+    // Lit as the head passes, a tick's width at a time rather than a tick at once.
+    let inTake = sat((P.voice.y - tu) * n + 0.5) * glow;
     col += mix(bone * 0.13, accent * 0.9, inTake * sat(0.25 + env * 2.0)) * tick;
     // Cut marks: where a pause let Hex transcribe the piece before it.
     for (var i = 0u; i < 8u; i++) {
       let cu = cutAt(i);
-      if (cu >= 0.0) {
+      let lit = P.cutLight[i / 4u][i % 4u];
+      if (cu >= 0.0 && lit > 0.002) {
+        // Drawn on from the disc outward, then cooling.
         let d = turnDelta(u, cu) * r * TAU;
-        col += bone * 0.75 * glow * line(d, 1.2) * step(R * 0.99, r) * step(r, R * 1.17);
+        let reach = R * (0.99 + 0.18 * P.cutDraw[i / 4u][i % 4u]);
+        col += bone * 0.75 * lit * line(d, 1.2) * step(R * 0.99, r) * sat(reach - r + 0.5);
       }
     }
     // The write head, a small notch pointing in, while recording.
@@ -177,13 +181,16 @@ fn hud(p: vec2f) -> vec3f {
       if (m.w <= 0.01) {
         continue;
       }
-      let lock = m.z * m.z * (3.0 - 2.0 * m.z);
-      let reach = (P.shape.y + 0.035 + 0.07 * (1.0 - lock)) * R;
+      // The lock is a spring already; the uprights grow from the band outward as the bracket draws on, and
+      // the arms follow once the uprights are nearly there.
+      let lock = m.z;
+      let info = P.markInfo[i];
+      let reach = (P.shape.y + 0.035 + 0.07 * (1.0 - lock)) * R * info.x;
       let rin = ringR - reach;
       let rout = ringR + reach;
       if (r > rin - 4.0 && r < rout + 4.0) {
         let hue = mix(accent * 1.2, bone * 0.85, lock) * m.w;
-        let arm = 7.0;
+        let arm = 7.0 * sat((info.x - 0.6) / 0.4);
         for (var side = 0u; side < 2u; side++) {
           let edgeU = select(m.x + m.y, m.x - m.y, side == 0u);
           let inward = select(-1.0, 1.0, side == 0u);
@@ -198,7 +205,8 @@ fn hud(p: vec2f) -> vec3f {
         let at = c + vec2f(sin(mid * TAU), -cos(mid * TAU)) * (R * 0.9);
         let dq = p - at + vec2f(5.5, 3.5);
         if (max(abs(dq.x - 5.5), abs(dq.y - 3.5)) < 9.0) {
-          let num = max(digit(dq, (i + 1u) / 10u), digit(dq - vec2f(6.0, 0.0), i + 1u));
+          let no = u32(info.y + 0.5);
+          let num = max(digit(dq, no / 10u), digit(dq - vec2f(6.0, 0.0), no));
           col += bone * 0.6 * m.w * (lock - 0.5) * 2.0 * num;
         }
       }
@@ -216,17 +224,17 @@ fn hud(p: vec2f) -> vec3f {
       let d = min(seg(p, port, bend), seg(p, bend, end));
       col += bone * 0.16 * line(d, 1.0);
       col += bone * 0.5 * fill(max(abs(p.x - port.x), abs(p.y - port.y)) - 2.2);
-      let prog = P.scr3.z;
+      // The paste: one bead runs the trace and lands on the field as the words arrive, easing to a stop, then
+      // hands its light to the field's edge (a DOM element) and cools where it landed.
+      let prog = P.bead.x;
       if (prog >= 0.0) {
         let l1 = length(bend - port);
         let l2 = length(end - bend);
         let along = select(l1 + length(p - bend), length(p - port), seg(p, port, bend) <= seg(p, bend, end));
-        let total = l1 + l2;
-        for (var b = 0u; b < 3u; b++) {
-          let at = prog * (total + 60.0) - f32(b) * 18.0;
-          let lit = exp(-abs(along - at) / 5.0) * step(along, at + 1.0) * step(0.0, at) * step(at, total);
-          col += accent * 2.2 * lit * line(d, 2.4);
-        }
+        let at = prog * (l1 + l2);
+        let behind = at - along;
+        let lit = select(exp(-behind / 9.0), exp(-(-behind) * 1.5), behind < 0.0);
+        col += accent * 2.2 * P.bead.y * lit * line(d, 2.4);
       }
     }
   }

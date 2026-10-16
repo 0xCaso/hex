@@ -10,7 +10,7 @@ struct Params {
   scr0: vec4f, // canvas (device px), dpr, the trail's decay this frame
   scr1: vec4f, // the ring's centre (px), its radius R (px), arrival (0–1)
   scr2: vec4f, // the scope: left, top, width, height (px; width 0: none)
-  scr3: vec4f, // the trace's end (px), the paste's progress (0–1, < 0: none), recording (0–1)
+  scr3: vec4f, // the trace's end (px), unused, the write head's marker (0–1)
   voice: vec4f, // the write head (turns), the take's extent (turns), the level now, its glow
   shape: vec4f, // ring radius, rest width, voice width, agitation (world)
   pal0: vec4f, // accent (linear), its brightness
@@ -18,6 +18,10 @@ struct Params {
   page: vec4f, // the page (linear)
   cuts: array<vec4f, 2>, // up to eight pieces' cut points (turns; < 0 none)
   marks: array<vec4f, 6>, // brackets: centre (turns), half span (turns), lock (0–1), alpha
+  cutDraw: array<vec4f, 2>, // each cut mark's draw-on (0–1)
+  cutLight: array<vec4f, 2>, // each cut mark's light (0–1)
+  markInfo: array<vec4f, 6>, // brackets: draw-on (0–1), the piece's number
+  bead: vec4f, // the paste's bead: travel (0–1, < 0 none), light
 }
 
 const NEAR = 192u;

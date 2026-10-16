@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
-import { AnimatePresence } from "motion/react"
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
+import { AnimatePresence, useReducedMotion, type Transition } from "motion/react"
 import * as m from "motion/react-m"
 import { BINS, LEVELS_N, UNIFORM_FLOATS, createEngine, type Engine } from "./engine"
+import { Instrument } from "./instrument"
+import type { SpringSpec } from "./spring"
 import { drawStill } from "./still"
-import { Director, RING_SECONDS, SAMPLES, type Phase } from "./take"
-import { toggleTuning, tuning } from "./tuning"
+import { Director, SAMPLES, type Phase } from "./take"
+import { motion, subscribeTuning, timing, toggleTuning, tuning, tuningVersion } from "./tuning"
 
 const PHASE_LABEL: Record<Phase, string> = {
   ready: "Ready",
@@ -19,6 +21,11 @@ const hexLinear = (hex: string) => {
   return [0, 2, 4].map((i) => toLinear(parseInt(h.slice(i, i + 2), 16) / 255))
 }
 const PAGE = "#0e0e0d"
+const DRAW_ON = [0.45, 0, 0.2, 1] as const
+
+/** A Motion spring from one of the hero's specs; under reduced motion, a short fade. */
+const spring = (s: SpringSpec, reduced: boolean, delay = 0): Transition =>
+  reduced ? { duration: Math.min(s.duration, 0.18), ease: "easeOut", delay: 0 } : { type: "spring", visualDuration: s.duration, bounce: s.bounce, delay }
 
 interface Transcript {
   id: number
@@ -44,6 +51,8 @@ export default function Hero({ children }: { children: ReactNode }) {
     const reduced = matchMedia("(prefers-reduced-motion: reduce)")
     const narrow = matchMedia("(max-width: 900px)")
     let phaseAt = performance.now()
+    const instrument = new Instrument(BINS)
+    instrument.reduced = reduced.matches
     const director = new Director(
       {
         phase: (p) => {
@@ -147,7 +156,13 @@ export default function Hero({ children }: { children: ReactNode }) {
     const wanted = () => {
       if (!engine || !onScreen || document.visibilityState !== "visible") return false
       if (!reduced.matches) return true
-      return director.phase === "recording" || director.phase === "transcribing" || performance.now() - phaseAt < 4000 || lure.on > 0.01
+      return (
+        director.phase === "recording" ||
+        director.phase === "transcribing" ||
+        performance.now() - phaseAt < 4000 ||
+        lure.on > 0.01 ||
+        instrument.moving
+      )
     }
     const wake = () => {
       const go = wanted()
@@ -179,10 +194,8 @@ export default function Hero({ children }: { children: ReactNode }) {
     const page = hexLinear(PAGE)
     let simTime = 0
     let frameNo = 0
-    let arrive = 0
     let last = performance.now()
     let clockShown = ""
-    const marks = new Float32Array(24)
     const frame = (now: number) => {
       if (!running || !engine) return
       const dt = Math.min(1 / 30, Math.max(0, (now - last) / 1000))
@@ -195,14 +208,16 @@ export default function Hero({ children }: { children: ReactNode }) {
       )
         director.press(true)
       director.step(dt)
+      instrument.reduced = reduced.matches
+      instrument.step(dt, director, true)
       simTime += dt
       frameNo++
-      arrive = Math.min(1, arrive + dt / 0.6)
       lure.on += (lure.want - lure.on) * (1 - Math.exp(-dt / 0.25))
 
+      // The clock keeps its last reading while it fades out.
       const take = director.take
       const clock =
-        director.phase === "recording" && take ? `${Math.floor(take.elapsed / 60)}:${(take.elapsed % 60).toFixed(1).padStart(4, "0")}` : ""
+        director.phase === "recording" && take ? `${Math.floor(take.elapsed / 60)}:${(take.elapsed % 60).toFixed(1).padStart(4, "0")}` : clockShown
       if (clock !== clockShown && clockRef.current) {
         clockRef.current.textContent = clock
         clockShown = clock
@@ -219,35 +234,23 @@ export default function Hero({ children }: { children: ReactNode }) {
       const band = Math.PI * 2 * tuning.ring * (2 * tuning.rest + 0.12)
       const meanNear = engine.agents / (band / cell)
       const meanFar = engine.agents / ((Math.PI * 0.85 * 0.85) / cell)
-      const recording = director.phase === "recording" ? 1 : 0
       set(0, tuning.cohesion, tuning.alignment, tuning.separation, tuning.speed)
       set(1, tuning.pull, tuning.drift, dt, simTime)
       set(2, lure.x, lure.y, 0.35, lure.on)
       set(3, engine.agents, frameNo, meanNear, meanFar)
       set(4, 0, 0, 1, 0.5 ** (dt / tuning.trail))
-      set(5, lay.cx, lay.cy, lay.R, arrive)
+      set(5, lay.cx, lay.cy, lay.R, instrument.arrive.x)
       set(6, lay.scope[0]!, lay.scope[1]!, lay.scope[2]!, lay.scope[3]!)
-      set(7, lay.fieldX, lay.fieldY, director.paste, recording)
-      set(8, director.head(), director.head(), director.level, director.glow)
+      set(7, lay.fieldX, lay.fieldY, 0, instrument.rec.x)
+      set(8, instrument.head.x, instrument.head.x, instrument.level.x, instrument.glow.x)
       set(9, tuning.ring, tuning.rest, tuning.voice, tuning.agitation)
       const accent = hexLinear(tuning.accent)
       const bone = hexLinear(tuning.bone)
       set(10, accent[0]!, accent[1]!, accent[2]!, 1)
       set(11, bone[0]!, bone[1]!, bone[2]!, 0)
       set(12, page[0]!, page[1]!, page[2]!, 0)
-      const cuts = take?.cuts ?? []
-      for (let i = 0; i < 8; i++) p[52 + i] = i < cuts.length ? Math.min(0.999, cuts[i]! / RING_SECONDS) : -1
-      marks.fill(0)
-      const clockNow = take?.clock ?? 0
-      director.pieces().slice(0, 6).forEach((pc, i) => {
-        const lock = pc.lockedAt === null ? 0 : Math.min(1, (clockNow - pc.lockedAt) / 0.4)
-        marks[i * 4] = (pc.from + pc.to) / 2
-        marks[i * 4 + 1] = (pc.to - pc.from) / 2
-        marks[i * 4 + 2] = Math.max(0, lock)
-        marks[i * 4 + 3] = director.glow
-      })
-      p.set(marks, 60)
-      voice.set(director.bins, 0)
+      instrument.pack(p)
+      voice.set(instrument.bins.x, 0)
       voice.set(director.levels, BINS)
       engine.frame(p, voice, { bloom: tuning.bloom, exposure: tuning.exposure })
       if (!wanted()) {
@@ -281,7 +284,7 @@ export default function Hero({ children }: { children: ReactNode }) {
           if (!e) return fallback()
           engine = e
           setMode("gpu")
-          Object.assign(window, { __hexHero: { timings: () => e.timings(), agents: e.agents } })
+          Object.assign(window, { __hexHero: { timings: () => e.timings(), agents: e.agents, params, voice } })
           wake()
         })
         .catch((err) => {
@@ -310,6 +313,31 @@ export default function Hero({ children }: { children: ReactNode }) {
   }, [])
 
   const live = mode === "gpu"
+  const reduced = !!useReducedMotion()
+  useSyncExternalStore(subscribeTuning, tuningVersion, tuningVersion)
+  // Only the present take sets this: an exiting one detaching (null) is ignored.
+  const textRef = useRef<HTMLParagraphElement | null>(null)
+  const setText = useRef((el: HTMLParagraphElement | null) => {
+    if (el) textRef.current = el
+  }).current
+  const [textHeight, setTextHeight] = useState<number | null>(null)
+  // The field makes room on a calm spring when a take needs more lines than it reserves.
+  useLayoutEffect(() => {
+    const el = textRef.current
+    if (!el) return
+    const measure = () => setTextHeight(el.offsetHeight)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [transcript?.id])
+  const words = transcript?.words ?? []
+  const wordsIn = spring(motion.wordsIn, reduced)
+  const textOut = spring(motion.textOut, reduced)
+  const readout = spring(motion.readout, reduced)
+  // The caret waits for the words to land (and for the old take to leave), so it never stands after empty space.
+  const caretDelay = reduced ? 0.18 : words.length * timing.stagger + motion.wordsIn.duration * 0.8
+  const blur = (px: number) => (reduced ? "blur(0px)" : `blur(${px}px)`)
   return (
     <section className="hero" data-mode={mode}>
       <div className="hero__stage" ref={stageRef} />
@@ -319,38 +347,62 @@ export default function Hero({ children }: { children: ReactNode }) {
           <div className="instrument__main">
             <div className="instrument__ring" ref={ringRef} data-live={live} />
             <div className="instrument__field" ref={fieldRef}>
-              <AnimatePresence mode="popLayout" initial={false}>
-                {transcript ? (
-                  <m.p
-                    key={transcript.id}
-                    className="field__text"
-                    exit={{ opacity: 0, filter: "blur(3px)", scale: 0.98, transition: { duration: 0.11, ease: [0.4, 0, 1, 1] } }}
-                  >
-                    {transcript.words.map((w, i) => (
-                      <m.span
-                        key={i}
-                        initial={transcript.id === 0 ? false : { opacity: 0, filter: "blur(3px)", y: 2 }}
-                        animate={{ opacity: 1, filter: "blur(0px)", y: 0 }}
-                        transition={{ duration: 0.16, delay: i * 0.012, ease: [0.2, 0.8, 0.2, 1] }}
-                      >
-                        {w}{" "}
-                      </m.span>
-                    ))}
-                    <span className="field__caret" aria-hidden="true" />
-                  </m.p>
-                ) : (
-                  <m.p
-                    key="empty"
-                    className="field__text field__text--empty"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0, transition: { duration: 0.11 } }}
-                  >
-                    <span className="field__caret" aria-hidden="true" />
-                    {mode === "still" && <span className="field__hint">Your words appear where you're typing</span>}
-                  </m.p>
-                )}
-              </AnimatePresence>
+              {transcript && transcript.id !== 0 && (
+                <m.span
+                  key={transcript.id}
+                  className="field__catch"
+                  aria-hidden="true"
+                  initial={reduced ? { opacity: 0.6, scaleX: 1 } : { opacity: 1, scaleX: 0.03 }}
+                  animate={{ opacity: 0, scaleX: 1 }}
+                  transition={{
+                    scaleX: { duration: timing.drawOn, ease: DRAW_ON },
+                    opacity: spring(motion.lightsCool, reduced),
+                  }}
+                />
+              )}
+              <m.div
+                className="field__stack"
+                initial={false}
+                animate={textHeight === null ? undefined : { height: textHeight }}
+                transition={reduced ? { duration: 0 } : spring(motion.field, false)}
+              >
+                <AnimatePresence initial={false}>
+                  {transcript ? (
+                    <m.p
+                      key={transcript.id}
+                      ref={setText}
+                      className="field__text"
+                      initial={transcript.id === 0 ? false : { opacity: 0 }}
+                      animate={{ opacity: 1, transition: wordsIn }}
+                      exit={{ opacity: 0, filter: blur(2.5), scale: reduced ? 1 : 0.97, transition: textOut }}
+                    >
+                      {words.map((w, i) => (
+                        <m.span
+                          key={i}
+                          initial={transcript.id === 0 ? false : { opacity: 0, filter: blur(2.5) }}
+                          animate={{ opacity: 1, filter: "blur(0px)" }}
+                          transition={reduced ? wordsIn : { ...wordsIn, delay: i * timing.stagger }}
+                        >
+                          {w}{" "}
+                        </m.span>
+                      ))}
+                      <Caret delay={caretDelay} shown transition={readout} />
+                    </m.p>
+                  ) : (
+                    <m.p
+                      key="empty"
+                      ref={setText}
+                      className="field__text field__text--empty"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1, transition: readout }}
+                      exit={{ opacity: 0, transition: textOut }}
+                    >
+                      <Caret delay={reduced ? 0 : motion.textOut.duration} shown={phase !== "transcribing"} transition={readout} />
+                      {mode === "still" && <span className="field__hint">Your words appear where you're typing</span>}
+                    </m.p>
+                  )}
+                </AnimatePresence>
+              </m.div>
             </div>
             {mode !== "still" ? (
               <p className="instrument__note">
@@ -367,8 +419,14 @@ export default function Hero({ children }: { children: ReactNode }) {
           <div className="instrument__side">
             <div className="readout__state">
               <span className={`readout__dot readout__dot--${phase}`} aria-hidden="true" />
-              <span>{PHASE_LABEL[phase]}</span>
-              <span className="readout__clock" ref={clockRef} />
+              <Swap value={PHASE_LABEL[phase]} transition={readout} out={textOut} />
+              <m.span
+                className="readout__clock"
+                ref={clockRef}
+                initial={false}
+                animate={{ opacity: phase === "recording" ? 1 : 0 }}
+                transition={phase === "recording" ? readout : textOut}
+              />
             </div>
             <div className="instrument__scope" ref={scopeRef} aria-hidden="true" />
             <dl className="readout__rows">
@@ -379,11 +437,40 @@ export default function Hero({ children }: { children: ReactNode }) {
               <dt>Uploaded</dt>
               <dd>0 bytes</dd>
               <dt>Pieces</dt>
-              <dd>{pieces ? `${pieces} during pauses` : "None yet"}</dd>
+              <dd>
+                <Swap value={pieces ? `${pieces} during pauses` : "None yet"} transition={readout} out={textOut} />
+              </dd>
             </dl>
           </div>
         </div>
       </div>
     </section>
+  )
+}
+
+/** One caret: it fades (never cuts) in after its delay, and blinks on a soft curve in a child of its own. */
+function Caret({ delay, shown, transition }: { delay: number; shown: boolean; transition: Transition }) {
+  return (
+    <m.span
+      className="field__caret"
+      aria-hidden="true"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: shown ? 1 : 0, transition: shown ? { ...transition, delay } : transition }}
+    >
+      <span />
+    </m.span>
+  )
+}
+
+/** A label that changes in place: the old one fades out as the new one fades in, stacked in one cell. */
+function Swap({ value, transition, out }: { value: string; transition: Transition; out: Transition }) {
+  return (
+    <span className="swap">
+      <AnimatePresence initial={false}>
+        <m.span key={value} initial={{ opacity: 0 }} animate={{ opacity: 1, transition }} exit={{ opacity: 0, transition: out }}>
+          {value}
+        </m.span>
+      </AnimatePresence>
+    </span>
   )
 }
