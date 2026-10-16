@@ -53,6 +53,7 @@ pub mod ffi;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod gguf_session;
 #[cfg(any(target_os = "macos", test))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod history;
 mod instance;
 #[cfg(target_os = "macos")]
