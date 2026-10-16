@@ -14,6 +14,9 @@ const VOICE_PRE_ROLL_DURATION: Duration = Duration::from_secs(1);
 const TIMELINE_BUFFER_DURATION: Duration = Duration::from_secs(10);
 const PRE_ROLL_DURATION: Duration = Duration::from_millis(450);
 pub const MINIMUM_HOLD_DURATION: Duration = Duration::from_millis(300);
+/// Audio kept after a shortcut release that finishes a capture, because a
+/// release often lands while the last word is still sounding.
+pub const POST_RELEASE_TAIL: Duration = Duration::from_millis(200);
 const MINIMUM_PARAKEET_DURATION: Duration = Duration::from_millis(1500);
 const INITIAL_RECORDING_CAPACITY: Duration = Duration::from_secs(10);
 const PARAKEET_SAMPLE_RATE: u32 = 16_000;
@@ -358,6 +361,11 @@ impl DictationClip {
         self.capture_generation
     }
 
+    /// Captured 16 kHz audio from `start` to the end of the clip.
+    pub fn samples_from(&self, start: usize) -> &[f32] {
+        &self.samples[start.min(self.samples.len())..]
+    }
+
     #[cfg(test)]
     pub fn for_test(samples: Vec<f32>, cuts: Vec<usize>, capture_generation: Option<u64>) -> Self {
         Self {
@@ -370,21 +378,7 @@ impl DictationClip {
     /// The loudest 30 ms window's DC-removed RMS level in dBFS, over the
     /// captured audio only (before any model padding).
     fn loudest_window_dbfs(&self) -> f32 {
-        let loudest = self
-            .samples
-            .chunks(SILENCE_WINDOW_SAMPLES)
-            .map(|window| {
-                let count = window.len() as f64;
-                let mean = window.iter().map(|&sample| f64::from(sample)).sum::<f64>() / count;
-                let variance = window
-                    .iter()
-                    .map(|&sample| (f64::from(sample) - mean).powi(2))
-                    .sum::<f64>()
-                    / count;
-                variance.sqrt()
-            })
-            .fold(0.0, f64::max);
-        (20.0 * loudest.max(1e-6).log10()) as f32
+        loudest_window_dbfs(&self.samples)
     }
 
     pub fn is_near_silent(&self) -> bool {
@@ -411,6 +405,27 @@ impl DictationClip {
     pub fn into_transcription_samples(self) -> Vec<f32> {
         self.samples
     }
+}
+
+fn loudest_window_dbfs(samples: &[f32]) -> f32 {
+    let loudest = samples
+        .chunks(SILENCE_WINDOW_SAMPLES)
+        .map(|window| {
+            let count = window.len() as f64;
+            let mean = window.iter().map(|&sample| f64::from(sample)).sum::<f64>() / count;
+            let variance = window
+                .iter()
+                .map(|&sample| (f64::from(sample) - mean).powi(2))
+                .sum::<f64>()
+                / count;
+            variance.sqrt()
+        })
+        .fold(0.0, f64::max);
+    (20.0 * loudest.max(1e-6).log10()) as f32
+}
+
+pub(crate) fn is_near_silent_samples(samples: &[f32]) -> bool {
+    loudest_window_dbfs(samples) < SILENCE_THRESHOLD_DBFS
 }
 
 pub(crate) fn pad_for_parakeet(samples: &mut Vec<f32>) {
@@ -900,23 +915,38 @@ impl DictationCapture {
         }
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub fn finish(&mut self, now: CaptureInstant) -> Finish {
+        self.finish_with_tail(now, Duration::ZERO)
+    }
+
+    /// Whether finishing at `ended_at` would produce a clip rather than a
+    /// short-tap discard.
+    pub fn would_transcribe(&self, ended_at: CaptureInstant) -> bool {
+        self.recording.as_ref().is_some_and(|recording| {
+            recording.intentional
+                || ended_at.duration_since(recording.started_at) >= MINIMUM_HOLD_DURATION
+        })
+    }
+
+    /// Finishes at the exact `ended_at` event, keeping audio through
+    /// `ended_at + tail`. The hold threshold is judged on `ended_at` alone.
+    pub fn finish_with_tail(&mut self, ended_at: CaptureInstant, tail: Duration) -> Finish {
+        if !self.would_transcribe(ended_at) {
+            self.recording = None;
+            return Finish::Discard;
+        }
         let Some(mut recording) = self.recording.take() else {
             return Finish::Discard;
         };
-        if !recording.intentional
-            && now.duration_since(recording.started_at) < MINIMUM_HOLD_DURATION
-        {
-            return Finish::Discard;
-        }
 
         let segments = recording.segments.take();
-        let samples = recording.finish(Some(now));
+        let samples = recording.finish(Some(ended_at + tail));
         let (mut cuts, capture_generation) = segments
             .map(|segments| (segments.cuts, Some(segments.capture_generation)))
             .unwrap_or_default();
-        // A delayed release trims audio captured afterwards; pieces reaching
-        // into that audio are no longer part of the clip.
+        // A delayed release trims audio captured after its boundary; pieces
+        // reaching into that audio are no longer part of the clip.
         cuts.retain(|&cut| cut < samples.len());
         Finish::Transcribe(DictationClip {
             samples,
@@ -1081,6 +1111,44 @@ mod tests {
         assert_eq!(clip.duration_ms(), 1_450);
         assert!(!clip.samples.contains(&11.0));
         assert!(!clip.samples.contains(&12.0));
+    }
+
+    #[test]
+    fn release_tail_keeps_audio_through_the_tail_and_no_further() {
+        let mut capture = DictationCapture::new(16_000);
+        let origin = capture_time();
+        capture.ingest(&vec![0.25; 16_000], origin);
+        capture.start_at(origin);
+        for index in 1..=14 {
+            capture.ingest(
+                &vec![index as f32; 1_600],
+                origin + Duration::from_millis(index * 100),
+            );
+        }
+
+        let Finish::Transcribe(clip) =
+            capture.finish_with_tail(origin + Duration::from_secs(1), POST_RELEASE_TAIL)
+        else {
+            panic!("expected transcription")
+        };
+        assert_eq!(clip.duration_ms(), 1_650);
+        assert_eq!(clip.samples.last(), Some(&12.0));
+        assert!(!clip.samples.contains(&13.0));
+    }
+
+    #[test]
+    fn short_tap_discards_on_its_physical_release_despite_the_tail() {
+        let origin = capture_time();
+        let mut capture = DictationCapture::new(16_000);
+        capture.start_at(origin);
+        capture.ingest(&vec![0.5; 16_000], origin + Duration::from_secs(1));
+        // The tail would carry the boundary past the hold threshold.
+        assert!(!capture.would_transcribe(origin + Duration::from_millis(299)));
+        assert!(matches!(
+            capture.finish_with_tail(origin + Duration::from_millis(299), POST_RELEASE_TAIL),
+            Finish::Discard
+        ));
+        assert!(!capture.is_recording());
     }
 
     #[test]
@@ -1283,11 +1351,12 @@ mod tests {
     fn resampled_clips_keep_the_last_word_through_a_delayed_release() {
         for sample_rate in [44_100, 48_000] {
             let audio = paused_speech(sample_rate);
-            // Release 100 ms before the audio ends, inside the final word,
-            // after the chunk carrying that audio has already arrived.
-            let released_ms = audio.len() as u64 * 1_000 / u64::from(sample_rate) - 100;
-            let released = released_ms as usize * sample_rate as usize / 1_000;
-            let expected = resample_for_parakeet(&audio[..released], sample_rate);
+            // Release 300 ms before the audio ends, inside the final word,
+            // after the chunk carrying that audio and its tail has arrived.
+            let released_ms = audio.len() as u64 * 1_000 / u64::from(sample_rate) - 300;
+            let kept_ms = released_ms + POST_RELEASE_TAIL.as_millis() as u64;
+            let kept = kept_ms as usize * sample_rate as usize / 1_000;
+            let expected = resample_for_parakeet(&audio[..kept], sample_rate);
             let mut clips = Vec::new();
             for segmented in [false, true] {
                 let mut capture = DictationCapture::new(sample_rate);
@@ -1303,22 +1372,23 @@ mod tests {
                     capture.ingest(chunk, through);
                     capture.offer_segment(|_| true);
                 }
-                let Finish::Transcribe(clip) =
-                    capture.finish(start + Duration::from_millis(released_ms))
-                else {
+                let Finish::Transcribe(clip) = capture.finish_with_tail(
+                    start + Duration::from_millis(released_ms),
+                    POST_RELEASE_TAIL,
+                ) else {
                     panic!("expected transcription")
                 };
                 assert_eq!(clip.cuts().len(), if segmented { 2 } else { 0 });
                 assert_eq!(clip.samples.len(), expected.len(), "{sample_rate} Hz");
                 // Only the final 10 ms may differ: the clip's resampler saw the
-                // real audio after the release where the reference saw silence.
+                // real audio after the tail where the reference saw silence.
                 let settled = expected.len() - 160;
                 assert!(
                     clip.samples[..settled]
                         .iter()
                         .zip(&expected[..settled])
                         .all(|(clip, expected)| (clip - expected).abs() < 1e-4),
-                    "{sample_rate} Hz segmented={segmented} lost audio before the release"
+                    "{sample_rate} Hz segmented={segmented} lost audio before the tail ended"
                 );
                 clips.push(clip.samples);
             }

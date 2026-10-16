@@ -171,11 +171,19 @@ struct SpeculativeTranscript {
     broken: Option<&'static str>,
 }
 
+/// A final piece shorter than the segmenter's own minimum piece gives Parakeet
+/// too little context: a lone word after a pause comes back empty or misheard,
+/// so it is transcribed together with the piece before it.
+const SHORT_TAIL_SAMPLES: usize =
+    crate::pause_segmenter::MINIMUM_PIECE.as_millis() as usize * TRANSCRIPTION_SAMPLES_PER_MS;
+
+#[derive(Clone)]
 enum IncrementalPlan {
     Unsegmented,
     Join {
         prefix: Vec<String>,
         tail_start: usize,
+        merged_short_tail: bool,
     },
     Fallback(&'static str),
 }
@@ -252,14 +260,28 @@ impl SpeculativeTranscript {
         } else {
             let mut prefix = state.pieces;
             prefix.truncate(clip.cuts().len());
-            return IncrementalPlan::Join { prefix, tail_start };
+            let tail = clip.samples_from(tail_start);
+            let merged_short_tail =
+                tail.len() < SHORT_TAIL_SAMPLES && !crate::dictation::is_near_silent_samples(tail);
+            let tail_start = if merged_short_tail {
+                prefix.pop();
+                clip.cuts().iter().rev().nth(1).copied().unwrap_or(0)
+            } else {
+                tail_start
+            };
+            return IncrementalPlan::Join {
+                prefix,
+                tail_start,
+                merged_short_tail,
+            };
         };
         IncrementalPlan::Fallback(reason)
     }
 }
 
-/// Transcribes only the tail when every earlier piece already has a result;
-/// otherwise transcribes the whole clip exactly as without segmentation.
+/// Transcribes only the tail when every earlier piece already has a result
+/// (a short tail together with the last piece); otherwise transcribes the
+/// whole clip exactly as without segmentation.
 fn transcribe_clip(
     mut samples: Vec<f32>,
     plan: IncrementalPlan,
@@ -267,13 +289,22 @@ fn transcribe_clip(
     transcribe: impl FnOnce(Vec<f32>, Option<&DictationProtocol>) -> Result<String>,
 ) -> Result<String> {
     match plan {
-        IncrementalPlan::Join { prefix, tail_start } => {
+        IncrementalPlan::Join {
+            prefix,
+            tail_start,
+            merged_short_tail,
+        } => {
             samples.drain(..tail_start);
             let tail_ms = samples.len() / TRANSCRIPTION_SAMPLES_PER_MS;
-            let text = transcribe(samples, None)?;
+            let text = if crate::dictation::is_near_silent_samples(&samples) {
+                String::new()
+            } else {
+                transcribe(samples, None)?
+            };
             tracing::info!(
                 pieces = prefix.len(),
                 tail_ms,
+                merged_short_tail,
                 "joined incremental transcription"
             );
             Ok(join_segments(
@@ -314,16 +345,21 @@ fn join_segments<'a>(pieces: impl IntoIterator<Item = &'a str>) -> String {
                     .chars()
                     .filter(|c| c.is_alphabetic())
                     .all(char::is_uppercase));
-        let mid_clause = matches!(previous, ',' | ';' | ':' | '-' | '\u{2013}' | '\u{2014}');
-        let spaceless = is_spaceless_script(previous) || is_spaceless_script(first);
-        if !mid_clause
-            && !spaceless
-            && first.is_uppercase()
-            && !matches!(
+        let reopened_period = previous == '.'
+            && (first.is_lowercase() || continues_after_period(&joined, first_word));
+        if reopened_period {
+            joined.pop();
+        }
+        let sentence_closed = !reopened_period
+            && matches!(
                 previous,
                 '.' | '?' | '!' | '\u{2026}' | '"' | '\u{201d}' | ')'
-            )
-        {
+            );
+        let mid_clause = reopened_period
+            || matches!(previous, ',' | ';' | ':' | '-' | '\u{2013}' | '\u{2014}')
+            || (!sentence_closed && continues_mid_clause(&joined, first_word));
+        let spaceless = is_spaceless_script(previous) || is_spaceless_script(first);
+        if !mid_clause && !spaceless && first.is_uppercase() && !sentence_closed {
             joined.push('.');
         }
         if !spaceless {
@@ -337,6 +373,197 @@ fn join_segments<'a>(pieces: impl IntoIterator<Item = &'a str>) -> String {
         }
     }
     joined
+}
+
+fn clean_clause_word(word: &str) -> String {
+    word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '\u{2019}')
+        .to_ascii_lowercase()
+        .replace('\u{2019}', "'")
+}
+
+/// True when an isolated piece's trailing period sits on an article, `"of"`,
+/// `"you know"`, or a repeated hesitation word that cannot end a sentence.
+fn continues_after_period(previous: &str, next_first_word: &str) -> bool {
+    let mut words = previous
+        .split_whitespace()
+        .rev()
+        .map(clean_clause_word)
+        .filter(|word| !word.is_empty());
+    let Some(last) = words.next() else {
+        return false;
+    };
+    let prev = words.next();
+    let next = clean_clause_word(next_first_word);
+    if !next.is_empty() && last == next {
+        return true;
+    }
+    if last == "know" && prev.as_deref() == Some("you") {
+        return true;
+    }
+    matches!(last.as_str(), "a" | "an" | "the" | "of")
+}
+
+/// True when an unpunctuated piece ended on a function word, hesitation filler,
+/// or repeated word that cannot close a sentence before the next piece.
+fn continues_mid_clause(previous: &str, next_first_word: &str) -> bool {
+    if continues_after_period(previous, next_first_word) {
+        return true;
+    }
+    let Some(last) = previous
+        .split_whitespace()
+        .rev()
+        .map(clean_clause_word)
+        .find(|word| !word.is_empty())
+    else {
+        return false;
+    };
+    matches!(
+        last.as_str(),
+        "a" | "an"
+            | "the"
+            | "this"
+            | "that"
+            | "these"
+            | "those"
+            | "my"
+            | "your"
+            | "our"
+            | "their"
+            | "its"
+            | "his"
+            | "her"
+            | "some"
+            | "any"
+            | "no"
+            | "every"
+            | "each"
+            | "either"
+            | "neither"
+            | "another"
+            | "other"
+            | "different"
+            | "of"
+            | "to"
+            | "in"
+            | "on"
+            | "at"
+            | "by"
+            | "for"
+            | "with"
+            | "from"
+            | "into"
+            | "onto"
+            | "upon"
+            | "within"
+            | "without"
+            | "between"
+            | "among"
+            | "through"
+            | "during"
+            | "before"
+            | "after"
+            | "above"
+            | "below"
+            | "under"
+            | "over"
+            | "about"
+            | "against"
+            | "across"
+            | "along"
+            | "around"
+            | "behind"
+            | "beyond"
+            | "near"
+            | "toward"
+            | "towards"
+            | "via"
+            | "per"
+            | "like"
+            | "and"
+            | "or"
+            | "but"
+            | "nor"
+            | "yet"
+            | "so"
+            | "because"
+            | "since"
+            | "unless"
+            | "until"
+            | "while"
+            | "whereas"
+            | "although"
+            | "though"
+            | "if"
+            | "whether"
+            | "when"
+            | "whenever"
+            | "where"
+            | "wherever"
+            | "how"
+            | "why"
+            | "who"
+            | "whom"
+            | "whose"
+            | "which"
+            | "what"
+            | "i"
+            | "you"
+            | "he"
+            | "she"
+            | "we"
+            | "they"
+            | "is"
+            | "am"
+            | "are"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "being"
+            | "have"
+            | "has"
+            | "had"
+            | "having"
+            | "do"
+            | "does"
+            | "did"
+            | "will"
+            | "would"
+            | "shall"
+            | "should"
+            | "can"
+            | "could"
+            | "may"
+            | "might"
+            | "must"
+            | "don't"
+            | "doesn't"
+            | "didn't"
+            | "won't"
+            | "wouldn't"
+            | "shouldn't"
+            | "can't"
+            | "couldn't"
+            | "isn't"
+            | "aren't"
+            | "wasn't"
+            | "weren't"
+            | "haven't"
+            | "hasn't"
+            | "hadn't"
+            | "not"
+            | "just"
+            | "also"
+            | "even"
+            | "only"
+            | "still"
+            | "already"
+            | "very"
+            | "quite"
+            | "rather"
+            | "pretty"
+            | "really"
+    )
 }
 
 /// Scripts written without spaces between words or sentences.
@@ -1969,6 +2196,58 @@ mod tests {
             join(&["No punctuation", "Next sentence."]),
             "No punctuation. Next sentence."
         );
+        assert_eq!(
+            join(&[
+                "Let me see if it works, or maybe we should just pull a bunch of",
+                "Nice app designs."
+            ]),
+            "Let me see if it works, or maybe we should just pull a bunch of nice app designs."
+        );
+        assert_eq!(
+            join(&["You can twist the", "The 3D knob."]),
+            "You can twist the the 3D knob."
+        );
+        assert_eq!(
+            join(&["Give me a little summary of", "Of its findings"]),
+            "Give me a little summary of of its findings"
+        );
+        assert_eq!(
+            join(&["Give me a little summary of.", "Of its findings."]),
+            "Give me a little summary of of its findings."
+        );
+        assert_eq!(
+            join(&[
+                "Just show me whatever controls you want to use you know",
+                "Whatever"
+            ]),
+            "Just show me whatever controls you want to use you know whatever"
+        );
+        assert_eq!(
+            join(&[
+                "Just show me whatever controls you want to use you know.",
+                "Whatever works."
+            ]),
+            "Just show me whatever controls you want to use you know whatever works."
+        );
+        assert_eq!(
+            join(&[
+                "It's probably best not to.",
+                "force the database to deduplicate."
+            ]),
+            "It's probably best not to force the database to deduplicate."
+        );
+        assert_eq!(
+            join(&["We need to", "Come up with a pattern."]),
+            "We need to come up with a pattern."
+        );
+        assert_eq!(
+            join(&["Wait for", "I think ten seconds."]),
+            "Wait for I think ten seconds."
+        );
+        assert_eq!(
+            join(&["Switch to", "NASA telemetry."]),
+            "Switch to NASA telemetry."
+        );
         assert_eq!(join(&["Question?", "Yes."]), "Question? Yes.");
         assert_eq!(join(&["still going", "and more"]), "still going and more");
         assert_eq!(join(&["  ", " Only. ", ""]), "Only.");
@@ -2024,6 +2303,94 @@ mod tests {
         )
         .unwrap();
         assert_eq!(text, "First piece. Second piece, tail words.");
+
+        // A near-silent tail after the final pause cut skips inference rather
+        // than feeding room tone to the model, and short as it is, it does not
+        // re-transcribe the piece before it.
+        let mut speculative = SpeculativeTranscript::default();
+        speculative.record(
+            &piece(6, 0),
+            selection.clone(),
+            Ok("Spoken before pause.".into()),
+        );
+        let mut samples = vec![0.2; 48_000];
+        samples.extend(vec![0.0; 16_000]);
+        let silent_tail_clip = DictationClip::for_test(samples, vec![48_000], Some(6));
+        let plan = speculative.take_plan(&silent_tail_clip, &selection, false);
+        let text = transcribe_clip(
+            silent_tail_clip.into_transcription_samples(),
+            plan,
+            None,
+            |_, _| panic!("near-silent incremental tail must not run model inference"),
+        )
+        .unwrap();
+        assert_eq!(text, "Spoken before pause.");
+    }
+
+    #[test]
+    fn a_short_final_piece_is_transcribed_with_the_piece_before_it() {
+        let selection = TranscriptionSelection::default();
+        let audio = || (0..160_000).map(|sample| sample as f32).collect::<Vec<_>>();
+        // Cuts at 3 s and 8.5 s leave a 1.5 s tail holding one word.
+        let mut speculative = SpeculativeTranscript::default();
+        speculative.record(&piece(7, 0), selection.clone(), Ok("First piece.".into()));
+        speculative.record(&piece(7, 1), selection.clone(), Ok("An amazing.".into()));
+        let clip = DictationClip::for_test(audio(), vec![48_000, 136_000], Some(7));
+        let plan = speculative.take_plan(&clip, &selection, false);
+        let IncrementalPlan::Join {
+            prefix,
+            tail_start,
+            merged_short_tail,
+        } = plan.clone()
+        else {
+            panic!("complete pieces must join");
+        };
+        assert_eq!(prefix, ["First piece."]);
+        assert_eq!(tail_start, 48_000);
+        assert!(merged_short_tail);
+        let text = transcribe_clip(
+            clip.into_transcription_samples(),
+            plan,
+            None,
+            |samples, _| {
+                assert_eq!(samples.len(), 112_000);
+                assert_eq!(samples[0], 48_000.0);
+                Ok("An amazing world.".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(text, "First piece. An amazing world.");
+
+        // With a single cut, the short tail joins the whole first piece.
+        let mut speculative = SpeculativeTranscript::default();
+        speculative.record(&piece(8, 0), selection.clone(), Ok("An amazing.".into()));
+        let clip = DictationClip::for_test(audio(), vec![140_000], Some(8));
+        let IncrementalPlan::Join {
+            prefix,
+            tail_start,
+            merged_short_tail,
+        } = speculative.take_plan(&clip, &selection, false)
+        else {
+            panic!("complete pieces must join");
+        };
+        assert!(prefix.is_empty());
+        assert_eq!(tail_start, 0);
+        assert!(merged_short_tail);
+
+        // A tail as long as the segmenter's minimum piece stays separate.
+        let mut speculative = SpeculativeTranscript::default();
+        speculative.record(&piece(9, 0), selection.clone(), Ok("First piece.".into()));
+        let clip = DictationClip::for_test(audio(), vec![160_000 - SHORT_TAIL_SAMPLES], Some(9));
+        let IncrementalPlan::Join {
+            prefix,
+            merged_short_tail,
+            ..
+        } = speculative.take_plan(&clip, &selection, false)
+        else {
+            panic!("complete pieces must join");
+        };
+        assert_eq!(prefix, ["First piece."]);
+        assert!(!merged_short_tail);
     }
 
     #[test]
@@ -2119,13 +2486,17 @@ mod tests {
             speculative.record(&piece(5, index), selection.clone(), Ok(text.into()));
         }
         let clip = segmented_clip(5);
-        let IncrementalPlan::Join { prefix, tail_start } =
-            speculative.take_plan(&clip, &selection, false)
+        let IncrementalPlan::Join {
+            prefix,
+            tail_start,
+            merged_short_tail,
+        } = speculative.take_plan(&clip, &selection, false)
         else {
             panic!("complete pieces must join");
         };
         assert_eq!(prefix, ["One.", "Two."]);
         assert_eq!(tail_start, 96_000);
+        assert!(!merged_short_tail, "a four-second tail stays separate");
         assert_eq!(
             plan_reason(&speculative.take_plan(&clip, &selection, false)),
             "missing-pieces"
@@ -2398,3 +2769,7 @@ mod tests {
 #[cfg(test)]
 #[path = "dictation_tail_tests.rs"]
 mod dictation_tail_tests;
+
+#[cfg(test)]
+#[path = "dictation_corpus_tests.rs"]
+mod dictation_corpus_tests;

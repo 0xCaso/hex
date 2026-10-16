@@ -86,7 +86,16 @@ These cover gesture decisions, not hardware keyboard-layout or remapping equival
 Keep ready -> Press shortcut                          // dictate.boundaries
   -> Include up to 450 ms of available pre-roll
   -> Delayed handling still uses original event boundaries
-  -> Release excludes audio captured after physical release
+  -> Release excludes audio captured after physical release + 200 ms
+
+Release or locked finishing press                     // dictate.release-tail
+  -> Hold threshold judged on the physical release alone
+  -> Wait for audio through release + 200 ms (POST_RELEASE_TAIL)
+     ├── Arrives -> Clip ends exactly at release + 200 ms
+     └── Stream stalls/fails -> Finish within tail + 100 ms with what arrived
+  -> Same for Voice Action and promotion; not Escape, short taps, voice
+     controls, programmatic stop, meetings, or Linux
+  -> A press inside the tail starts after the old clip finishes, with its own pre-roll
 
 Release when idle -> Press shortcut                   // dictate.cold-microphone
   -> Open microphone asynchronously, no pre-roll
@@ -100,21 +109,38 @@ Source: `DictationCapture` in [dictation.rs](../../src/dictation.rs); checks:
 `delayed_press_reconstructs_audio_from_the_original_boundary`,
 `delayed_release_removes_audio_captured_after_the_physical_release`,
 `capture_continues_past_sixty_seconds_until_explicitly_finished`,
+`release_tail_keeps_audio_through_the_tail_and_no_further`,
+`short_tap_discards_on_its_physical_release_despite_the_tail`,
 `resampled_clips_keep_the_last_word_through_a_delayed_release` (44.1/48 kHz,
-segmented and not). These cover sample-buffer/timestamp logic, not a microphone
-recording. Release trimming is exact, with no post-release grace: a word still
-sounding at release is cut. The opt-in `release_boundary_harness`
+segmented and not, with the tail). These cover sample-buffer/timestamp logic, not
+a microphone recording. The physical release stays exact; the 200 ms tail is an
+explicit extension of the trim boundary. The opt-in `release_boundary_harness`
 ([dictation_tail_tests.rs](../../src/dictation_tail_tests.rs); `HEX_TAIL_MODEL`,
-`HEX_TAIL_WAVS`) replays recordings through the capture timeline at release
-offsets around the last word. On 2026-10-15 with `say` speech and Unified
-English, clips matched the release to the sample; releasing 100 ms before the
-speech ended kept the final word, while 150 ms before it lost the word or its
-final consonant. Incremental on/off and 1 versus default decoder threads gave
-identical results.
+`HEX_TAIL_WAVS`) and `evaluate_dictation_corpus`
+([dictation_corpus_tests.rs](../../src/dictation_corpus_tests.rs);
+[`scripts/dictation-corpus.sh`](../../scripts/dictation-corpus.sh),
+`HEX_DICTATION_CORPUS_DIR`) replay recordings through the capture timeline at
+release offsets (`-300 ms` to `+200 ms`) and onset offsets (`-300 ms` to
+`+100 ms`). On 2026-10-15, before the tail, across 102 clips (70 real voice
+recordings, 20 macOS `say` clips, and 12 ElevenLabs `eleven_v4` clips) with
+Unified English, clips matched the release to the sample; releasing at
+`0 ms`..`+200 ms` kept the final word on 10/10 real clips (`-50 ms`: 9/10;
+`-100 ms`: 7/10; `-150 ms`: 4/10; `-200 ms`: 2/10). Warm 450 ms pre-roll kept the
+initial word even when speech began `-300 ms` before press, whereas cold 0 ms
+pre-roll lost initial syllables when speech preceded readiness by `150–300 ms`.
+Incremental on/off and 1 versus default decoder threads gave identical tail
+results. The harnesses now apply the tail; they have not been re-run with it. The
+tail also keeps any key-up or click sound made at release; no filtering is applied.
 The owner in [dictation_audio.rs](../../src/dictation_audio.rs) has
 `cold_capture_restart_rejects_late_open_results_and_closes_after_finish` and
 `pending_open_uses_physical_press_for_intentional_threshold`: controlled opening
-and ownership transitions, not physical device startup latency.
+and ownership transitions, not physical device startup latency. Tail checks there
+drive the owner with a fake stream: `release_waits_for_its_tail_and_keeps_no_later_audio`,
+`a_press_inside_the_tail_starts_its_own_capture_after_the_old_one_finishes`,
+`a_stalled_or_failed_stream_bounds_the_tail_wait`, and
+`escape_and_short_taps_finish_without_waiting_for_a_tail`. The coordinator blocks
+on the tail, so the stop tone, HUD Transcribing, and submission follow the release
+by up to 200 ms (300 ms on a stalled stream); their order is unchanged.
 
 ### Optional Voice Controls
 
@@ -175,14 +201,20 @@ Intentional hotkey capture (Dictation or Voice Action shortcut)
         └── A piece already queued or running -> Keep the audio for the next piece
 Release -> One accepted job for the whole clip
   ├── Every kept cut has a piece transcript, same model, not voice-delimited
-  │    -> Transcribe only the tail -> Join pieces + tail
-  │       // after , ; : - lowercase the next word (not I/acronyms);
+  │    ├── Tail near-silent (< -50 dBFS) -> Skip tail inference
+  │    ├── Tail < 3 s (the segmenter's minimum piece) -> Transcribe the last piece + tail
+  │    │    together, replacing that piece's text   // a lone word after a pause has no context
+  │    └── Otherwise -> Transcribe only the tail
+  │    -> Join pieces + tail
+  │       // after , ; : - or a mid-clause function word/hesitation/repeated word,
+  │       // lowercase the next word (not I/acronyms) and drop isolated mid-clause periods;
   │       // otherwise close an unpunctuated piece before a capital
   └── Missing/failed/stale piece, model change, or voice-delimited capture
        -> Transcribe the full clip exactly as with the setting Off
   -> Mode processing, paste, last dictation, history once on the final text
 Short tap, Escape, or new capture -> Piece transcripts are never used
-Delayed release -> Cuts after the physical release are dropped with their pieces
+Delayed release -> Cuts after release + 200 ms are dropped with their pieces
+              // the final tail piece includes the 200 ms tail
 Programmatic/voice-delimited captures and Linux -> Never segmented
 ```
 
@@ -192,8 +224,8 @@ Source: [pause_segmenter.rs](../../src/pause_segmenter.rs), `offer_segment` in
 `SpeculativeTranscript`, `transcribe_clip`, and `join_segments` in
 [parakeet.rs](../../src/parakeet.rs). The queue keeps two slots for final jobs;
 at most one piece is admitted at a time. Logs record `joined incremental
-transcription` with `pieces`/`tail_ms`, or `incremental transcription fell back to
-the full clip` with a `reason`. Checks: the `pause_segmenter` tests (cut placement,
+transcription` with `pieces`/`tail_ms`/`merged_short_tail`, or `incremental
+transcription fell back to the full clip` with a `reason`. Checks: the `pause_segmenter` tests (cut placement,
 minimum length, long-piece pauses, noise floor, digital silence);
 `segmented_pieces_match_the_final_clip_across_resampler_delays`,
 `delayed_release_drops_cuts_after_the_physical_release`,
@@ -201,6 +233,7 @@ minimum length, long-piece pauses, noise floor, digital silence);
 `short_taps_and_cancelled_captures_never_offer_pieces` in dictation.rs;
 `hotkey_captures_hand_pieces_off_without_blocking_and_others_do_not` in
 dictation_audio.rs; and `final_job_transcribes_only_the_tail_after_complete_pieces`,
+`a_short_final_piece_is_transcribed_with_the_piece_before_it`,
 `incomplete_stale_or_mismatched_pieces_fall_back_to_the_full_clip`,
 `a_new_capture_discards_pieces_from_a_cancelled_capture`,
 `piece_admission_never_takes_a_final_job_slot`, and
@@ -216,6 +249,21 @@ the full clip, with 0/2/0 word differences from the full-clip transcript (66/235
 words). An earlier real-time prototype measured 46–220 ms versus 0.7–3.3 s on
 77–99-second clips. Neither is physical capture or paste on a MacBook Pro, and a
 piece boundary can still change a word or its punctuation.
+
+**Short final piece, October 15, 2026, Mac Studio, Unified English Q8, Metal:** a
+retained 25-second dictation (private, not in the corpus) where the speaker paused
+before the final word "world" was cut into 5 pieces plus a 989 ms tail. Transcribed
+alone, the tail returned nothing (or "What" at release `-150 ms`), so every
+incremental `release_boundary_harness` row ended "…an amazing"; with the merge,
+every row from `-150 ms` to `+150 ms` ends "…an amazing world", matching the full
+clip. Release inference went from 27–29 ms (tail only) to 37–51 ms (last piece +
+tail) versus 102–177 ms for the full clip; the cost grows with the last piece's
+length. [`scripts/dictation-pause-fixtures.sh`](../../scripts/dictation-pause-fixtures.sh)
+writes four `say` clips with 900 ms of silence before one final word
+(`tail_pause_word`) for both harnesses. Without the merge they kept the word but
+split it into its own sentence ("an amazing. World", "finally. Done.") or lost
+its capital ("by friday"); with it they match the full clip at every offset. TTS
+does not reproduce the dropped word itself.
 
 ```ts
 Listening idle                            // dictate.model-memory

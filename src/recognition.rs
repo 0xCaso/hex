@@ -12,6 +12,7 @@ use crate::commands::{Action, ActionExecutor, ActionOutcome, CommandConfig, Deci
 use crate::context::{ContextMonitor, ContextSnapshot};
 use crate::dictation::{
     ControlStability, DictationControl, DictationProtocol, Finish, MINIMUM_HOLD_DURATION,
+    POST_RELEASE_TAIL,
 };
 use crate::dictation_audio::{DictationAudio, DictationAudioEvent};
 use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender};
@@ -1564,6 +1565,7 @@ fn handle_hotkey_action(
             let _ = finish_dictation(
                 dictation,
                 action_at,
+                POST_RELEASE_TAIL,
                 worker,
                 TranscriptionTarget::Paste,
                 None,
@@ -1679,6 +1681,7 @@ fn handle_edit_hotkey_action(
             let _ = finish_dictation(
                 dictation,
                 action_at,
+                POST_RELEASE_TAIL,
                 worker,
                 TranscriptionTarget::VoiceAction,
                 None,
@@ -2066,6 +2069,7 @@ fn emit_voice_state(
 fn finish_dictation(
     capture: &DictationAudio,
     ended_at: CaptureInstant,
+    tail: Duration,
     worker: &DictationWorker,
     target: TranscriptionTarget,
     protocol: Option<Arc<DictationProtocol>>,
@@ -2074,7 +2078,7 @@ fn finish_dictation(
     events: &mut EventLog,
     indicator: Option<&DictationIndicatorSender>,
 ) -> Result<FinishResult> {
-    let clip = match capture.finish(ended_at)? {
+    let clip = match capture.finish_with_tail(ended_at, tail)? {
         Finish::Transcribe(clip) if !clip.is_near_silent() => clip,
         finish => {
             events.dictation(DictationPhase::Discarded, "")?;
@@ -2143,6 +2147,7 @@ fn handle_voice_dictation_control(
             let finish = finish_dictation(
                 dictation,
                 boundary,
+                Duration::ZERO,
                 worker,
                 target,
                 Some(protocol),

@@ -9,7 +9,7 @@ use hound::WavReader;
 
 use super::*;
 use crate::audio::CaptureInstant;
-use crate::dictation::{DictationCapture, Finish, resample_for_parakeet};
+use crate::dictation::{DictationCapture, Finish, POST_RELEASE_TAIL, resample_for_parakeet};
 
 const LEAD: Duration = Duration::from_secs(1);
 const PRE_ROLL: Duration = Duration::from_millis(450);
@@ -50,7 +50,8 @@ fn speech_end(samples: &[f32], rate: u32) -> usize {
 
 /// Feeds 10 ms chunks of `LEAD` silence then speech, presses after the
 /// silence, and releases `release` source samples into the speech while later
-/// audio is already arriving, exactly like a delivered CGEvent release.
+/// audio is already arriving, exactly like a delivered CGEvent release. The
+/// clip keeps the production post-release tail.
 fn capture(
     audio: &[f32],
     rate: u32,
@@ -84,9 +85,9 @@ fn capture(
                 pieces.push(segment);
                 true
             });
-            // A real release arrives up to one buffer after its audio.
-            if through >= released_at + Duration::from_millis(20) {
-                finish = Some(capture.finish(released_at));
+            // The owner finishes once the tail has arrived, up to one buffer late.
+            if through >= released_at + POST_RELEASE_TAIL + Duration::from_millis(20) {
+                finish = Some(capture.finish_with_tail(released_at, POST_RELEASE_TAIL));
             }
         }
     }
@@ -128,7 +129,10 @@ fn release_boundary_harness() {
         );
         for offset_ms in RELEASE_OFFSETS_MS {
             let release = (end as i64 + offset_ms * i64::from(rate) / 1_000) as usize;
-            let expected_len = (samples_for(PRE_ROLL, rate) + release) * 16_000 / rate as usize;
+            let expected_len =
+                (samples_for(PRE_ROLL, rate) + release + samples_for(POST_RELEASE_TAIL, rate))
+                    * 16_000
+                    / rate as usize;
             for incremental in [false, true] {
                 let (clip, pieces) = capture(&audio, rate, release, incremental);
                 let mut speculative = SpeculativeTranscript::default();
@@ -146,22 +150,24 @@ fn release_boundary_harness() {
                     ..samples.len().saturating_sub(32))
                     .map(|index| (samples[index] - reference[reference_start + index]).abs())
                     .fold(0.0, f32::max);
+                let merged = matches!(
+                    plan,
+                    IncrementalPlan::Join {
+                        merged_short_tail: true,
+                        ..
+                    }
+                );
                 for threads in [0, 1] {
                     model.session.set_threads_for_test(threads).unwrap();
-                    let plan = match &plan {
-                        IncrementalPlan::Join { prefix, tail_start } => IncrementalPlan::Join {
-                            prefix: prefix.clone(),
-                            tail_start: *tail_start,
-                        },
-                        IncrementalPlan::Unsegmented => IncrementalPlan::Unsegmented,
-                        IncrementalPlan::Fallback(reason) => IncrementalPlan::Fallback(reason),
-                    };
-                    let text = transcribe_clip(samples.clone(), plan, None, |samples, _| {
-                        Ok(run(&mut model, samples))
-                    })
-                    .unwrap();
+                    let started = std::time::Instant::now();
+                    let text =
+                        transcribe_clip(samples.clone(), plan.clone(), None, |samples, _| {
+                            Ok(run(&mut model, samples))
+                        })
+                        .unwrap();
+                    let release_ms = started.elapsed().as_millis();
                     println!(
-                        "release{offset_ms:+}ms incremental={incremental} cuts={cuts} threads={threads} missing={missing} tail_diff={max_tail_diff:.5} {text:?}"
+                        "release{offset_ms:+}ms incremental={incremental} cuts={cuts} merged={merged} threads={threads} release_ms={release_ms} missing={missing} tail_diff={max_tail_diff:.5} {text:?}"
                     );
                 }
             }

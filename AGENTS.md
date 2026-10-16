@@ -254,7 +254,15 @@ CoreAudio formats, AppleScript details, or event serialization.
   ticks on the tested Apple Silicon system, while some HID events already used
   nanoseconds; changing tap location requires revalidating timestamp units.
   Delayed press handling reconstructs the original onset from the timeline;
-  delayed release handling excludes audio captured after the physical release.
+  delayed release handling excludes audio captured after the physical release
+  plus `POST_RELEASE_TAIL` (200 ms).
+- A shortcut release or locked press that finishes a transcribed capture keeps
+  audio through that exact event plus the 200 ms tail. The event timestamp is
+  never moved; the hold threshold uses it alone. The audio owner waits at most
+  the tail plus 100 ms for that audio, and a stream stall, failure, or gap in
+  the tail finishes with the audio already delivered instead of failing the
+  capture. Escape, short taps, voice controls, programmatic stops, and meetings
+  get no tail. A press during the tail is handled after the old clip finishes.
 - Active dictation capture is lossless with respect to Moonshine, event, UI,
   context, and worker stalls. Command recognition is explicitly best-effort:
   its backlog is bounded by duration, and pressure invalidates the generation,
