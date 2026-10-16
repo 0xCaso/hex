@@ -11,9 +11,11 @@ runtime settings persist in Application Support.
 The distributed release starts in hotkey-dictation-only mode. Voice commands and
 their catalog remain available as a persisted opt-in that defaults off.
 Voice Action also requires its own persisted opt-in, defaulting off even for
-existing settings without an explicit enabled flag.
-`DEVELOPER_FEATURES_ENABLED` keeps meetings and their UI/CLI surfaces available
-only in debug builds.
+existing settings without an explicit enabled flag. Meetings (beta) is a third
+persisted opt-in (`meetings.enabled`, default off) that adds call detection, the
+Meetings pane, menu-bar recording controls, and meeting paste in release builds.
+`DEVELOPER_FEATURES_ENABLED` keeps meetings always available in debug builds and
+keeps the meeting CLI, Activity, and HUD Lab debug-only.
 
 ## Feature Map
 
@@ -49,6 +51,8 @@ substitute for source inspection or a second roadmap.
 - `keyboard`: active-layout key resolution and balanced synthetic shortcuts.
 - `dictation`: warm pre-roll, growable capture, and 16 kHz
   local-transcription resampling.
+- `pause_segmenter`: pure 16 kHz pause detection that cuts intentional hotkey
+  captures into pieces for incremental transcription.
 - `dictation_audio`: the authoritative microphone timeline, lazy stream
   lifecycle, recording owner, exact shortcut boundaries, recovery handoff, and
   disposable bounded command audio projection.
@@ -154,16 +158,37 @@ substitute for source inspection or a second roadmap.
   processing, Voice Action, History, and opt-in Commands shell plus
   developer-only Meetings, Activity, and HUD Lab panes.
 - `status_item`: the persistent macOS menu-bar owner for Settings, Paste Last
-  Dictation, update checks, and orderly application shutdown.
+  Dictation, meeting recording state and Stop & Transcribe, update checks, and
+  orderly application shutdown.
 - `dictation_indicator`: the click-through Metal/GPUI capture and processing HUD.
 - `meeting`: explicit ScreenCaptureKit capture, owner-only WAV and transcript
-  artifacts, final local-model publication, and recovery.
-- `meeting_live`: bounded dual-stream Moonshine draft transcription and
-  byte-offset transcript tailing.
+  artifacts, Screen Recording permission checks, final local-model publication,
+  the user-facing Markdown copy, and recovery.
+- `meeting_transcript`: streaming 16 kHz resampling, pause-aware overlapping
+  chunks, the utility-QoS rolling transcriber that yields to dictation, seam
+  deduplication, echo suppression, and Markdown rendering.
+- `meeting_live`: bounded dual-stream Moonshine draft transcription,
+  byte-offset transcript tailing, and the echo-filtered live view.
+- `meeting_echo`: 20 ms energy envelopes of both tracks and the signal-level
+  bleed/local classification of microphone segments.
+- `meeting_notes`: a bounded provisional title while recording, then one
+  post-publication call over a bounded transcript excerpt for the final title
+  and a two-sentence summary, with deadline, manifest storage, and
+  marker-delimited in-place Markdown updates.
+- `meeting_query`: read-only meeting queries for agents (`meeting::query`):
+  lock-aware listing, in-memory BM25 full-text search with stemming and fuzzy
+  matching, transcript paging, stored notes, and Markdown rendering. It never
+  writes to the meetings folder.
+- `meeting_mcp`: the thin `rmcp` stdio adapter behind `hex mcp`, exposing
+  `meeting_query` as read-only tools and `hex-meeting://` resources.
+- `apple_intelligence`: the weak-linked FoundationModels Swift bridge:
+  availability, context size, and guided-generation notes at utility priority.
 - `microphone_activity`: permission-light CoreAudio process input observation.
-- `meeting_detection`: pure provider classification, debounce, and suppression.
-- `meeting_watcher`: GPUI application lifecycle, recognition ownership, meeting
-  offers, and explicit handoff into capture.
+- `meeting_detection`: pure provider classification, debounce, per-call snooze,
+  and call-ended presence.
+- `meeting_watcher`: GPUI application lifecycle, recognition ownership, the
+  focus-free meeting capsules, menu-bar meeting state, and explicit handoff into
+  capture.
 - `instance`: the exclusive Application Support lock that prevents concurrent
   command listeners.
 - `feedback`: bounded volume-controlled mode, capture, cancellation, and
@@ -217,7 +242,9 @@ CoreAudio formats, AppleScript details, or event serialization.
   enabled, pressing the shortcut opens the selected device asynchronously with
   no pre-roll, preserves the physical press for the hold threshold, discards a
   release before readiness, and closes only after the authoritative capture is
-  idle. Accepted jobs never keep the stream open.
+  idle. Accepted jobs never keep the stream open. A stream failure before the
+  hold threshold returns the press to pending and reopens; later failures fail
+  the capture. Cold opens retry the selected device briefly before falling back.
 - Dictation remains available while command recognition sleeps.
 - Model inference, optional post-processing, paste, and application actions must
   never block authoritative audio capture. Their queues remain bounded.
@@ -227,12 +254,25 @@ CoreAudio formats, AppleScript details, or event serialization.
   ticks on the tested Apple Silicon system, while some HID events already used
   nanoseconds; changing tap location requires revalidating timestamp units.
   Delayed press handling reconstructs the original onset from the timeline;
-  delayed release handling excludes audio captured after the physical release.
+  delayed release handling excludes audio captured after the physical release
+  plus `POST_RELEASE_TAIL` (200 ms).
+- A shortcut release or locked press that finishes a transcribed capture keeps
+  audio through that exact event plus the 200 ms tail. The event timestamp is
+  never moved; the hold threshold uses it alone. The audio owner waits at most
+  the tail plus 100 ms for that audio, and a stream stall, failure, or gap in
+  the tail finishes with the audio already delivered instead of failing the
+  capture. Escape, short taps, voice controls, programmatic stops, and meetings
+  get no tail. A press during the tail is handled after the old clip finishes.
 - Active dictation capture is lossless with respect to Moonshine, event, UI,
   context, and worker stalls. Command recognition is explicitly best-effort:
   its backlog is bounded by duration, and pressure invalidates the generation,
   discards stale audio and updates, and resets Moonshine without touching the
   active recording.
+- Incremental transcription is speculative: pieces cut at pauses are handed to
+  the inference worker without blocking capture, at most one at a time, and never
+  paste. The final job joins piece transcripts with the tail only when every kept
+  cut has a transcript from the same model; otherwise it transcribes the full clip.
+  Output, history, and last-result effects happen once on the final text.
 - Starting a new capture never cancels accepted dictation work. Pending jobs
   preserve submission-order output while capture remains immediately available.
 - Completing or pasting an older job must not reconcile or finish a newer
@@ -311,16 +351,48 @@ CoreAudio formats, AppleScript details, or event serialization.
   Turning retention Off preserves existing entries; clearing history is explicit.
   Time-based retention expires during idle uptime through the shared history
   owner; searches never return expired entries while waiting for disk cleanup.
-- Developer-only meeting detection may inspect process audio metadata but must
-  not capture samples. Detection can offer recording; it must never start
-  automatically. Release builds must not start the meeting controller.
+- Meeting detection may inspect process audio metadata but must not capture
+  samples. Detection can offer recording; it must never start automatically, and
+  an offer that times out only closes. Release builds keep the meeting controller
+  idle, without inspecting microphone activity, until the user opts in. When the
+  detected call app leaves the microphone, offer `Keep Recording` or
+  `Stop & Transcribe`; never stop automatically. An active recording stays
+  visible and stoppable from the menu bar without the Settings window.
+- Meeting transcription never blocks dictation: it runs on its own model session
+  at utility QoS, waits while an intentional dictation capture or dictation
+  inference is active, and keeps its queue (one-second audio blocks) and chunk
+  backlog bounded; a source that falls behind keeps what it transcribed and is
+  rebuilt from its WAV after Stop.
 - Meeting recording prevents idle sleep but does not apply dictation mute or
   pause-media behavior.
+- Apple Intelligence meeting notes run only after final publication, on a
+  utility-QoS thread that yields to dictation, within a bounded chunk count and
+  total deadline. Failures record `notes_error` and leave the Markdown
+  untouched. Notes never rename the file and rewrite only the heading HEX wrote
+  and the `<!-- hex:notes -->` block.
+- `hex mcp` is read-only and available in release builds regardless of the
+  Meetings opt-in. It dispatches before process logging, the instance lock,
+  GUI, or permission setup; never writes, recovers, or indexes on disk inside
+  the meetings folder; runs no model; and makes no network request. Stdout
+  carries only MCP messages.
 - Live meeting drafts remain available if final transcription fails. Final
   publication is atomic; adjacent same-source entries within three seconds form
-  one displayed turn labeled `You` or `Computer`.
+  one displayed turn labeled `You` or `Them`. Speaker echo never shows as `You`:
+  the live view, rolling snapshot, live paste, and final transcript drop a
+  microphone utterance when delayed system audio explains its energy, or when
+  its words repeat overlapping remote speech unless the signal shows local
+  speech (double-talk). An undecided draft line waits while the remote side
+  speaks until it completes. Each finished
+  meeting is also written as Markdown to the configured folder (default
+  `~/Documents/Hex Meetings`) without overwriting existing files; an export
+  failure does not fail the meeting.
 - Meeting paste cursors advance only after successful insertion and reset when
   HEX restarts.
+- Deleting a meeting moves its exported Markdown and then its recording folder
+  to the Trash (never `rm`), after a two-step confirmation, and is refused while
+  it records, transcribes, or writes notes. Renaming rewrites the manifest and
+  only a Markdown heading that still reads the previous title; files keep
+  their names.
 - Visible state remains `Transcribing` until every accepted transcription or
   paste output has completed, including ordered post-processing and insertion.
 - The HUD is observational and click-through. It must not alter capture
@@ -413,6 +485,7 @@ cargo run -- listen
 cargo run -- status
 cargo run -- meeting record --title "Design sync"
 cargo run -- meeting probe
+cargo run -- mcp --meetings-dir tests/fixtures/meetings
 cargo run -- meeting watch --preview
 cargo run -- app --preview-dictation
 cargo run -- preview onboarding
@@ -444,8 +517,12 @@ Use `scripts/capture-preview.sh` as the default desktop-UI iteration loop. It
 builds the release binary, launches one isolated deterministic preview, waits
 for that process's `HEX` window, captures only that window, and terminates the
 preview. Targets include `settings`, `modes`, `voice-action`, `commands`,
-`meetings`, `activity`, `onboarding`, `transcription-picker`, `hud-lab`, and
-`dictation-hud`. The Modes preview includes representative activation,
+`meetings`, `activity`, `onboarding`, `transcription-picker`, `hud-lab`,
+`dictation-hud`, and `meeting-offer` (with `--meeting-panel call-ended|ready`).
+Pass `--meetings-enabled` and `--screen-recording-missing` to Settings for the
+Meetings section. The `meetings` preview has sample meetings with notes and a
+transcript; add `--meeting-recording` for the live state,
+`--confirm-meeting-delete` for the delete confirmation, or `--meetings-empty`. The Modes preview includes representative activation,
 correction, model-variant, and transformation data so it exercises the complete
 editor. Pass `--collapse-mode-processing` to expose the lower transformation
 and deletion states without scrolling. Use `--open-transformation-picker`,

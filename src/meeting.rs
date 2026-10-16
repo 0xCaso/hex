@@ -8,27 +8,101 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use hound::{SampleFormat, WavSpec, WavWriter};
 use screencapturekit::prelude::*;
 use screencapturekit::stream::delegate_trait::ErrorHandler;
 use serde::{Deserialize, Serialize};
 
-use crate::dictation::resample_for_parakeet;
 use crate::events::now_ms;
-use crate::transcription::Transcriber;
 
 const SAMPLE_RATE: u32 = 16_000;
-const TRANSCRIPTION_CHUNK: usize = SAMPLE_RATE as usize * 30;
 const TRANSCRIPT_TURN_GAP_MS: u64 = 3_000;
 
+#[path = "meeting_echo.rs"]
+mod echo;
 #[path = "meeting_live.rs"]
 mod live;
 pub use live::TranscriptReader;
+#[path = "meeting_notes.rs"]
+mod notes;
+#[path = "meeting_query.rs"]
+pub mod query;
+#[path = "meeting_transcript.rs"]
+mod transcript;
+pub use notes::{MeetingNotes, display_title, notes_in_progress, notes_wanted, spawn_summary};
+#[cfg(debug_assertions)]
+pub use notes::{summarize, summarize_file};
+
+/// What the recorder knows about a meeting when it starts.
+#[derive(Clone, Debug, Default)]
+pub struct MeetingStart {
+    /// An explicit title; otherwise one is derived from the app and time.
+    pub title: Option<String>,
+    /// The detected call application, such as `Zoom`.
+    pub app: Option<String>,
+}
+
+/// What the recorder reports to its owner while it runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordingUpdate {
+    /// Capture started; the title is the one the meeting shows.
+    Started { title: String },
+    /// A provisional title from the transcript so far.
+    Retitled { title: String },
+}
+
+pub fn default_title(app: Option<&str>, created_at_ms: u64) -> String {
+    let clock = transcript::LocalTime::from_ms(created_at_ms).clock();
+    match app {
+        Some(app) => format!("{app} call — {clock}"),
+        None => format!("Meeting — {clock}"),
+    }
+}
+
+unsafe extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// Whether macOS currently allows Screen & System Audio Recording, which
+/// meeting capture needs for remote audio.
+pub fn screen_recording_permitted() -> bool {
+    // SAFETY: A CoreGraphics query without arguments or side effects.
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// Asks macOS to list HEX under Screen & System Audio Recording. The system
+/// prompts at most once; later requests return the current state.
+pub fn request_screen_recording() -> bool {
+    // SAFETY: A CoreGraphics request without arguments.
+    unsafe { CGRequestScreenCaptureAccess() }
+}
+
+pub fn open_screen_recording_settings() {
+    if let Err(error) = std::process::Command::new("/usr/bin/open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .spawn()
+    {
+        tracing::error!(%error, "could not open Screen Recording settings");
+    }
+}
+
+pub fn reveal(path: &Path) {
+    if let Err(error) = std::process::Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+    {
+        tracing::error!(%error, "could not reveal meeting file");
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MeetingRequest {
     Start,
     Stop,
+    /// Regenerate Apple Intelligence notes for a completed meeting.
+    Summarize(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -47,6 +121,25 @@ pub struct MeetingManifest {
     #[serde(default)]
     pub live_transcription_error: Option<String>,
     pub error: Option<String>,
+    /// The detected call application, such as `Zoom`.
+    #[serde(default)]
+    pub app: Option<String>,
+    /// The published Markdown copy in the user's meeting folder.
+    #[serde(default)]
+    pub export_path: Option<PathBuf>,
+    #[serde(default)]
+    pub export_error: Option<String>,
+    #[serde(default)]
+    pub echo_suppressed_utterances: u64,
+    /// A title generated from the transcript while recording; shown only
+    /// while `title` is the default and no notes title exists.
+    #[serde(default)]
+    pub provisional_title: Option<String>,
+    /// Apple Intelligence notes generated after final publication.
+    #[serde(default)]
+    pub notes: Option<MeetingNotes>,
+    #[serde(default)]
+    pub notes_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -135,7 +228,7 @@ pub enum MeetingSource {
 impl MeetingSource {
     pub fn label(self) -> &'static str {
         match self {
-            Self::System => "Computer",
+            Self::System => "Them",
             Self::Microphone => "You",
         }
     }
@@ -179,10 +272,10 @@ pub fn root() -> Result<PathBuf> {
 }
 
 pub fn record(
-    title: Option<String>,
+    start: MeetingStart,
     shutdown: &AtomicBool,
     project_root: &Path,
-    started_sender: Option<SyncSender<()>>,
+    updates: Option<SyncSender<RecordingUpdate>>,
 ) -> Result<MeetingManifest> {
     let (_, transcription_selection) = crate::app_settings::transcription_selection();
     let transcription_model = crate::transcription_models::validate(&transcription_selection)?;
@@ -191,6 +284,12 @@ pub fn record(
         &transcription_selection.language,
     ) {
         return Err(eyre!("{} is not installed", transcription_model.name));
+    }
+    if !screen_recording_permitted() {
+        request_screen_recording();
+        return Err(eyre!(
+            "Allow HEX in System Settings › Privacy & Security › Screen & System Audio Recording, then try again"
+        ));
     }
     let created_at_ms = now_ms();
     let id = format!("{created_at_ms}-{}", std::process::id());
@@ -202,7 +301,10 @@ pub fn record(
     let mut manifest = MeetingManifest {
         schema_version: 1,
         id,
-        title: title.unwrap_or_else(|| "Untitled meeting".into()),
+        title: start
+            .title
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| default_title(start.app.as_deref(), created_at_ms)),
         status: MeetingStatus::Starting,
         created_at_ms,
         ended_at_ms: None,
@@ -218,6 +320,13 @@ pub fn record(
         live_dropped_packets: 0,
         live_transcription_error: None,
         error: None,
+        app: start.app,
+        export_path: None,
+        export_error: None,
+        echo_suppressed_utterances: 0,
+        provisional_title: None,
+        notes: None,
+        notes_error: None,
     };
     write_manifest(&meeting_dir, &manifest)?;
 
@@ -266,9 +375,18 @@ pub fn record(
             }
             result
         });
+        let mut rolling =
+            transcript::Rolling::start(meeting_dir.clone(), transcription_selection.clone());
+        let rolling_feed = rolling.feed();
         let writer_dir = meeting_dir.clone();
         let writer = thread::spawn(move || {
-            write_tracks(&writer_dir, receiver, Some(live_sender), &live_drops)
+            write_tracks(
+                &writer_dir,
+                receiver,
+                Some(live_sender),
+                rolling_feed,
+                &live_drops,
+            )
         });
         let stream_error = Arc::new(Mutex::new(None::<String>));
         let delegate_error = stream_error.clone();
@@ -336,11 +454,14 @@ pub fn record(
             cleanup_failed_setup(Some(stream), sender, writer, live_worker);
             return Err(error);
         }
-        if let Some(started_sender) = started_sender {
-            let _ = started_sender.send(());
+        if let Some(updates) = &updates {
+            let _ = updates.send(RecordingUpdate::Started {
+                title: display_title(&manifest),
+            });
         }
 
         let started = Instant::now();
+        let titles = notes::ProvisionalTitles::start(manifest.id.clone());
         println!("Recording '{}' (Ctrl-C to stop)", manifest.title);
         while !shutdown.load(Ordering::Relaxed)
             && stream_error
@@ -349,8 +470,15 @@ pub fn record(
                 .is_none()
             && !writer.is_finished()
         {
+            if let Some(title) = titles.take() {
+                record_provisional_title(&meeting_dir, &mut manifest, title, updates.as_ref());
+            }
             thread::sleep(Duration::from_millis(100));
         }
+        if let Some(title) = titles.take() {
+            record_provisional_title(&meeting_dir, &mut manifest, title, updates.as_ref());
+        }
+        drop(titles);
         let stop_result = stream.stop_capture();
         drop(stream);
         drop(sender);
@@ -392,7 +520,13 @@ pub fn record(
         }
         write_manifest(&meeting_dir, &manifest)?;
 
-        match transcribe(&meeting_dir, &manifest, &transcription_selection) {
+        let rolling = rolling.finish();
+        match transcribe(
+            &meeting_dir,
+            &mut manifest,
+            &transcription_selection,
+            rolling,
+        ) {
             Ok(()) => manifest.status = MeetingStatus::Complete,
             Err(error) => {
                 manifest.status = MeetingStatus::Failed;
@@ -409,6 +543,24 @@ pub fn record(
         persist_meeting_failure(&meeting_dir, error);
     }
     result
+}
+
+fn record_provisional_title(
+    directory: &Path,
+    manifest: &mut MeetingManifest,
+    title: String,
+    updates: Option<&SyncSender<RecordingUpdate>>,
+) {
+    manifest.provisional_title = Some(title);
+    if let Err(error) = write_manifest(directory, manifest) {
+        tracing::warn!(%error, meeting = manifest.id, "could not record provisional meeting title");
+        return;
+    }
+    if let Some(updates) = updates {
+        let _ = updates.try_send(RecordingUpdate::Retitled {
+            title: display_title(manifest),
+        });
+    }
 }
 
 fn join_capture_workers(
@@ -635,6 +787,7 @@ fn write_tracks(
     directory: &Path,
     receiver: Receiver<AudioPacket>,
     mut live_sender: Option<SyncSender<AudioPacket>>,
+    mut rolling: Option<transcript::RollingFeed>,
     live_drops: &AtomicU64,
 ) -> Result<CaptureStats> {
     let mut system = None;
@@ -682,6 +835,9 @@ fn write_tracks(
         for &sample in &packet.samples {
             writer.write_sample(sample)?;
         }
+        if let Some(rolling) = &mut rolling {
+            rolling.offer(&packet);
+        }
         if let Some(sender) = &live_sender {
             match sender.try_send(packet) {
                 Ok(()) => {}
@@ -691,6 +847,9 @@ fn write_tracks(
                 Err(TrySendError::Disconnected(_)) => live_sender = None,
             }
         }
+    }
+    if let Some(rolling) = &mut rolling {
+        rolling.flush();
     }
     finalize_track(directory.join("system.wav"), system)?;
     finalize_track(directory.join("microphone.wav"), microphone)?;
@@ -725,34 +884,13 @@ fn create_empty_track(path: PathBuf) -> Result<()> {
 
 fn transcribe(
     directory: &Path,
-    manifest: &MeetingManifest,
+    manifest: &mut MeetingManifest,
     selection: &crate::transcription_models::TranscriptionSelection,
+    rolling: Option<transcript::RollingOutcome>,
 ) -> Result<()> {
-    let origin = [
-        manifest.system.first_arrival_us,
-        manifest.microphone.first_arrival_us,
-    ]
-    .into_iter()
-    .flatten()
-    .min()
-    .unwrap_or(0);
-    let mut model = Transcriber::load_selection(selection)?;
-    let mut transcript = Vec::new();
-    transcribe_track(
-        &mut model,
-        directory.join(&manifest.system.file),
-        MeetingSource::System,
-        manifest.system.first_arrival_us.unwrap_or(origin) - origin,
-        &mut transcript,
-    )?;
-    transcribe_track(
-        &mut model,
-        directory.join(&manifest.microphone.file),
-        MeetingSource::Microphone,
-        manifest.microphone.first_arrival_us.unwrap_or(origin) - origin,
-        &mut transcript,
-    )?;
-    transcript.sort_by_key(|entry| entry.start_ms);
+    let (transcript, echo_suppressed) =
+        transcript::transcribe(directory, manifest, selection, rolling)?;
+    manifest.echo_suppressed_utterances = echo_suppressed;
 
     let ndjson_temporary = directory.join("transcript.ndjson.tmp");
     let markdown_temporary = directory.join("transcript.md.tmp");
@@ -760,7 +898,7 @@ fn transcribe(
     let mut markdown = BufWriter::new(File::create(&markdown_temporary)?);
     set_owner_only(&ndjson_temporary, false)?;
     set_owner_only(&markdown_temporary, false)?;
-    writeln!(markdown, "# {}\n", manifest.title)?;
+    writeln!(markdown, "# {}\n", display_title(manifest))?;
     for entry in &transcript {
         serde_json::to_writer(&mut ndjson, entry)?;
         ndjson.write_all(b"\n")?;
@@ -774,48 +912,19 @@ fn transcribe(
     fs::rename(&ndjson_temporary, directory.join("transcript.ndjson"))?;
     fs::rename(&markdown_temporary, directory.join("transcript.md"))?;
     sync_directory(directory)?;
-    Ok(())
-}
 
-fn transcribe_track(
-    model: &mut Transcriber,
-    path: PathBuf,
-    source: MeetingSource,
-    source_offset_us: u64,
-    transcript: &mut Vec<TranscriptEntry>,
-) -> Result<()> {
-    let mut reader =
-        WavReader::open(&path).wrap_err_with(|| format!("could not read {}", path.display()))?;
-    let source_rate = reader.spec().sample_rate;
-    let source_samples: Vec<f32> = reader.samples::<f32>().collect::<Result<_, _>>()?;
-    let samples = resample_for_parakeet(&source_samples, source_rate);
-    let source_offset_ms = source_offset_us / 1_000;
-    for (chunk_index, chunk) in samples.chunks(TRANSCRIPTION_CHUNK).enumerate() {
-        if chunk.is_empty() {
-            continue;
+    match transcript::export_markdown(
+        &crate::app_settings::meeting_output_folder(),
+        manifest,
+        &transcript,
+    ) {
+        Ok(path) => {
+            tracing::info!(path = %path.display(), "published meeting transcript");
+            manifest.export_path = Some(path);
         }
-        let chunk_start_ms = chunk_index as u64 * 30_000 + source_offset_ms;
-        let chunk_duration_ms = chunk.len() as u64 * 1_000 / u64::from(SAMPLE_RATE);
-        let result = model.transcribe_segments(chunk.to_vec())?;
-        if !result.segments.is_empty() {
-            transcript.extend(result.segments.into_iter().filter_map(|segment| {
-                let text = segment.text.trim().to_string();
-                let start_ms = (segment.start_ms.max(0) as u64).min(chunk_duration_ms);
-                let end_ms = (segment.end_ms.max(0) as u64).min(chunk_duration_ms);
-                (!text.is_empty() && end_ms > start_ms).then(|| TranscriptEntry {
-                    source,
-                    start_ms: chunk_start_ms + start_ms,
-                    end_ms: chunk_start_ms + end_ms,
-                    text,
-                })
-            }));
-        } else if !result.text.trim().is_empty() {
-            transcript.push(TranscriptEntry {
-                source,
-                start_ms: chunk_start_ms,
-                end_ms: chunk_start_ms + chunk.len() as u64 * 1_000 / u64::from(SAMPLE_RATE),
-                text: result.text.trim().to_string(),
-            });
+        Err(error) => {
+            tracing::warn!(%error, "could not publish meeting Markdown");
+            manifest.export_error = Some(error.to_string());
         }
     }
     Ok(())
@@ -912,6 +1021,156 @@ fn recovered_status(
         ) => MeetingStatus::Interrupted,
         _ => status,
     }
+}
+
+/// The local clock time of a timestamp, such as `2:30 PM`.
+pub fn clock(milliseconds: u64) -> String {
+    transcript::LocalTime::from_ms(milliseconds).clock()
+}
+
+/// `Today`, `Yesterday`, or a date such as `Thursday, October 15, 2026`.
+pub fn day_label(milliseconds: u64, now_ms: u64) -> String {
+    let day = transcript::LocalTime::from_ms(milliseconds);
+    if day.day() == transcript::LocalTime::from_ms(now_ms).day() {
+        "Today".into()
+    } else if day.day() == transcript::LocalTime::from_ms(now_ms.saturating_sub(86_400_000)).day() {
+        "Yesterday".into()
+    } else {
+        day.date()
+    }
+}
+
+/// The notes as Markdown, for copying.
+pub fn notes_markdown(notes: &MeetingNotes) -> String {
+    notes::render_notes_block(notes)
+        .lines()
+        .filter(|line| !line.starts_with("<!--") && !line.starts_with("_Written on this Mac"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Speaker turns as Markdown, for copying.
+pub fn transcript_markdown(entries: &[TranscriptEntry]) -> String {
+    coalesce_transcript(entries.iter().cloned())
+        .into_iter()
+        .map(|turn| {
+            format!(
+                "**{}** · {}\n{}",
+                turn.source.label(),
+                format_duration(turn.start_ms),
+                turn.text.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Lowercased title, app, notes, and final transcript, for search.
+pub fn search_text(manifest: &MeetingManifest) -> String {
+    let mut text = format!(
+        "{} {} {}",
+        display_title(manifest),
+        manifest.title,
+        manifest.app.as_deref().unwrap_or_default()
+    );
+    if let Some(notes) = &manifest.notes {
+        text.push(' ');
+        text.push_str(&notes_markdown(notes));
+    }
+    if manifest.status == MeetingStatus::Complete
+        && let Ok(directory) = root().map(|root| root.join(&manifest.id))
+        && let Ok(entries) = read_ndjson::<TranscriptEntry>(&directory.join("transcript.ndjson"))
+    {
+        for entry in entries {
+            text.push(' ');
+            text.push_str(&entry.text);
+        }
+    }
+    text.to_lowercase()
+}
+
+/// Moves a finished meeting to the Trash: its exported Markdown first, then
+/// its recording folder. Refuses while it records, transcribes, or writes
+/// notes. A missing Markdown file is skipped.
+pub fn trash(id: &str) -> Result<()> {
+    trash_meeting(&root()?.join(id), move_to_trash)
+}
+
+fn trash_meeting(
+    directory: &Path,
+    mut move_to_trash: impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    let manifest = read_manifest(directory)?;
+    if meeting_is_active(directory) != Some(false) {
+        return Err(eyre!("Stop the recording before deleting it"));
+    }
+    if notes_in_progress(&manifest.id) {
+        return Err(eyre!("Wait for the notes to finish before deleting"));
+    }
+    if let Some(path) = manifest.export_path.filter(|path| path.exists()) {
+        move_to_trash(&path)?;
+    }
+    move_to_trash(directory)
+}
+
+fn move_to_trash(path: &Path) -> Result<()> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|error| {
+            eyre!(
+                "could not move {} to the Trash: {}",
+                path.display(),
+                error.localizedDescription()
+            )
+        })
+}
+
+/// Renames a meeting. The Markdown heading follows only while it still reads
+/// the previous title, and the file keeps its name, as with generated titles.
+pub fn rename(id: &str, title: &str) -> Result<MeetingManifest> {
+    rename_meeting(&root()?.join(id), title)
+}
+
+fn rename_meeting(directory: &Path, title: &str) -> Result<MeetingManifest> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        return Err(eyre!("The title is empty"));
+    }
+    let id = directory
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut manifest = read_manifest(directory)?;
+    let previous = display_title(&manifest);
+    manifest.title = title;
+    let next = display_title(&manifest);
+    let mut markdown_error = None;
+    if previous != next
+        && let Some(path) = manifest.export_path.clone().filter(|path| path.exists())
+        && let Err(error) = notes::retitle_markdown_file(&path, &previous, &next)
+    {
+        tracing::warn!(%error, meeting = id, "could not retitle meeting Markdown");
+        markdown_error = Some(error);
+    }
+    write_manifest(directory, &manifest)?;
+    match markdown_error {
+        Some(error) => Err(error.wrap_err("Renamed, but the Markdown heading was not updated")),
+        None => Ok(manifest),
+    }
+}
+
+/// Debug CLI: replays a recording's tracks through echo suppression.
+#[cfg(debug_assertions)]
+pub fn echo_report(
+    directory: &Path,
+    microphone_offset_ms: Option<u64>,
+    transcribe: bool,
+) -> Result<String> {
+    transcript::echo_report(directory, microphone_offset_ms, transcribe)
 }
 
 #[cfg(debug_assertions)]

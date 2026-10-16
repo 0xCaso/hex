@@ -6,6 +6,8 @@ mod app_settings;
 #[cfg(target_os = "macos")]
 mod app_window;
 #[cfg(target_os = "macos")]
+mod apple_intelligence;
+#[cfg(target_os = "macos")]
 mod apple_speech;
 #[cfg(target_os = "macos")]
 mod application_catalog;
@@ -49,6 +51,7 @@ mod feedback;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod gguf_session;
 #[cfg(any(target_os = "macos", test))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod history;
 mod instance;
 #[cfg(target_os = "macos")]
@@ -86,6 +89,8 @@ mod meeting;
 #[cfg(target_os = "macos")]
 mod meeting_detection;
 #[cfg(target_os = "macos")]
+mod meeting_mcp;
+#[cfg(target_os = "macos")]
 mod meeting_watcher;
 #[cfg(target_os = "macos")]
 mod microphone_activity;
@@ -99,6 +104,8 @@ mod onboarding;
 mod parakeet;
 #[cfg(target_os = "macos")]
 mod paste;
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+mod pause_segmenter;
 #[cfg(target_os = "macos")]
 mod permission_guide;
 #[cfg(target_os = "macos")]
@@ -217,12 +224,37 @@ enum Command {
         /// Show the sidebar update action without starting the updater.
         #[arg(long)]
         update_available: bool,
+        /// Opt in to Meetings so Settings shows its section and the pane.
+        #[arg(long)]
+        meetings_enabled: bool,
+        /// Show missing Screen & System Audio Recording permission for Meetings.
+        #[arg(long)]
+        screen_recording_missing: bool,
+        /// For `meetings`: select the meeting that is still recording.
+        #[arg(long)]
+        meeting_recording: bool,
+        /// For `meetings`: ask to delete the selected meeting.
+        #[arg(long)]
+        confirm_meeting_delete: bool,
+        /// For `meetings`: show the pane before any meeting was recorded.
+        #[arg(long)]
+        meetings_empty: bool,
+        /// For `meeting-offer`: show the call-ended or transcript-ready capsule.
+        #[arg(long, value_enum, default_value = "offer")]
+        meeting_panel: MeetingPanelPreview,
     },
     /// Listen and transcribe until interrupted.
     Listen {
         /// Override the configured microphone preference order.
         #[arg(long)]
         device: Option<String>,
+    },
+    /// Serve recorded meetings to agents over MCP (stdio). Read-only.
+    Mcp {
+        /// Read meetings from this folder instead of Application Support, such
+        /// as a mirrored copy on another Mac.
+        #[arg(long)]
+        meetings_dir: Option<PathBuf>,
     },
     /// Manage the personal command workspace.
     Commands {
@@ -344,6 +376,15 @@ enum AppPreviewTarget {
     Activity,
     History,
     TranscriptionPicker,
+    MeetingOffer,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, ValueEnum)]
+enum MeetingPanelPreview {
+    Offer,
+    CallEnded,
+    Ready,
 }
 
 #[cfg(target_os = "macos")]
@@ -378,16 +419,42 @@ enum MeetingCommand {
     },
     /// Print applications currently using microphone input.
     Probe,
+    /// Write an Apple Intelligence title and summary for a meeting id, or
+    /// time the provisional title and the final title and summary for a
+    /// transcript Markdown file without saving them.
+    Summarize {
+        target: String,
+        /// Override the excerpt character budget (file targets only).
+        #[arg(long)]
+        excerpt_chars: Option<usize>,
+    },
+    /// Replay a meeting folder's tracks and report which microphone lines
+    /// echo suppression keeps.
+    Echo {
+        directory: PathBuf,
+        /// Microphone start after the system track, when the manifest has
+        /// no arrival times.
+        #[arg(long)]
+        microphone_offset_ms: Option<u64>,
+        /// Also transcribe both tracks with the selected model.
+        #[arg(long)]
+        transcribe: bool,
+    },
 }
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<()> {
     color_eyre::install()?;
+    let cli = Cli::parse_from(mcp_alias_arguments(std::env::args_os().collect()));
+    // Before process logging, the instance lock, or any GUI or permission
+    // setup: an agent may start this over SSH while the app is running.
+    if let Some(Command::Mcp { meetings_dir }) = &cli.command {
+        return run_mcp(meetings_dir.clone());
+    }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let log_dir = app_paths::init_process_logging(&SHUTDOWN)?;
 
     let event_path = log_dir.join("live.ndjson");
-    let cli = Cli::parse();
     let executable_name = std::env::current_exe()
         .ok()
         .and_then(|path| path.file_stem().map(ToOwned::to_owned));
@@ -438,7 +505,23 @@ fn main() -> Result<()> {
             open_history_retention,
             confirm_release_microphone,
             update_available,
+            meetings_enabled,
+            screen_recording_missing,
+            meeting_recording,
+            confirm_meeting_delete,
+            meetings_empty,
+            meeting_panel,
         } => {
+            if matches!(target, AppPreviewTarget::MeetingOffer) {
+                return meeting_watcher::run(
+                    &SHUTDOWN,
+                    meeting_watcher::Launch::MeetingPanelPreview(match meeting_panel {
+                        MeetingPanelPreview::Offer => meeting_watcher::PanelPreview::Offer,
+                        MeetingPanelPreview::CallEnded => meeting_watcher::PanelPreview::CallEnded,
+                        MeetingPanelPreview::Ready => meeting_watcher::PanelPreview::Ready,
+                    }),
+                );
+            }
             if matches!(target, AppPreviewTarget::DictationHud) {
                 return meeting_watcher::run(
                     &SHUTDOWN,
@@ -464,7 +547,7 @@ fn main() -> Result<()> {
                 AppPreviewTarget::Meetings => developer_control::DeveloperPane::Meetings,
                 AppPreviewTarget::Activity => developer_control::DeveloperPane::Activity,
                 AppPreviewTarget::History => developer_control::DeveloperPane::History,
-                AppPreviewTarget::DictationHud => unreachable!(),
+                AppPreviewTarget::DictationHud | AppPreviewTarget::MeetingOffer => unreachable!(),
             };
             let model_state = match model_state {
                 AppPreviewModelState::Actual => app_window::PreviewModelState::Actual,
@@ -492,6 +575,11 @@ fn main() -> Result<()> {
                     open_history_retention,
                     confirm_release_microphone,
                     update_available,
+                    meetings_enabled,
+                    screen_recording_missing,
+                    meeting_recording,
+                    confirm_meeting_delete,
+                    meetings_empty,
                 }),
             )
         }
@@ -576,6 +664,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Mcp { .. } => unreachable!("handled before startup"),
         Command::Commands {
             command: CommandsCommand::Init,
         } => {
@@ -608,7 +697,13 @@ fn main() -> Result<()> {
             command: MeetingCommand::Record { title },
         } => {
             app_settings::AppSettings::load()?;
-            meeting::record(title, &SHUTDOWN, &root, None).map(|_| ())
+            meeting::record(
+                meeting::MeetingStart { title, app: None },
+                &SHUTDOWN,
+                &root,
+                None,
+            )
+            .map(|_| ())
         }
         #[cfg(debug_assertions)]
         Command::Meeting {
@@ -645,6 +740,48 @@ fn main() -> Result<()> {
         Command::Meeting {
             command: MeetingCommand::Probe,
         } => meeting_watcher::probe(),
+        #[cfg(debug_assertions)]
+        Command::Meeting {
+            command:
+                MeetingCommand::Summarize {
+                    target,
+                    excerpt_chars,
+                },
+        } => {
+            let path = PathBuf::from(&target);
+            if path.is_file() {
+                print!("{}", meeting::summarize_file(&path, excerpt_chars)?);
+            } else {
+                app_settings::AppSettings::load()?;
+                let manifest = meeting::summarize(&target)?;
+                println!("{}", meeting::display_title(&manifest));
+                if let Some(path) = manifest.export_path {
+                    println!("{}", path.display());
+                }
+                if let Some(error) = manifest.notes_error {
+                    println!("{error}");
+                }
+            }
+            Ok(())
+        }
+        #[cfg(debug_assertions)]
+        Command::Meeting {
+            command:
+                MeetingCommand::Echo {
+                    directory,
+                    microphone_offset_ms,
+                    transcribe,
+                },
+        } => {
+            if transcribe {
+                app_settings::AppSettings::load()?;
+            }
+            print!(
+                "{}",
+                meeting::echo_report(&directory, microphone_offset_ms, transcribe)?
+            );
+            Ok(())
+        }
         Command::BenchmarkTranscription {
             manifest,
             backend,
@@ -677,6 +814,38 @@ fn main() -> Result<()> {
     }
 }
 
+/// Logs to stderr only (stdout carries MCP messages) and touches no app state.
+#[cfg(target_os = "macos")]
+fn run_mcp(meetings_dir: Option<PathBuf>) -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("HEX_MCP_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+    let root = match meetings_dir {
+        Some(directory) => directory,
+        None => meeting::root()?,
+    };
+    meeting_mcp::run(root)
+}
+
+/// A copy installed as `hex-meetings-mcp` only serves meetings: its
+/// arguments are those of `hex mcp`, and it never falls back to listening.
+#[cfg(target_os = "macos")]
+fn mcp_alias_arguments(mut arguments: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let alias = arguments
+        .first()
+        .and_then(|program| std::path::Path::new(program).file_stem())
+        .is_some_and(|stem| stem == "hex-meetings-mcp");
+    if alias && arguments.get(1).is_none_or(|argument| argument != "mcp") {
+        arguments.insert(1, "mcp".into());
+    }
+    arguments
+}
+
 #[cfg(target_os = "macos")]
 fn is_bundled_app_executable(name: Option<&std::ffi::OsStr>) -> bool {
     name.is_some_and(|name| name == "voice-control-watch" || name == "hex")
@@ -684,8 +853,31 @@ fn is_bundled_app_executable(name: Option<&std::ffi::OsStr>) -> bool {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{Cli, Command, is_bundled_app_executable};
+    use super::{Cli, Command, is_bundled_app_executable, mcp_alias_arguments};
     use clap::Parser;
+
+    #[test]
+    fn the_meetings_mcp_alias_always_serves_meetings() {
+        let parse = |arguments: &[&str]| {
+            Cli::parse_from(mcp_alias_arguments(
+                arguments.iter().map(Into::into).collect(),
+            ))
+            .command
+        };
+        assert!(matches!(
+            parse(&["/Users/kit/.local/bin/hex-meetings-mcp"]),
+            Some(Command::Mcp { meetings_dir: None })
+        ));
+        assert!(matches!(
+            parse(&["hex-meetings-mcp", "--meetings-dir", "/tmp/mirror"]),
+            Some(Command::Mcp { meetings_dir: Some(directory) }) if directory.ends_with("mirror")
+        ));
+        assert!(matches!(
+            parse(&["hex-meetings-mcp", "mcp"]),
+            Some(Command::Mcp { .. })
+        ));
+        assert!(parse(&["hex"]).is_none());
+    }
 
     #[test]
     fn voice_action_preview_requires_explicit_opt_in() {

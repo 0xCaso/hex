@@ -48,7 +48,7 @@ for _ in 0..<200 {
         guard (window[kCGWindowOwnerPID as String] as? Int) == pid else {
             return false
         }
-        if target == "dictation-hud" {
+        if target == "dictation-hud" || target == "meeting-offer" {
             return true
         }
         let title = window[kCGWindowName as String] as? String

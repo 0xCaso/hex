@@ -20,7 +20,7 @@ pub struct WarmTranscriber {
     active: Option<Transcriber>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSegment {
     pub start_ms: i64,
@@ -28,11 +28,14 @@ pub struct TranscriptSegment {
     pub text: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transcript {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
+    /// Word timings, when the model produces them.
+    #[serde(default)]
+    pub words: Vec<TranscriptSegment>,
 }
 
 impl Transcriber {
@@ -107,6 +110,15 @@ impl Transcriber {
                                 text: segment.text,
                             })
                             .collect(),
+                        words: result
+                            .words
+                            .into_iter()
+                            .map(|word| TranscriptSegment {
+                                start_ms: word.t0_ms,
+                                end_ms: word.t1_ms,
+                                text: word.text,
+                            })
+                            .collect(),
                     })
             }
             Self::AppleSpeech(model) => model.transcribe(&samples),
@@ -129,6 +141,13 @@ impl WarmTranscriber {
         Ok(Self {
             active: Some(Transcriber::load()?),
         })
+    }
+
+    /// The warm model, only if it already serves `selection`.
+    pub fn active_for(&mut self, selection: &TranscriptionSelection) -> Option<&mut Transcriber> {
+        self.active
+            .as_mut()
+            .filter(|model| model.matches_selection(selection))
     }
 
     pub fn activate(&mut self, selection: &TranscriptionSelection) -> Result<&mut Transcriber> {

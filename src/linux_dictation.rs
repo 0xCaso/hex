@@ -241,6 +241,9 @@ fn submit_capture(
 ) -> Result<()> {
     match capture.finish(ended_at) {
         Finish::Discard => events.dictation(DictationPhase::Discarded, "")?,
+        Finish::Transcribe(clip) if clip.is_near_silent() => {
+            events.dictation(DictationPhase::Discarded, "")?
+        }
         Finish::Transcribe(clip) => {
             feedback::play(Tone::DictationStop);
             let audio_ms = clip.duration_ms();

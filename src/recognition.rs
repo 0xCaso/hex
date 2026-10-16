@@ -12,6 +12,7 @@ use crate::commands::{Action, ActionExecutor, ActionOutcome, CommandConfig, Deci
 use crate::context::{ContextMonitor, ContextSnapshot};
 use crate::dictation::{
     ControlStability, DictationControl, DictationProtocol, Finish, MINIMUM_HOLD_DURATION,
+    POST_RELEASE_TAIL,
 };
 use crate::dictation_audio::{DictationAudio, DictationAudioEvent};
 use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender};
@@ -89,6 +90,7 @@ impl ActivationStability {
 
 enum FinishResult {
     Discarded,
+    Silent,
     Submitted,
     Rejected(String),
 }
@@ -335,6 +337,11 @@ pub fn listen(
     let mut recognition_origin = None::<RecognitionOrigin>;
     let recording_environment = RecordingEnvironmentController::start();
     let (mut microphone_revision, microphone) = crate::app_settings::microphone_selection();
+    let dictation_worker = DictationWorker::start(
+        input_monitor.activity.clone(),
+        transformations.clone(),
+        history,
+    );
     let input = DictationAudio::open(
         device_override,
         microphone_revision,
@@ -342,12 +349,8 @@ pub fn listen(
         recording_environment,
         input_monitor.pending_events(),
         microphone_policy.release_while_idle,
+        dictation_worker.segment_sink(),
     )?;
-    let dictation_worker = DictationWorker::start(
-        input_monitor.activity.clone(),
-        transformations.clone(),
-        history,
-    );
     let (mut transcription_revision, _) = crate::app_settings::transcription_selection();
     let mut action_executor: Option<ActionExecutor> = None;
     let mut personal_host_enabled =
@@ -1562,6 +1565,7 @@ fn handle_hotkey_action(
             let _ = finish_dictation(
                 dictation,
                 action_at,
+                POST_RELEASE_TAIL,
                 worker,
                 TranscriptionTarget::Paste,
                 None,
@@ -1677,6 +1681,7 @@ fn handle_edit_hotkey_action(
             let _ = finish_dictation(
                 dictation,
                 action_at,
+                POST_RELEASE_TAIL,
                 worker,
                 TranscriptionTarget::VoiceAction,
                 None,
@@ -2064,6 +2069,7 @@ fn emit_voice_state(
 fn finish_dictation(
     capture: &DictationAudio,
     ended_at: CaptureInstant,
+    tail: Duration,
     worker: &DictationWorker,
     target: TranscriptionTarget,
     protocol: Option<Arc<DictationProtocol>>,
@@ -2072,12 +2078,18 @@ fn finish_dictation(
     events: &mut EventLog,
     indicator: Option<&DictationIndicatorSender>,
 ) -> Result<FinishResult> {
-    let Finish::Transcribe(clip) = capture.finish(ended_at)? else {
-        events.dictation(DictationPhase::Discarded, "")?;
-        if let Some(indicator) = indicator {
-            indicator.send(DictationIndicatorEvent::Discarded);
+    let clip = match capture.finish_with_tail(ended_at, tail)? {
+        Finish::Transcribe(clip) if !clip.is_near_silent() => clip,
+        finish => {
+            events.dictation(DictationPhase::Discarded, "")?;
+            if let Some(indicator) = indicator {
+                indicator.send(DictationIndicatorEvent::Discarded);
+            }
+            return Ok(match finish {
+                Finish::Discard => FinishResult::Discarded,
+                Finish::Transcribe(_) => FinishResult::Silent,
+            });
         }
-        return Ok(FinishResult::Discarded);
     };
     feedback::play(Tone::DictationStop);
     events.emit(&VoiceEvent::State {
@@ -2135,6 +2147,7 @@ fn handle_voice_dictation_control(
             let finish = finish_dictation(
                 dictation,
                 boundary,
+                Duration::ZERO,
                 worker,
                 target,
                 Some(protocol),
@@ -2228,6 +2241,7 @@ fn finish_outcome(result: &FinishResult) -> CommandOutcome {
     match result {
         FinishResult::Submitted => CommandOutcome::Executed,
         FinishResult::Discarded => CommandOutcome::Failed("capture was too short".into()),
+        FinishResult::Silent => CommandOutcome::Failed("capture was silent".into()),
         FinishResult::Rejected(error) => CommandOutcome::Failed(error.clone()),
     }
 }

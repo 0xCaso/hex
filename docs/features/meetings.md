@@ -1,0 +1,455 @@
+# Meetings (beta)
+
+Record a call locally: HEX captures the other participants (system audio) and
+you (microphone) as separate tracks, transcribes them on this Mac, and saves a
+Markdown transcript with `You` and `Them` turns. Recording never starts or stops
+automatically. This map covers macOS; Linux has no meetings.
+
+Linked checks are locators unless an executed result is recorded below.
+
+## How To Get To It
+
+```ts
+Settings > MEETINGS > Meetings (beta)               // meetings.opt-in; off by default
+├── On -> Meetings pane, menu-bar items, call detection, Option-Control-V
+│   ├── Screen & System Audio Recording missing -> "Open Settings" row
+│   ├── Transcript folder -> ~/Documents/Hex Meetings by default; Reveal / choose
+│   └── Summarize with Apple Intelligence -> on by default; one-line availability
+└── Off -> Controller idles; no microphone-activity inspection, pane, or shortcut
+
+Debug builds -> Always available (DEVELOPER_FEATURES_ENABLED)
+Agents -> hex mcp (read-only MCP server; works whether or not Meetings is on)
+```
+
+Requires the selected local dictation model, Microphone, and Screen & System
+Audio Recording. The opt-in is `meetings.enabled` in `settings.json`
+([app_settings.rs](../../src/app_settings.rs) `MeetingSettings`). Recording
+refuses to start without Screen Recording and asks macOS to list HEX.
+
+## Sub-features
+
+### Detect And Offer
+
+```ts
+Zoom / Teams / Slack huddle / FaceTime / browser call uses the microphone
+  -> 4 stable observations (about 2 s)              // meetings.detect
+  -> Capsule below the menu bar, focus-free          // meetings.offer
+     ├── Record -> Start recording
+     ├── Not Now -> Close
+     └── 20 s countdown -> Close                     // never records on timeout
+  -> Same call is snoozed until its app is off the microphone for about 60 s
+```
+
+Sources: [meeting_detection.rs](../../src/meeting_detection.rs),
+[microphone_activity.rs](../../src/microphone_activity.rs), and the
+`MeetingPanel` capsule in [meeting_watcher.rs](../../src/meeting_watcher.rs).
+Checks: `requires_stability_and_offers_once_per_session`,
+`a_brief_microphone_release_does_not_re_offer_the_same_call`, and
+`named_meetings_keep_their_title_and_app_calls_use_the_app`. They do not exercise
+CoreAudio process enumeration or a real call.
+
+Preview: `scripts/capture-preview.sh OUT meeting-offer [--meeting-panel call-ended|ready]`.
+
+### Record
+
+```ts
+Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
+  -> Title: named meeting OR "<App> call — 2:30 PM" OR "Meeting — 2:30 PM"
+  -> system.wav + microphone.wav, owner-only, Application Support/meetings/<id>
+  -> No idle sleep; no dictation mute or media pause // meetings.record
+  -> Menu bar: record symbol + elapsed time
+     ├── "Recording · <title> · 12:34" -> Meetings pane
+     │   └── title follows the provisional title (see Titles And Summary)
+     └── Stop & Transcribe
+  -> Settings window may stay closed
+
+Detected app leaves the microphone for about 3 s     // meetings.call-ended
+  -> "Zoom left the call" capsule: Keep Recording / Stop & Transcribe
+  -> No timeout; nothing stops automatically
+```
+
+Starting a recording no longer opens the Settings window; failures still do.
+Checks: `call_end_is_reported_once_per_sustained_absence` and
+`meeting_menu_offers_one_action_per_state` in
+[status_item.rs](../../src/status_item.rs). Native menu-bar and capsule clicks
+are unverified.
+
+### Transcribe
+
+```ts
+While recording                                      // meetings.rolling
+  -> Each track -> one-second blocks -> bounded queue (about 5 minutes)
+  -> 16 kHz streaming resampler -> chunker + echo envelope
+     ├── First pause after 20 s (pause segmenter) -> chunk boundary
+     └── No pause by 30 s -> hard cut; next chunk overlaps 2 s
+  -> Utility-QoS worker transcribes a chunk only while dictation is idle
+  -> Timed words -> sentences (punctuation or a 600 ms pause)
+  -> transcript.rolling.ndjson replaces the Moonshine draft for covered time
+     └── Queue full -> that track keeps its entries; the draft continues after
+         them; rebuilt from its WAV after Stop
+
+Stop & Transcribe
+  -> Flush tails -> finish pending chunks           // usually seconds
+  -> Any track that fell behind or failed -> stream its WAV in 1 s blocks
+  -> Join on one timeline -> Echo suppression -> Final publication
+```
+
+Design choice: a separate session of the selected model at utility QoS, loaded
+lazily on the first completed chunk, rather than a job class inside the dictation
+inference worker. Before each chunk it waits (up to 20 s per chunk) while
+`parakeet::dictation_busy()` reports an intentional capture or dictation
+inference. A chunk already running can still delay a dictation job by roughly
+one chunk's inference time, and the second model stays resident while recording.
+
+Seams: segments starting before the middle of an overlap belong to the earlier
+chunk, and repeated words (two to twelve) at the join are removed.
+
+### Echo Suppression
+
+```ts
+Call on speakers -> the microphone hears the remote side 0-300 ms later
+Each microphone utterance or sentence                // meetings.echo
+├── Signal (meeting_echo): 20 ms energy of both tracks on one timeline
+│   ├── Lag (-100..+400 ms) and coupling from envelope correlation over ±60 s
+│   │   └── Correlation < 0.2 (headphones) -> every sound is local
+│   ├── Bleed gain = 35th percentile of mic − delayed system over ±5 s
+│   └── Frame is local when mic > predicted bleed (160 ms reverb) + 9 dB
+│       ├── ≤ 20% local -> Bleed -> dropped, whatever the words
+│       ├── ≥ 50% local -> Local -> kept, even with matching words (double-talk)
+│       └── otherwise   -> decided by words
+└── Words: ≥ 60% match Them speech within ±1.5 s (60% edit similarity) -> echo
+
+Applied in: rolling snapshot, final transcript, live view, Option-Control-V
+Live view (meeting_live::live_view)
+├── Live worker stamps each microphone draft line Bleed / Local
+├── Rolling microphone entries are already judged; not re-judged by words
+└── Undecided draft line overlapping remote speech -> hidden until it completes
+    └── No twin by then -> shown as You
+```
+
+Dropped counts are saved as `echo_suppressed_utterances` in the manifest.
+
+Root cause of `You` twins (Kit's 2026-10-15 call on speakers, Pro): ten minutes
+in, the packet-bounded rolling queue filled (`rolling meeting transcription fell
+behind` for both sources), the rolling snapshot became empty, and the pane
+showed the raw Moonshine draft, which had no echo suppression. Rolling
+transcripts were also one model segment per 20-30 s chunk, so a chunk mixing
+echo and Kit's speech was kept or dropped whole.
+
+Observed (`hex meeting echo <dir> [--microphone-offset-ms 300] [--transcribe]`,
+copied 17-minute recording, Mac Studio):
+
+```ts
+Live draft You lines shown      212 -> 72
+├── Twins of remote lines (word match)          105 -> 2
+├── Kit's lines (240-274 s, 780 s on)            67 -> 67 kept
+└── Other unmatched lines (mostly misheard bleed) 31 -> 3
+   Word matching alone would show 80
+
+Final, parakeet-unified-en
+├── Before: 35 chunk-sized You entries, 10 kept, 25 dropped whole
+└── After: 205 sentences, 74 kept; Kit's 240-274 s and 780 s+ speech kept,
+    about 8 short fragments of uncertain origin kept
+```
+
+Acoustic echo cancellation (Voice Processing IO) was evaluated, not adopted:
+it replaces ScreenCaptureKit's raw microphone with an AVAudioEngine/VPIO input,
+ducks other audio, moves Bluetooth headsets to the call profile, adds gain and
+noise processing to the transcribed track, runs beside the call app's own voice
+processor, and loses ScreenCaptureKit's shared clock. See ROADMAP.md.
+
+Sources: [meeting_transcript.rs](../../src/meeting_transcript.rs),
+[meeting_echo.rs](../../src/meeting_echo.rs),
+[meeting_live.rs](../../src/meeting_live.rs),
+`StreamingResampler` in [dictation.rs](../../src/dictation.rs). Echo checks:
+`speaker_bleed_is_classified_as_bleed`, `talking_over_the_remote_side_is_local`,
+`speech_during_remote_silence_is_local`, `headphones_make_every_microphone_sound_local`,
+`the_signal_overrides_word_matching_both_ways`,
+`synthetic_speaker_bleed_is_dropped_and_double_talk_kept`,
+`live_view_hides_microphone_twins_of_remote_speech`,
+`an_undecided_draft_line_waits_while_the_remote_side_speaks`,
+`live_view_keeps_rolling_microphone_entries_that_rolling_already_judged`, and
+`timed_words_become_sentences_at_punctuation_and_pauses` (synthetic signals).
+Other checks:
+`continuous_speech_is_hard_cut_with_overlap_and_covers_every_sample`,
+`chunks_end_at_the_first_pause_after_the_target_length`,
+`overlapping_chunks_join_at_the_middle_of_the_overlap`, `seam_drops_repeated_words`,
+`speaker_echo_of_remote_speech_is_dropped`, `word_level_echo_is_dropped_as_one_utterance`,
+`distinct_or_distant_local_speech_is_kept`, and
+`streaming_resampler_matches_whole_buffer_conversion`. They use synthetic audio
+and transcripts, not model inference or real speaker echo.
+
+### Save And Reuse
+
+```ts
+Final publication                                   // meetings.output
+├── Internal: transcript.ndjson + transcript.md (atomic, owner-only)
+└── Markdown copy -> <folder>/<YYYY-MM-DD HHMM> <title>.md
+    ├── Title, date, duration, app, You / Them turns
+    ├── Never overwrites; adds " (2)"
+    └── Failure -> Meeting still Complete; "Markdown not saved: …"
+
+Transcript ready capsule (15 s) -> Copy (Markdown) / Reveal
+Meetings pane -> Reveal Markdown (or Reveal Files when none)
+Option-Control-V -> Paste meeting turns added since the last paste
+```
+
+### Meetings Pane
+
+```ts
+Header: Search meetings (title, app, notes, final transcript) + Start / Stop
+List (grouped Today / Yesterday / date)
+└── Row: title (generated when present) · time · length · app · status chip
+    └── Recording (red dot) / Transcribing / Interrupted / Failed; Ready in detail
+Detail
+├── Title, status chip, date · time · duration · app
+├── Actions: Copy Summary, Copy Transcript, Reveal Markdown, Summarize /
+│   Regenerate Summary, Rename, Delete (finished meetings only for the last four)
+├── Errors at the top of the scroll area
+├── Summary: one paragraph, at most two sentences
+└── Transcript: Them left, You right in accent; merged turns; timestamps;
+    30 s+ pause dividers; live view follows the tail; "Listening..." while recording
+
+Rename -> inline field; Enter or Save          // meetings.rename
+  -> manifest title; Markdown heading only while it reads the old title
+  -> file name unchanged; empty title refused
+Delete -> "Trash Recording & Markdown" (or "Trash Recording") / Cancel
+  -> exported Markdown, then Application Support/meetings/<id>, to the Trash
+  -> refused while recording, transcribing, or writing notes   // meetings.delete
+```
+
+Choice: Delete trashes the Markdown copy too, since it holds the transcript;
+both stay recoverable from the Trash. Sources: `render_meetings` in
+[app_window.rs](../../src/app_window.rs), `trash` / `rename` in
+[meeting.rs](../../src/meeting.rs). Checks:
+`deleting_trashes_the_markdown_then_the_recording_and_refuses_while_recording`,
+`renaming_updates_the_manifest_and_an_unedited_markdown_heading`,
+`retitling_replaces_only_a_matching_first_heading`,
+`meeting_search_delete_and_rename_work_on_the_selected_meeting`, and the GPUI
+layout check `meeting_turns_alternate_sides_inside_the_detail`.
+
+Preview: `scripts/capture-preview.sh OUT meetings [--meeting-recording]
+[--confirm-meeting-delete] [--meetings-empty]`.
+
+Checks: `markdown_lists_metadata_and_labeled_turns` and
+`export_never_overwrites_and_uses_safe_names`.
+
+### Titles And Summary (Apple Intelligence)
+
+```ts
+While recording, setting on, model available           // meetings.title.provisional
+  -> meeting-title thread, utility QoS; checks the transcript every 10 s
+     (rolling chunks + live draft, echo-filtered)
+  -> ≥ 90 s of speech (or ≥ 600 words; ≥ 60 words either way)
+     -> waits (≤30 s) while dictation is busy
+     -> ONE title-only call over the transcript so far (≤5,000 chars, 30 s timeout)
+  -> Recorder stores provisional_title in the manifest
+     -> menu bar "Recording · <title>", Meetings pane list and detail
+  -> Refreshed once when speech reaches 10 minutes; a failure retries a minute
+     later; at most 3 calls per meeting; Stop discards a call in flight
+  -> The exported Markdown file name and heading use it when it arrived first
+
+Final publication complete                               // meetings.notes
+  -> meeting-notes thread, utility QoS; waits (≤30 s) while dictation is busy
+  -> ONE call over a bounded excerpt, no map-reduce
+     ├── Lines "[mm:ss] You|Them: text" (long turns split at 600 chars)
+     ├── Whole transcript when it fits; otherwise opening 30 %, up to six
+     │   evenly spaced middle passages, ending 20 %, "[…]" between them
+     ├── Budget = min(12,000 chars, (context − 1,000 tokens) × 3 chars)
+     └── Context exceeded -> retried once with half the excerpt
+  -> 90 s total deadline; the call ≤60 s
+  -> Manifest: notes { title ≤8 words, summary ≤2 sentences / 400 chars,
+     excerpt_chars, transcript_chars }
+  -> Markdown copy, same file name, atomic replace
+     ├── Heading -> final title, only while it still reads HEX's last title
+     ├── <!-- hex:notes --> ## Summary (one paragraph) above ## Transcript
+     ├── Text outside the block is preserved; changed mid-write -> not written
+     └── Missing file -> manifest only
+  -> Failure / timeout -> notes_error; Markdown untouched; recording stays Complete
+
+Unavailable (not eligible / Apple Intelligence off / model not ready / macOS < 26)
+  -> Settings row says why; nothing runs
+Meetings pane -> title in list and detail; Summary paragraph above the transcript;
+  "Summarize" / "Regenerate Summary" / "Summarizing..."
+Transcript ready capsule -> "Ready · <title>" once a provisional or final title
+  exists; subtitle "Summarizing with Apple Intelligence…", then the summary
+```
+
+Title rule: the shown title is the user's title unless it is still the default
+`<App> call — 2:30 PM` / `Meeting — 2:30 PM`; then the final notes title, else
+the provisional title, else the default. Named or renamed meetings keep their
+name. The file is never renamed, so links, open editors, and Reveal keep working.
+
+Action items and decisions are gone: other agents read the transcript for
+details (MCP). Older manifests still decode: a list summary is joined into one
+paragraph, and action items, decisions, and chunk counts are ignored (and
+dropped when that manifest is next written). Their Markdown copies keep their
+old notes block until regenerated.
+
+Sources: [meeting_notes.rs](../../src/meeting_notes.rs),
+[apple_intelligence.rs](../../src/apple_intelligence.rs), and the
+FoundationModels bridge [apple_intelligence.swift](../../src/apple_intelligence.swift)
+(`GeneratedNotes` title + summary, `GeneratedTitle` title only), weak-linked from
+[build.rs](../../build.rs); the recorder loop in `record` in
+[meeting.rs](../../src/meeting.rs). Checks in `meeting::notes::tests` (fake
+model): `a_short_transcript_is_sent_whole_in_one_call`,
+`long_meetings_are_excerpted_from_the_opening_middle_and_ending`,
+`context_overflow_halves_the_excerpt_once_and_failures_stop`,
+`titles_are_requested_after_the_opening_then_once_at_ten_minutes`,
+`provisional_titles_use_the_title_prompt_over_the_transcript_so_far`,
+`generated_and_provisional_titles_replace_only_default_titles`,
+`older_notes_with_points_action_items_and_decisions_still_read`,
+`notes_are_inserted_above_the_transcript_and_regenerate_idempotently`, and
+`user_edits_outside_the_notes_block_are_preserved`; menu text in
+`meeting_menu_offers_one_action_per_state`. The recorder thread, manifest write,
+and menu/pane refresh during a real recording are unexercised.
+
+Real model (debug CLI): `hex meeting summarize <file.md> [--excerpt-chars N]`
+times the provisional title at the point a recording would ask for it, then the
+final title and summary, without saving; `hex meeting summarize <id>` writes
+them like Regenerate.
+
+Observed (2026-10-15, Mac Studio M2 Max, macOS 27.0.1, context 8,192 tokens,
+debug build) on a synthetic 50-minute, 7,700-word transcript (206 turns,
+46,000 chars):
+
+```ts
+Provisional title at 01:41 (261 words, 101 s of speech)  0.7 s (1.0 s first call)
+Final title + summary, one call, 11,151-char excerpt     3.4–3.5 s (3 runs)
+  └── budget 9,000 -> 2.6–3.4 s; 18,000 -> 5.7 s
+Before: map-reduce over 8 chunks, 9 calls, 51-minute call  96 s
+```
+
+### Agent Access (MCP)
+
+```ts
+hex mcp [--meetings-dir <path>]                     // meetings.mcp; release builds
+├── MCP over stdio; independent of the Meetings opt-in (read-only)
+├── Dispatches before process logging, the instance lock, GUI, and permissions
+│   └── Safe beside the running app; logs only to stderr (HEX_MCP_LOG)
+├── Default folder: Application Support/voice-control/meetings
+│   └── --meetings-dir -> any mirrored copy (rsync of that folder)
+├── A copy named hex-meetings-mcp -> always `hex mcp` with the same flags
+│   (no subcommand never falls back to listening)
+└── Tools (all readOnlyHint)
+    ├── list_meetings(since?, until?, query?, limit?, include_in_progress?)
+    │   └── id · title (generated when present) · ISO start · mm:ss · status ·
+    │       transcript kind · participants "You, Them (<app>)" · notes yes/no
+    ├── search_transcripts(query, since?, until?, meeting_id?, limit?, fuzzy?)
+    │   └── per-meeting counts + ranked passages: id, title, speaker,
+    │       mm:ss @ ISO time, snippet with **matches**, before/after lines
+    ├── get_transcript(meeting_id, start?, end?, speaker?, max_chars?, cursor?)
+    │   └── merged You/Them turns "[mm:ss · HH:MM:SS] Them: …" + next_cursor
+    └── get_meeting_notes(meeting_id)
+        └── stored title + two-sentence summary + "read the transcript for
+            details, decisions, and action items", or an explicit
+            "No Apple Intelligence notes are stored" + get_transcript hint
+Resources: hex-meeting://<id> -> Markdown (metadata, notes, transcript)
+```
+
+Read-only and private: the server opens files for reading only, never writes,
+repairs, or recovers anything in the meetings folder (unlike `meeting::list`,
+which persists recovered statuses), creates no index or cache on disk, runs no
+model, and makes no network request. It never reads the exported Markdown in
+`~/Documents`, so SSH sessions need no Documents access. Transcripts leave the
+Mac only through whatever transport the MCP client uses (stdio, or SSH).
+
+Concurrency: a recorder holds `active.lock`; the server probes it with a
+read-only, non-blocking shared `flock` and releases it immediately. Held ->
+`recording (in progress)` with the rolling transcript plus the live draft
+(`meeting_live::live_view`, echo-filtered), labeled provisional. Not held ->
+the app's recovery rules apply without writing: published `transcript.ndjson`
+is final, an unfinished draft is `interrupted`. Stale lock files from finished
+recordings read as not held. A mirror cannot see the Pro's lock, so a meeting
+still recording there appears `interrupted` with its draft so far. Unreadable
+manifests are listed as skipped folders; unreadable NDJSON lines are skipped and
+counted; an unterminated last line is treated as a write in progress.
+
+Search: in-memory, rebuilt per meeting when its files' sizes or times change.
+Passages are same-speaker runs of up to 60 words (3 s turn gap) plus one per
+stored notes block. Text is NFKD-folded (case and diacritics), tokenized, and
+lightly stemmed (`scheduled`/`scheduling` -> `schedul`). BM25 (k1 1.2, b 0.75)
+over expanded terms: exact 1.0, prefix 0.8, edit distance 1 (2 from 8 letters)
+0.7, Soundex 0.45 for 3-5 letter words (`Dacks` -> `Dax`); partial-term
+coverage and adjacent-term bonuses. `"Quoted words"` are required exact
+(stemmed) phrases; `fuzzy: false` keeps only exact stems.
+
+Semantic search is not shipped. On-device candidates are Apple NaturalLanguage
+`NLContextualEmbedding` (asset download, macOS 14+) or the older static
+`NLEmbedding` sentence model, through a Swift bridge like `apple_speech`, with a
+cache under `~/Library/Caches/voice-control/meeting-index` keyed by meeting
+fingerprints. Full-text with stemming and fuzzy matching answered the real
+queries below; embeddings wait until a query fails for lack of paraphrase.
+
+Sources: [meeting_query.rs](../../src/meeting_query.rs) (`meeting::query`,
+queries and rendering) and [meeting_mcp.rs](../../src/meeting_mcp.rs) (`rmcp`
+3.5 adapter); `run_mcp` in [main.rs](../../src/main.rs). Checks (synthetic
+fixtures in `tests/fixtures/meetings`): `meeting::query::tests::*` (listing and
+skipped folders, filters, misspelling tolerance and ranking, stemming, accents,
+required phrases, context, drafts, cursor paging, notes, held lock,
+`queries_never_write_to_the_meetings_folder`, time parsing) and
+`tests/meetings_mcp.rs` (initialize with protocol 2025-06-18, tools/list with
+schemas and read-only annotations, tools/call, resources/read, stdout carries
+only JSON-RPC, no Application Support state created).
+
+Observed (2026-10-15, Mac Studio, release build, read-only copy of the Pro's 8
+meetings without WAVs): first launch of a freshly signed binary 440 ms to
+`initialize` (Gatekeeper), then 8 ms; `list_meetings` 4-7 ms cold; searches
+0.5-1.2 ms; a 51-minute `get_transcript` 0.5 ms; `resources/read` 0.6 ms.
+
+#### Another Mac's Meetings (Mirror)
+
+```ts
+Don't: MCP client config runs `ssh pro hex mcp`         // one SSH per client
+  -> 41 OpenCode instances = 41 SSH sessions -> the Pro's sshd reset connections
+
+Do: one periodic pull, then local servers               // meetings.mcp.mirror
+scripts/sync-meetings-mirror.sh (LaunchAgent template, every 120 s,
+  ProcessType Background, Nice 10, LowPriorityIO)
+├── ONE rsync over ssh (BatchMode, ConnectTimeout 5, --timeout 60)
+│   pro:Library/Application Support/voice-control/meetings/
+│   -> ~/Library/Caches/hex-meetings-mirror/ (0700)
+├── Skips *.wav, *.lock, *.tmp; --delay-updates (files land together at the
+│   end); --delete-delay (meetings trashed on the Pro disappear)
+└── Pro asleep / unreachable -> exit 0 silently; next run retries
+Each MCP client -> local `hex mcp --meetings-dir <mirror>` (no SSH, no lock)
+└── No lock in the mirror -> a meeting still recording on the Pro reads as
+    `interrupted` with its rolling transcript + draft so far; final once published
+```
+
+Template: [hex-meetings-mirror.plist](../../scripts/launchd/hex-meetings-mirror.plist)
+(placeholders for the checkout and home; not installed automatically).
+
+Observed (2026-10-15, Studio pulling from the Pro): one sync 0.44 s, 8 meetings,
+1.0 MB, no WAVs or locks; unreachable host exits 0 at once, unanswered address
+exits 0 after the 5 s connect timeout. `hex-meetings-mcp --meetings-dir` (release
+build in `~/.local/bin`) over stdio: first launch of the new binary 378 ms to
+`initialize` (Gatekeeper), then 7 ms; `list_meetings` 3.5–11 ms cold, 0.5 ms
+warm; searches 0.6–1.5 ms; a 48,000-char `get_transcript` 0.6 ms;
+`get_meeting_notes` ≤0.3 ms, including an older manifest with action items;
+`resources/read` 0.5 ms. 40 parallel instances: all initialized (median 13 ms,
+max 22 ms), listed, and exited 0 in 76 ms wall. The LaunchAgent is not loaded,
+so ssh-agent access from launchd is unverified.
+
+Granola import: see [granola-import.md](../plans/granola-import.md).
+
+## Gaps
+
+- No executed end-to-end recording with a real call, Screen Recording grant, or
+  speakers echo in this change; see the test script in the handoff.
+- Calendar titles (EventKit) are not implemented.
+- The live Moonshine draft needs the command model; without it, the pane shows
+  rolling chunks only as they complete (about every 20–30 s).
+- Settings, capsule, and Meetings pane previews launched, but screenshot capture
+  failed on the build host (`could not create image from window`; the Studio
+  session was locked, `CGSSessionScreenIsLocked 1`). The redesigned pane is
+  verified only by GPUI layout checks, not visually.
+- Echo thresholds are tuned on one speaker-mode call. The offline replay assumed
+  the microphone started 300 ms after the system track because the recording's
+  manifest had no arrival times yet. Real NSFileManager trashing and the native
+  rename field are unexercised in the app.
+- Why the rolling worker stalled for over a minute on the Pro is unknown; slow
+  chunks (> 5 s) are now logged.
+- Titles and summaries have not run after a real recording in the app; the CLI
+  path exercised the real model, and the provisional-title thread, its manifest
+  write, and the menu/pane refresh are unexercised in a live recording.

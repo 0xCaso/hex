@@ -1,5 +1,6 @@
 use super::*;
 use crate::events::TranscriptPhase;
+use hound::WavReader;
 
 #[test]
 fn decodes_float_and_aligned_24_bit_integer_samples() {
@@ -30,6 +31,7 @@ fn live_transcript_projects_the_latest_version_of_each_source_line() {
         start_ms,
         end_ms: start_ms + 500,
         text: text.into(),
+        signal: None,
     };
     let transcript = live::project([
         event(
@@ -185,6 +187,7 @@ fn final_transcript_replaces_the_live_draft_atomically() {
         start_ms: 0,
         end_ms: 500,
         text: "live draft".into(),
+        signal: None,
     };
     fs::write(
         directory.join("transcript.live.ndjson"),
@@ -238,6 +241,7 @@ fn reading_live_transcript_ignores_an_in_flight_trailing_write() {
         start_ms: 0,
         end_ms: 500,
         text: "complete".into(),
+        signal: None,
     };
     fs::write(
         &path,
@@ -274,6 +278,7 @@ fn transcript_reader_only_parses_newly_appended_live_events() {
         start_ms: line_id * 1_000,
         end_ms: line_id * 1_000 + 500,
         text: text.into(),
+        signal: None,
     };
     let first = serde_json::to_string(&event(1, "first")).unwrap();
     let second = serde_json::to_string(&event(2, "second")).unwrap();
@@ -314,6 +319,13 @@ fn capture_failures_are_persisted_instead_of_looking_interrupted() {
         live_dropped_packets: 0,
         live_transcription_error: None,
         error: None,
+        app: None,
+        export_path: None,
+        export_error: None,
+        echo_suppressed_utterances: 0,
+        provisional_title: None,
+        notes: None,
+        notes_error: None,
     };
     write_manifest(&directory, &manifest).unwrap();
 
@@ -458,4 +470,340 @@ fn live_transcription_replays_both_recorded_tracks() {
         );
     }
     fs::remove_dir_all(output).unwrap();
+}
+
+#[test]
+fn rolling_entries_replace_the_live_draft_for_the_time_they_cover() {
+    let entry = |source, start_ms, end_ms, text: &str| TranscriptEntry {
+        source,
+        start_ms,
+        end_ms,
+        text: text.into(),
+    };
+    let rolling = [
+        entry(MeetingSource::System, 0, 20_000, "Final system."),
+        entry(MeetingSource::Microphone, 1_000, 9_000, "Final mic."),
+    ];
+    let live = vec![
+        entry(MeetingSource::System, 5_000, 6_000, "draft system"),
+        entry(MeetingSource::Microphone, 8_000, 8_500, "draft overlap"),
+        entry(MeetingSource::Microphone, 9_500, 10_000, "draft mic tail"),
+        entry(MeetingSource::System, 21_000, 22_000, "draft system tail"),
+    ];
+    let merged = live::merge_rolling(&rolling, live.clone());
+    assert_eq!(
+        merged
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Final system.",
+            "Final mic.",
+            "draft mic tail",
+            "draft system tail"
+        ]
+    );
+    assert_eq!(live::merge_rolling(&[], live.clone()), live);
+}
+
+fn live_event(
+    source: MeetingSource,
+    line_id: u64,
+    phase: TranscriptPhase,
+    (start_ms, end_ms): (u64, u64),
+    text: &str,
+    signal: Option<echo::Signal>,
+) -> live::Event {
+    live::Event {
+        source,
+        line_id,
+        phase,
+        start_ms,
+        end_ms,
+        text: text.into(),
+        signal,
+    }
+}
+
+fn shown(entries: &[TranscriptEntry]) -> Vec<(MeetingSource, &str)> {
+    entries
+        .iter()
+        .map(|entry| (entry.source, entry.text.as_str()))
+        .collect()
+}
+
+#[test]
+fn live_view_hides_microphone_twins_of_remote_speech() {
+    use TranscriptPhase::Completed;
+    let events = [
+        live_event(
+            MeetingSource::System,
+            1,
+            Completed,
+            (19_635, 22_707),
+            "I feel like over the course of a couple of months we could make like",
+            None,
+        ),
+        live_event(
+            MeetingSource::Microphone,
+            2,
+            Completed,
+            (19_718, 22_630),
+            "I feel like over the course of a couple of months we can make by...",
+            None,
+        ),
+        live_event(
+            MeetingSource::System,
+            3,
+            Completed,
+            (24_051, 25_811),
+            "To thirty games and that's",
+            None,
+        ),
+        live_event(
+            MeetingSource::Microphone,
+            4,
+            Completed,
+            (23_974, 25_574),
+            "230 games and that's",
+            None,
+        ),
+        // Misheard bleed with different words: only the signal catches it.
+        live_event(
+            MeetingSource::System,
+            5,
+            Completed,
+            (7_763, 9_075),
+            "I feel like it.",
+            None,
+        ),
+        live_event(
+            MeetingSource::Microphone,
+            6,
+            Completed,
+            (7_846, 8_998),
+            "Good luck, man.",
+            Some(echo::Signal::Bleed),
+        ),
+        // The user talking over the remote side with matching words.
+        live_event(
+            MeetingSource::System,
+            7,
+            Completed,
+            (40_000, 41_000),
+            "Yeah.",
+            None,
+        ),
+        live_event(
+            MeetingSource::Microphone,
+            8,
+            Completed,
+            (40_050, 41_000),
+            "Yeah.",
+            Some(echo::Signal::Local),
+        ),
+        live_event(
+            MeetingSource::Microphone,
+            9,
+            Completed,
+            (50_000, 52_000),
+            "Apple has a new thing.",
+            None,
+        ),
+    ];
+    let entries = live::live_view(&[], events.iter());
+    assert_eq!(
+        shown(&entries),
+        [
+            (MeetingSource::System, "I feel like it."),
+            (
+                MeetingSource::System,
+                "I feel like over the course of a couple of months we could make like"
+            ),
+            (MeetingSource::System, "To thirty games and that's"),
+            (MeetingSource::System, "Yeah."),
+            (MeetingSource::Microphone, "Yeah."),
+            (MeetingSource::Microphone, "Apple has a new thing."),
+        ]
+    );
+}
+
+#[test]
+fn an_undecided_draft_line_waits_while_the_remote_side_speaks() {
+    use TranscriptPhase::{Completed, Updated};
+    let system = live_event(
+        MeetingSource::System,
+        1,
+        Updated,
+        (1_000, 3_000),
+        "Basically, I want",
+        None,
+    );
+    let draft = |phase, text: &str| {
+        live_event(
+            MeetingSource::Microphone,
+            2,
+            phase,
+            (1_080, 2_900),
+            text,
+            None,
+        )
+    };
+    let entries = live::live_view(&[], [&system, &draft(Updated, "Basically")]);
+    assert_eq!(
+        shown(&entries),
+        [(MeetingSource::System, "Basically, I want")]
+    );
+
+    // No twin arrived: once complete, the line is the user's.
+    let entries = live::live_view(&[], [&system, &draft(Completed, "Hold on a second.")]);
+    assert_eq!(
+        shown(&entries),
+        [
+            (MeetingSource::System, "Basically, I want"),
+            (MeetingSource::Microphone, "Hold on a second."),
+        ]
+    );
+
+    // Local speech shows immediately, and a draft with no remote speech
+    // around it is never held.
+    let local = live_event(
+        MeetingSource::Microphone,
+        3,
+        Updated,
+        (1_200, 2_000),
+        "Wait",
+        Some(echo::Signal::Local),
+    );
+    let alone = live_event(
+        MeetingSource::Microphone,
+        4,
+        Updated,
+        (9_000, 9_800),
+        "So anyway",
+        None,
+    );
+    let entries = live::live_view(&[], [&system, &local, &alone]);
+    assert_eq!(
+        shown(&entries),
+        [
+            (MeetingSource::System, "Basically, I want"),
+            (MeetingSource::Microphone, "Wait"),
+            (MeetingSource::Microphone, "So anyway"),
+        ]
+    );
+}
+
+#[test]
+fn live_view_keeps_rolling_microphone_entries_that_rolling_already_judged() {
+    let entry = |source, start_ms, end_ms, text: &str| TranscriptEntry {
+        source,
+        start_ms,
+        end_ms,
+        text: text.into(),
+    };
+    // Rolling kept this double-talk line on signal evidence; the live view
+    // has no signal for it and must not re-judge it by words.
+    let rolling = [
+        entry(MeetingSource::System, 0, 2_000, "Yeah, totally."),
+        entry(MeetingSource::Microphone, 50, 2_000, "Yeah, totally."),
+    ];
+    let entries = live::live_view(&rolling, std::iter::empty());
+    assert_eq!(entries.len(), 2);
+}
+
+fn finished_meeting(name: &str, title: &str) -> (PathBuf, PathBuf) {
+    let base = std::env::temp_dir().join(format!(
+        "voice-control-{name}-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let directory = base.join("1760000000000-1");
+    fs::create_dir_all(&directory).unwrap();
+    let export = base.join("2026-10-15 1418 Meeting.md");
+    fs::write(
+        &export,
+        format!("# {title}\n\n## Transcript\n\n**You** · 00:01\nHi.\n"),
+    )
+    .unwrap();
+    let manifest: MeetingManifest = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "id": "1760000000000-1",
+        "title": title,
+        "status": "complete",
+        "created_at_ms": 1_760_000_000_000_u64,
+        "ended_at_ms": 1_760_000_060_000_u64,
+        "duration_ms": 60_000,
+        "system": {"file": "system.wav", "samples": 0, "dropped_packets": 0},
+        "microphone": {"file": "microphone.wav", "samples": 0, "dropped_packets": 0},
+        "error": null,
+        "export_path": export,
+    }))
+    .unwrap();
+    write_manifest(&directory, &manifest).unwrap();
+    (base, directory)
+}
+
+#[test]
+fn renaming_updates_the_manifest_and_an_unedited_markdown_heading() {
+    let (base, directory) = finished_meeting("rename", "Meeting — 2:18 PM");
+    let export = read_manifest(&directory).unwrap().export_path.unwrap();
+    let renamed = rename_meeting(&directory, "  Arcade   planning ").unwrap();
+    assert_eq!(renamed.title, "Arcade planning");
+    assert_eq!(read_manifest(&directory).unwrap().title, "Arcade planning");
+    assert!(
+        fs::read_to_string(&export)
+            .unwrap()
+            .starts_with("# Arcade planning\n")
+    );
+
+    // A heading the user changed is theirs; only the manifest follows.
+    fs::write(&export, "# My own heading\n\nNotes.\n").unwrap();
+    rename_meeting(&directory, "Arcade sync").unwrap();
+    assert_eq!(read_manifest(&directory).unwrap().title, "Arcade sync");
+    assert_eq!(
+        fs::read_to_string(&export).unwrap(),
+        "# My own heading\n\nNotes.\n"
+    );
+    assert!(rename_meeting(&directory, "   ").is_err());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn deleting_trashes_the_markdown_then_the_recording_and_refuses_while_recording() {
+    let (base, directory) = finished_meeting("trash", "Design sync");
+    let export = read_manifest(&directory).unwrap().export_path.unwrap();
+    let mut trashed = Vec::new();
+
+    let active = ActiveMeeting::acquire(&directory).unwrap();
+    let refused = trash_meeting(&directory, |path| {
+        trashed.push(path.to_path_buf());
+        Ok(())
+    });
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("Stop the recording")
+    );
+    assert!(trashed.is_empty());
+    drop(active);
+
+    trash_meeting(&directory, |path| {
+        trashed.push(path.to_path_buf());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(trashed, [export.clone(), directory.clone()]);
+
+    // Without a Markdown copy only the recording moves.
+    fs::remove_file(&export).unwrap();
+    trashed.clear();
+    trash_meeting(&directory, |path| {
+        trashed.push(path.to_path_buf());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(trashed, [directory]);
+    fs::remove_dir_all(base).unwrap();
 }

@@ -43,17 +43,42 @@ pub(crate) fn validate_gguf_artifact(
         .map(str::to_string))
 }
 
+// On GPU devices only the per-token decoder runs on CPU; extra spin-waiting ggml
+// workers (default up to 8) stall it under load, so keep it on the calling thread.
+fn session_options(device_type: transcribe_cpp::DeviceType) -> transcribe_cpp::SessionOptions {
+    match device_type {
+        transcribe_cpp::DeviceType::Gpu | transcribe_cpp::DeviceType::Igpu => {
+            transcribe_cpp::SessionOptions {
+                n_threads: 1,
+                ..Default::default()
+            }
+        }
+        _ => transcribe_cpp::SessionOptions::default(),
+    }
+}
+
 pub(crate) struct OfflineGgufSession {
     model: transcribe_cpp::Model,
     session: Option<transcribe_cpp::Session>,
+    options: transcribe_cpp::SessionOptions,
 }
 
 impl OfflineGgufSession {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn set_threads_for_test(&mut self, n_threads: i32) -> transcribe_cpp::Result<()> {
+        self.options.n_threads = n_threads;
+        self.session = None;
+        self.session = Some(self.model.session_with(&self.options)?);
+        Ok(())
+    }
+
     pub(crate) fn new(model: transcribe_cpp::Model) -> transcribe_cpp::Result<Self> {
-        let session = model.session()?;
+        let options = session_options(model.device()?.device_type);
+        let session = model.session_with(&options)?;
         Ok(Self {
             model,
             session: Some(session),
+            options,
         })
     }
 
@@ -68,11 +93,11 @@ impl OfflineGgufSession {
         // overlap two sessions' persistent decoder state.
         let mut session = match self.session.take() {
             Some(session) => session,
-            None => self.model.session()?,
+            None => self.model.session_with(&self.options)?,
         };
         let result = session.run(samples, options);
         drop(session);
-        match self.model.session() {
+        match self.model.session_with(&self.options) {
             Ok(session) => {
                 self.session = Some(session);
                 result
@@ -82,5 +107,19 @@ impl OfflineGgufSession {
                 Err(run_error) => Err(run_error),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_sessions_bound_decoder_threads_and_cpu_sessions_keep_library_default() {
+        use transcribe_cpp::DeviceType;
+        assert_eq!(session_options(DeviceType::Gpu).n_threads, 1);
+        assert_eq!(session_options(DeviceType::Igpu).n_threads, 1);
+        assert_eq!(session_options(DeviceType::Cpu).n_threads, 0);
+        assert_eq!(session_options(DeviceType::Accel).n_threads, 0);
     }
 }

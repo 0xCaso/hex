@@ -206,19 +206,37 @@ Downloads, Calendar, or other unrelated TCC access.
 
 ## Complete Meeting Lifecycle Recovery
 
-When meeting microphone activity disappears, ask `Keep Recording` or
-`Stop & Transcribe`; never stop automatically. Add EventKit correlation for
-titles and reminders, explicit input-device selection, structured capture-gap
-observations, active-WAV repair, and resumable final transcription. Status and
-final-publication recovery already exist; do not replace them.
+Add EventKit correlation for titles and reminders, explicit input-device
+selection, structured capture-gap observations, active-WAV repair, and resumable
+final transcription. Status, final-publication recovery, the call-ended prompt,
+and the menu-bar recording state already exist; do not replace them.
 
-Keep active recording discoverable after the main window closes through a
-persistent menu-bar/status affordance. Add transcript search; scrolling and
-follow-live behavior are already implemented.
+Search over titles, notes, and final transcripts, scrolling, and follow-live
+are implemented. Echo suppression is tuned on one real speaker-mode call
+(`hex meeting echo <dir>`); validate it on more rooms, volumes, and
+headphones, and record capture arrival times so offline replays need no
+`--microphone-offset-ms`.
+
+Acoustic echo cancellation (Voice Processing IO) was evaluated and deferred:
+it would replace ScreenCaptureKit's raw microphone with an AVAudioEngine or
+`kAudioUnitSubType_VoiceProcessingIO` input, which ducks other audio, switches
+Bluetooth headsets to the low-quality call profile, applies its own gain and
+noise suppression to the transcribed track, runs a second voice processor
+beside the call app's, and drops ScreenCaptureKit's shared capture clock. Revisit
+only if signal-level suppression proves insufficient, with a per-device opt-in.
+
+`hex mcp` serves meetings to agents read-only over stdio (full-text BM25
+with stemming and fuzzy matching, transcripts, stored notes). Next: on-device
+semantic search only when full-text misses real paraphrased queries
+(NaturalLanguage embeddings through a Swift bridge, cached under
+`~/Library/Caches/voice-control/meeting-index`), EventKit attendees in
+`list_meetings`, and a one-shot Granola CSV import
+([granola-import.md](docs/plans/granola-import.md)). Keep it a CLI subcommand;
+the npm-package guidance above applies only to a developer-control wrapper.
 
 Give durable transcript entries stable identities so live-to-final reconciliation,
 incremental UI refresh, and meeting-delta paste can advance without rereading
-broad history. Keep `You` and `Computer` source labels and the recoverable live
+broad history. Keep `You` and `Them` source labels and the recoverable live
 draft when final transcription fails.
 
 Add end-to-end coverage for voice-triggered start/stop, shutdown during capture,
