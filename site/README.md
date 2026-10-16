@@ -1,36 +1,48 @@
 # HEX marketing site (.dev)
 
 `bun run dev` starts Vite. `bun run build` checks TypeScript and builds the site;
-`wrangler deploy` publishes it to `hex.kitlangton.dev`.
+`wrangler deploy` publishes it to `hex.kitlangton.dev`. Bump `MAC_VERSION` in
+`src/App.tsx` after each macOS release.
 
-The wind-up teeth in `src/ChatteringTeeth.tsx` use separate body and foot groups:
-the soles remain planted during anticipation, the whole toy travels during the
-hop, and the body settles after contact. Wide screens use the perimeter; narrow
-screens use the space above the copy. A warm spotlight fades in from 1.4–2.4
-seconds, foreshadowing the landing. The toy stays hidden for three seconds, then
-hops in from the left to the center above the headline. The light fades away
-as roaming begins. Reduced motion reveals the light and toy as still poses at
-their respective delays. The canvas is click-through and decorative;
-the site has no microphone control or microphone access.
+## The hero
 
-Rounded teeth, teal irises, and cherry-red lacquer use a three-softbox procedural
-studio environment for enamel and metal reflections, plus soft directional shadows.
-The environment is generated
-locally, with no remote model or lighting asset request.
+`src/hero/` is a WebGPU swarm read by an instrument display, adapted from the
+MAGI hero in the knobs examples (`hero-magi*.ts`, `controls-post.wgsl`).
 
-## Social image
+- `take.ts` holds the scripted sample dictations: word timings, a synthetic speech
+  envelope, and a director that plays a take the way Hex handles one. A pause of
+  600 ms after 3 s of speech (or 300 ms after 8 s) cuts a piece, release pastes
+  once, and a capture under 300 ms is discarded. There is no microphone.
+- `sim.wgsl` moves 16,384 agents (8,192 under 900 px) through splat, field and
+  advance passes. Each agent keeps a lane in a band round the ring, and the band
+  widens wherever the take's envelope was loud.
+- `draw.wgsl` draws the agents into a phosphor trail and the instrument over them:
+  the envelope gauge, cut marks, the write head, brackets on pieces, the level
+  scope and the trace to the text field. `post.wgsl` is the knobs catalog's bloom
+  and tone pass.
+- `engine.ts` owns the GPU resources; `Hero.tsx` owns layout (measured from the
+  DOM), input, the frame loop and the React readouts.
+- `still.ts` draws a 2D still when WebGPU is missing (or with `?nogpu`).
+- `tuning.ts` holds the swarm's values. Press `` ` `` or open `?tune` to load a
+  knobs panel for them; nothing from knobs loads otherwise.
 
-The Open Graph and Twitter image is `public/og-teeth.png` (1200 × 630). It is
-rendered from the same Three.js model, using `?og` for a deterministic poster pose.
-With the dev server running, regenerate after changing the model:
+Rendering stops offscreen and in hidden tabs, and the device pixel ratio is capped
+at 2 (1.5 on narrow screens). With reduced motion, nothing plays on its own and the
+loop stops a few seconds after each take. `window.__hexHero.timings()` returns
+average GPU milliseconds per stage where timestamp queries exist.
+
+## Screenshots and the social image
+
+Headless Chromium on Apple silicon (`channel: "chromium"`) has Metal WebGPU, so
+these scripts capture the live hero. They are review aids, not tests.
 
 ```sh
 bunx playwright install chromium
-bun run generate:og
-# If Vite chose another port:
-HEX_SITE_URL=http://127.0.0.1:5174 bun run generate:og
+HEX_SITE_URL=http://127.0.0.1:5173 bun scripts/shots.ts   # desktop/mobile, live and still
+HEX_SITE_URL=http://127.0.0.1:5173 bun scripts/frames.ts  # one take, moment by moment
+HEX_SITE_URL=http://127.0.0.1:5173 bun scripts/check.ts   # reduced motion and the panel
+HEX_SITE_URL=http://127.0.0.1:5173 bun run generate:og    # public/og.png
 ```
 
-Inspect the resulting image, rebuild, then deploy. Verify the production HTML's
-image metadata and fetch the published PNG. The separate `.com` site lives in
+`HEX_SHOTS` chooses the output folder. The separate `.com` site lives in
 `/Users/kit/code/projects/hex-marketing-site` and deploys through Vercel.

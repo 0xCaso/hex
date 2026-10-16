@@ -56,17 +56,18 @@ endpoint remains available for installed clients. New builds use the custom host
 for Sparkle and Linux updates; the signed Linux payload and verification key are
 unchanged. Hosting does not guarantee access through every corporate policy.
 
-The `.dev` site's decorative wind-up teeth have feet and hop around desktop
-margins, or above the copy on narrow screens. A warm spotlight fades in first
-(1.4–2.4 seconds). After three seconds hidden, the toy hops in from the left to
-the center above the headline; the light fades as roaming begins. The canvas passes clicks through;
-the website has no microphone button or microphone access. Reduced motion reveals
-still light and toy poses at their respective delays. Rounded teeth, teal irises,
-enamel, lacquer, and metal materials use local softbox reflections and soft shadows.
-Its Open Graph image uses the same model; see
-[site authoring](../../site/README.md). Desktop/mobile animation frames were
-inspected, and reduced-motion canvas captures were pixel-identical four seconds
-apart in Chromium. These checks do not exercise a live microphone.
+The `.dev` site's hero is a WebGPU swarm read by a quiet instrument display.
+Scripted sample dictations play automatically; holding Space or pressing the
+ring plays the next one. The swarm's ring widens with a synthetic speech
+envelope, a 600 ms pause after 3 s of speech marks a piece, and release pastes
+the sample's words into a text field. The page has no microphone access. Without
+WebGPU it draws a still; with reduced motion nothing plays on its own and the
+canvas stops shortly after each take. A hidden knobs panel (`` ` `` or `?tune`)
+tunes the swarm and loads only when opened; see [site
+authoring](../../site/README.md). Desktop/mobile frames, the still, and a
+reduced-motion capture (identical frames 1.5 s apart while idle) were inspected
+in headless Chromium with Metal WebGPU. These checks do not exercise a real GPU
+compositor on a phone.
 
 Sources: [website](../../site/src/App.tsx), [mirror publisher](../../scripts/publish-app-mirror.sh),
 [macOS release publisher](../../scripts/release-app.sh),
