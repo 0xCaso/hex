@@ -235,6 +235,22 @@ after Ruby syntax, style, strict online audit, checksum fetch, and livecheck
 No installed app was replaced, physical dictation performed, or native GUI
 verification added for this release.
 
+## macOS 2.2.0
+
+**Published October 16, 2026:** [2.2.0](../releases/2.2.0.md), release commit
+`faa6721`, build `20200`, from #133 (`df2edf8`). Linux CI (`test` and `nix`)
+passed on the merged pull request after fixing its Linux compile and dead-code
+failures. Kit used a signed build of the branch on his MacBook Pro before
+approving the release; no further physical dictation or meeting checks were run
+for publication. The first two notarization uploads were interrupted (a reboot
+and an upload deadline) and were abandoned in `In Progress`; the third prepare was
+notarized, stapled, and accepted by Gatekeeper. The DMG SHA-256 is
+`7185f4426a090291fa11043e55e9a201fb308ceb247b281a4c2ae9ebb97c36de`; the ZIP
+SHA-256 is
+`eb94183347c649adf7f2c61f84b3971fafa5c4c095a64b175319e94564679039`. The live
+feed leads with build `20200`, and the custom-domain, latest, and GitHub DMGs
+match the checksum. No Sparkle update from an older installed build was exercised.
+
 ## macOS 2.1.25
 
 **Published October 7, 2026:** [2.1.25](../releases/2.1.25.md), release commit
