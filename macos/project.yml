@@ -69,6 +69,13 @@ targets:
             fi
           done
 
+          if [ -d "${ROOT_DIR}/sdk/commands/dist" ]; then
+            mkdir -p "${RESOURCES_DIR}/commands-sdk"
+            cp -f "${ROOT_DIR}/sdk/commands/package.json" "${RESOURCES_DIR}/commands-sdk/"
+            /usr/bin/ditto "${ROOT_DIR}/sdk/commands/dist" "${RESOURCES_DIR}/commands-sdk/dist"
+            /usr/bin/ditto "${ROOT_DIR}/sdk/commands/workspace-template" "${RESOURCES_DIR}/commands-sdk/workspace-template"
+          fi
+
           cp -f "${ROOT_DIR}/LICENSE" "${ROOT_DIR}/THIRD_PARTY_NOTICES.md" "${RESOURCES_DIR}/" || true
     scheme:
       gatherCoverageData: false
