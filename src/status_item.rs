@@ -417,7 +417,7 @@ pub(crate) fn meeting_menu(
                 can_start: false,
                 can_stop: true,
             }
-        }
+        },
         MeetingMenuState::Transcribing => MeetingMenu {
             status: Some("Transcribing meeting…".into()),
             button_title: String::new(),
@@ -476,7 +476,6 @@ pub fn update_meeting(state: &crate::meeting_watcher::MeetingMenuState, enabled:
         }
     });
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
