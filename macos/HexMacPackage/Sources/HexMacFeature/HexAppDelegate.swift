@@ -109,10 +109,19 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
             statusBar.update(with: initialSnapshot.statusMenu)
             hudController.handleTelemetryUpdate(initialSnapshot.hudTelemetry)
             meetingController.update(with: initialSnapshot.meetingPanel)
-            if !initialSnapshot.setupReady && !previewDictationHUD {
-                windowController.showAndFocus(destination: "onboarding")
+            if !previewDictationHUD {
+                if !initialSnapshot.instanceLockHeld {
+                    windowController.showAndFocus(destination: "settings")
+                } else if !initialSnapshot.setupReady {
+                    windowController.showAndFocus(destination: "onboarding")
+                }
             }
         }
+    }
+
+    public func applicationDidBecomeActive(_ notification: Notification) {
+        statusWindowController?.store.refreshLaunchAtLogin()
+        runtime?.refreshBootstrapSnapshot()
     }
 
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

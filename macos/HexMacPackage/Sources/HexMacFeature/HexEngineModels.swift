@@ -295,6 +295,7 @@ public struct HexCommandsSnapshot: Codable, Sendable, Equatable {
     public var workspacePath: String
     public var configFilePath: String
     public var workspaceExists: Bool
+    public var workspaceProvisioning: Bool
     public var lastReloadError: String?
     public var currentContextLabel: String
     public var catalog: [HexCommandCatalogItem]
@@ -305,6 +306,7 @@ public struct HexCommandsSnapshot: Codable, Sendable, Equatable {
         workspacePath: String = "",
         configFilePath: String = "",
         workspaceExists: Bool = false,
+        workspaceProvisioning: Bool = false,
         lastReloadError: String? = nil,
         currentContextLabel: String = "Global",
         catalog: [HexCommandCatalogItem] = [],
@@ -314,6 +316,7 @@ public struct HexCommandsSnapshot: Codable, Sendable, Equatable {
         self.workspacePath = workspacePath
         self.configFilePath = configFilePath
         self.workspaceExists = workspaceExists
+        self.workspaceProvisioning = workspaceProvisioning
         self.lastReloadError = lastReloadError
         self.currentContextLabel = currentContextLabel
         self.catalog = catalog
@@ -325,9 +328,23 @@ public struct HexCommandsSnapshot: Codable, Sendable, Equatable {
         case workspacePath = "workspace_path"
         case configFilePath = "config_file_path"
         case workspaceExists = "workspace_exists"
+        case workspaceProvisioning = "workspace_provisioning"
         case lastReloadError = "last_reload_error"
         case currentContextLabel = "current_context_label"
         case catalog, transformations
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.commandModelStatus = try c.decodeIfPresent(String.self, forKey: .commandModelStatus) ?? "disabled"
+        self.workspacePath = try c.decodeIfPresent(String.self, forKey: .workspacePath) ?? ""
+        self.configFilePath = try c.decodeIfPresent(String.self, forKey: .configFilePath) ?? ""
+        self.workspaceExists = try c.decodeIfPresent(Bool.self, forKey: .workspaceExists) ?? false
+        self.workspaceProvisioning = try c.decodeIfPresent(Bool.self, forKey: .workspaceProvisioning) ?? false
+        self.lastReloadError = try c.decodeIfPresent(String.self, forKey: .lastReloadError)
+        self.currentContextLabel = try c.decodeIfPresent(String.self, forKey: .currentContextLabel) ?? "Global"
+        self.catalog = try c.decodeIfPresent([HexCommandCatalogItem].self, forKey: .catalog) ?? []
+        self.transformations = try c.decodeIfPresent([HexTransformationCatalogItem].self, forKey: .transformations) ?? []
     }
 }
 
@@ -946,6 +963,8 @@ public struct HexBootstrapSnapshot: Codable, Sendable, Equatable {
     public var version: String
     public var developerFeaturesEnabled: Bool
     public var pid: UInt32
+    public var instanceLockHeld: Bool
+    public var instanceConflictError: String?
     public var setupReady: Bool
     public var onboardingCompleted: Bool
     public var permissions: HexPermissionSnapshot
@@ -982,6 +1001,8 @@ public struct HexBootstrapSnapshot: Codable, Sendable, Equatable {
         case version
         case developerFeaturesEnabled = "developer_features_enabled"
         case pid
+        case instanceLockHeld = "instance_lock_held"
+        case instanceConflictError = "instance_conflict_error"
         case setupReady = "setup_ready"
         case onboardingCompleted = "onboarding_completed"
         case permissions
@@ -1020,6 +1041,8 @@ public struct HexBootstrapSnapshot: Codable, Sendable, Equatable {
         self.version = try c.decode(String.self, forKey: .version)
         self.developerFeaturesEnabled = try c.decodeIfPresent(Bool.self, forKey: .developerFeaturesEnabled) ?? false
         self.pid = try c.decodeIfPresent(UInt32.self, forKey: .pid) ?? 0
+        self.instanceLockHeld = try c.decodeIfPresent(Bool.self, forKey: .instanceLockHeld) ?? true
+        self.instanceConflictError = try c.decodeIfPresent(String.self, forKey: .instanceConflictError)
         self.setupReady = try c.decodeIfPresent(Bool.self, forKey: .setupReady) ?? false
         self.onboardingCompleted = try c.decodeIfPresent(Bool.self, forKey: .onboardingCompleted) ?? false
         self.permissions = try c.decodeIfPresent(HexPermissionSnapshot.self, forKey: .permissions) ?? HexPermissionSnapshot()
@@ -1123,6 +1146,8 @@ public enum HexEngineCommand: Encodable, Sendable, Equatable {
     )
     case simulateHudState(state: String, rms: Float?, peak: Float?)
     case simulateMeetingPanel(panel: HexMeetingPanelSnapshot)
+    case retryInstanceLock
+    case quitOtherHexInstancesAndRetry
     case requestCheckForUpdates
     case requestQuit
 
@@ -1318,6 +1343,10 @@ public enum HexEngineCommand: Encodable, Sendable, Equatable {
         case let .simulateMeetingPanel(panel):
             try container.encode("simulate_meeting_panel", forKey: .type)
             try container.encode(panel, forKey: .panel)
+        case .retryInstanceLock:
+            try container.encode("retry_instance_lock", forKey: .type)
+        case .quitOtherHexInstancesAndRetry:
+            try container.encode("quit_other_hex_instances_and_retry", forKey: .type)
         case .requestCheckForUpdates:
             try container.encode("request_check_for_updates", forKey: .type)
         case .requestQuit:

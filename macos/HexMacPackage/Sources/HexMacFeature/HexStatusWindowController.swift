@@ -22,9 +22,9 @@ struct HexSidebarNavigationView: View {
             if let snapshot = store.runtime.snapshot {
                 HStack {
                     Circle()
-                        .fill(snapshot.setupReady ? Color.green : Color.orange)
+                        .fill(statusColor(for: snapshot))
                         .frame(width: 7, height: 7)
-                    Text(snapshot.setupReady ? "Dictation Ready" : "Setup Required")
+                    Text(statusTitle(for: snapshot))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -37,6 +37,20 @@ struct HexSidebarNavigationView: View {
             }
         }
     }
+
+    private func statusColor(for snapshot: HexBootstrapSnapshot) -> Color {
+        if !snapshot.instanceLockHeld {
+            return .red
+        }
+        return snapshot.setupReady ? .green : .orange
+    }
+
+    private func statusTitle(for snapshot: HexBootstrapSnapshot) -> String {
+        if !snapshot.instanceLockHeld {
+            return "Another HEX Running"
+        }
+        return snapshot.setupReady ? "Dictation Ready" : "Setup Required"
+    }
 }
 
 struct HexDetailContentHostView: View {
@@ -44,29 +58,97 @@ struct HexDetailContentHostView: View {
     var onCheckForUpdates: (() -> Void)?
 
     var body: some View {
-        Group {
-            switch store.selectedSection {
-            case .onboarding:
-                HexOnboardingView(store: store)
-            case .settings:
-                HexGeneralSettingsPane(store: store, onCheckForUpdates: onCheckForUpdates)
-            case .modes:
-                HexModesPane(store: store)
-            case .voiceAction:
-                HexVoiceActionPane(store: store)
-            case .history:
-                HexHistoryPane(store: store)
-            case .commands:
-                HexCommandsPane(store: store)
-            case .meetings:
-                HexMeetingsPane(store: store)
-            case .activity:
-                HexActivityPane(store: store)
-            case .hudLab:
-                HexHudLabPane(store: store)
+        let snapshot = store.runtime.snapshot
+
+        VStack(spacing: 0) {
+            if let snapshot, !snapshot.instanceLockHeld {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Another HEX instance is already running")
+                            .font(.subheadline.weight(.semibold))
+                        Text(snapshot.instanceConflictError ?? "Quit the other HEX process so this app can listen for dictation and voice commands.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Retry") {
+                        store.retryInstanceLock()
+                    }
+                    .controlSize(.small)
+                    Button("Quit Other HEX & Retry") {
+                        store.quitOtherHexAndRetry()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.red.opacity(0.12))
+                Divider()
             }
+
+            if let error = store.bannerError, !error.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(error)
+                        .font(.caption)
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button {
+                        store.dismissBannerError()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Dismiss error")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.orange.opacity(0.12))
+                Divider()
+            }
+
+            Group {
+                switch store.selectedSection {
+                case .onboarding:
+                    HexOnboardingView(store: store)
+                case .settings:
+                    HexGeneralSettingsPane(store: store, onCheckForUpdates: onCheckForUpdates)
+                case .modes:
+                    HexModesPane(store: store)
+                case .voiceAction:
+                    HexVoiceActionPane(store: store)
+                case .history:
+                    HexHistoryPane(store: store)
+                case .commands:
+                    HexCommandsPane(store: store)
+                case .meetings:
+                    HexMeetingsPane(store: store)
+                case .activity:
+                    HexActivityPane(store: store)
+                case .hudLab:
+                    HexHudLabPane(store: store)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .alert(
+            "HEX Error",
+            isPresented: Binding(
+                get: { store.alertError != nil },
+                set: { if !$0 { store.dismissAlertError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                store.dismissAlertError()
+            }
+        } message: {
+            Text(store.alertError ?? "")
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -234,6 +234,7 @@ pub struct HexCommandsSnapshot {
     pub workspace_path: String,
     pub config_file_path: String,
     pub workspace_exists: bool,
+    pub workspace_provisioning: bool,
     pub last_reload_error: Option<String>,
     pub current_context_label: String,
     pub catalog: Vec<HexCommandCatalogItem>,
@@ -373,6 +374,8 @@ pub struct HexBootstrapSnapshot {
     pub version: String,
     pub developer_features_enabled: bool,
     pub pid: u32,
+    pub instance_lock_held: bool,
+    pub instance_conflict_error: Option<String>,
     pub setup_ready: bool,
     pub onboarding_completed: bool,
     pub permissions: HexPermissionSnapshot,
@@ -412,6 +415,8 @@ impl Default for HexBootstrapSnapshot {
             version: env!("CARGO_PKG_VERSION").to_string(),
             developer_features_enabled: false,
             pid: 0,
+            instance_lock_held: true,
+            instance_conflict_error: None,
             setup_ready: false,
             onboarding_completed: false,
             permissions: HexPermissionSnapshot::default(),
@@ -617,8 +622,93 @@ pub enum HexEngineCommand {
     SimulateMeetingPanel {
         panel: HexMeetingPanelSnapshot,
     },
+    CompleteOnboarding,
+    RetryInstanceLock,
+    QuitOtherHexInstancesAndRetry,
     RequestCheckForUpdates,
     RequestQuit,
+}
+
+pub struct AtomicHudTelemetry {
+    phase: AtomicU32,
+    rms_bits: AtomicU32,
+    peak_bits: AtomicU32,
+    active_queue_count: AtomicU32,
+    mode_color_rgba: AtomicU32,
+    phase_started_ns: AtomicU64,
+    flags: AtomicU32,
+}
+
+impl Default for AtomicHudTelemetry {
+    fn default() -> Self {
+        let initial = Self {
+            phase: AtomicU32::new(hex_hud_phase_e::HEX_HUD_PHASE_HIDDEN as u32),
+            rms_bits: AtomicU32::new(0.0f32.to_bits()),
+            peak_bits: AtomicU32::new(0.0f32.to_bits()),
+            active_queue_count: AtomicU32::new(0),
+            mode_color_rgba: AtomicU32::new(0xFF06_09FF),
+            phase_started_ns: AtomicU64::new(0),
+            flags: AtomicU32::new(0),
+        };
+        initial
+    }
+}
+
+impl AtomicHudTelemetry {
+    fn store(&self, t: &hex_hud_telemetry_s) {
+        let mut flags = 0u32;
+        if t.is_command_mode_awake {
+            flags |= 1 << 0;
+        }
+        if t.is_voice_action {
+            flags |= 1 << 1;
+        }
+        if t.is_post_processing {
+            flags |= 1 << 2;
+        }
+        if t.is_capturing {
+            flags |= 1 << 3;
+        }
+        self.rms_bits
+            .store(t.rms_level.to_bits(), Ordering::Relaxed);
+        self.peak_bits
+            .store(t.peak_level.to_bits(), Ordering::Relaxed);
+        self.active_queue_count
+            .store(t.active_queue_count, Ordering::Relaxed);
+        self.mode_color_rgba
+            .store(t.mode_color_rgba, Ordering::Relaxed);
+        self.phase_started_ns
+            .store(t.phase_started_ns, Ordering::Relaxed);
+        self.flags.store(flags, Ordering::Relaxed);
+        self.phase.store(t.phase as u32, Ordering::Release);
+    }
+
+    fn load(&self) -> hex_hud_telemetry_s {
+        let raw_phase = self.phase.load(Ordering::Acquire);
+        let phase = match raw_phase {
+            1 => hex_hud_phase_e::HEX_HUD_PHASE_LISTENING,
+            2 => hex_hud_phase_e::HEX_HUD_PHASE_LOCKED,
+            3 => hex_hud_phase_e::HEX_HUD_PHASE_TRANSCRIBING,
+            4 => hex_hud_phase_e::HEX_HUD_PHASE_VOICE_ACTION,
+            5 => hex_hud_phase_e::HEX_HUD_PHASE_COMPLETED,
+            6 => hex_hud_phase_e::HEX_HUD_PHASE_CANCELLED,
+            7 => hex_hud_phase_e::HEX_HUD_PHASE_ERROR,
+            _ => hex_hud_phase_e::HEX_HUD_PHASE_HIDDEN,
+        };
+        let flags = self.flags.load(Ordering::Relaxed);
+        hex_hud_telemetry_s {
+            phase,
+            rms_level: f32::from_bits(self.rms_bits.load(Ordering::Relaxed)),
+            peak_level: f32::from_bits(self.peak_bits.load(Ordering::Relaxed)),
+            active_queue_count: self.active_queue_count.load(Ordering::Relaxed),
+            mode_color_rgba: self.mode_color_rgba.load(Ordering::Relaxed),
+            phase_started_ns: self.phase_started_ns.load(Ordering::Relaxed),
+            is_command_mode_awake: (flags & (1 << 0)) != 0,
+            is_voice_action: (flags & (1 << 1)) != 0,
+            is_post_processing: (flags & (1 << 2)) != 0,
+            is_capturing: (flags & (1 << 3)) != 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -632,22 +722,29 @@ struct HudTelemetryTracker {
     epoch: Instant,
     telemetry: hex_hud_telemetry_s,
     jobs: BTreeMap<u64, TrackedJobPhase>,
+    atomic: Arc<AtomicHudTelemetry>,
 }
 
 impl Default for HudTelemetryTracker {
     fn default() -> Self {
-        Self {
-            epoch: Instant::now(),
-            telemetry: hex_hud_telemetry_s {
-                mode_color_rgba: 0xFF06_09FF,
-                ..Default::default()
-            },
-            jobs: BTreeMap::new(),
-        }
+        Self::with_atomic(Arc::new(AtomicHudTelemetry::default()))
     }
 }
 
 impl HudTelemetryTracker {
+    fn with_atomic(atomic: Arc<AtomicHudTelemetry>) -> Self {
+        let telemetry = hex_hud_telemetry_s {
+            mode_color_rgba: 0xFF06_09FF,
+            ..Default::default()
+        };
+        atomic.store(&telemetry);
+        Self {
+            epoch: Instant::now(),
+            telemetry,
+            jobs: BTreeMap::new(),
+            atomic,
+        }
+    }
     fn now_ns(&self) -> u64 {
         self.epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
     }
@@ -738,11 +835,16 @@ impl HudTelemetryTracker {
                 self.finish_capture(now_ns, hex_hud_phase_e::HEX_HUD_PHASE_ERROR);
             }
         }
+        self.atomic.store(&self.telemetry);
 
         previous_phase != self.telemetry.phase
             || previous_post != self.telemetry.is_post_processing
             || previous_voice_action != self.telemetry.is_voice_action
             || previous_queue != self.telemetry.active_queue_count
+    }
+
+    fn sync_atomic(&self) {
+        self.atomic.store(&self.telemetry);
     }
 
     fn finish_capture(&mut self, now_ns: u64, empty_phase: hex_hud_phase_e) {
@@ -834,25 +936,42 @@ enum OpenCodeCatalogState {
 struct EngineCore {
     developer_features_enabled: bool,
     persist_settings: bool,
+    start_workers: bool,
+    preview_dictation_hud: bool,
+    instance_lock_held: bool,
+    instance_conflict_error: Option<String>,
+    instance_guard: Option<crate::instance::InstanceLock>,
+    local_api: Option<crate::local_api::LocalApi>,
+    recognition_worker: Option<JoinHandle<()>>,
+    controller_worker: Option<JoinHandle<()>>,
+    event_log: Option<crate::events::EventLog>,
+    developer_sender: SyncSender<crate::developer_control::DeveloperCall>,
+    controller_event_sender: SyncSender<ControllerEvent>,
     settings: AppSettings,
     hud: HudTelemetryTracker,
     meeting_state: MeetingMenuState,
     meeting_panel: HexMeetingPanelSnapshot,
     pending_offer: Option<(MeetingCandidate, Instant)>,
     ready_panel_deadline: Option<Instant>,
+    active_meeting_transcript_len: u64,
     transcription_preparation: TranscriptionPreparation,
     transcription_deletion_error: Option<String>,
     available_microphones: Vec<String>,
     opencode_catalog: OpenCodeCatalogState,
     opencode_catalog_receiver: Option<Receiver<OpenCodeCatalogState>>,
+    last_opencode_missing_check: Instant,
     personal_commands_status: StatusSnapshot,
+    personal_workspace_provisioning: bool,
+    personal_workspace_receiver: Option<Receiver<Result<StatusSnapshot, String>>>,
     personal_workspace_error: Option<String>,
     installed_applications: Vec<HexInstalledApplicationSnapshot>,
+    app_discovery_receiver: Option<Receiver<Vec<HexInstalledApplicationSnapshot>>>,
     meetings_cache: Vec<MeetingManifest>,
     event_reader: Option<EventReader>,
     activity: DesktopActivity,
     recent_events: Vec<VoiceEvent>,
     current_context: (Option<String>, Option<String>),
+    last_command_model_status: CommandModelStatus,
     history: Option<History>,
     recognition_controls: Option<SyncSender<RecognitionControl>>,
     meeting_commands: Option<SyncSender<ControllerCommand>>,
@@ -1024,7 +1143,7 @@ fn apple_intelligence_status_copy() -> (bool, String) {
     }
 }
 
-fn start_opencode_catalog_worker() -> Receiver<OpenCodeCatalogState> {
+fn start_opencode_catalog_worker(sink: Arc<CallbackSink>) -> Receiver<OpenCodeCatalogState> {
     let (tx, rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let state = if !crate::dictation_processor::opencode_installed() {
@@ -1036,6 +1155,45 @@ fn start_opencode_catalog_worker() -> Receiver<OpenCodeCatalogState> {
             }
         };
         let _ = tx.send(state);
+        sink.notify_wakeup();
+    });
+    rx
+}
+
+fn start_personal_workspace_worker(
+    sink: Arc<CallbackSink>,
+) -> Receiver<Result<StatusSnapshot, String>> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let result = match crate::personal_commands::initialize_workspace() {
+            Ok(_) => {
+                let mut status = crate::personal_commands::load_status().unwrap_or_default();
+                crate::personal_commands::include_builtin_transformations(&mut status);
+                Ok(status)
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        let _ = tx.send(result);
+        sink.notify_wakeup();
+    });
+    rx
+}
+
+fn start_app_discovery_worker(
+    sink: Arc<CallbackSink>,
+) -> Receiver<Vec<HexInstalledApplicationSnapshot>> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let apps = crate::application_catalog::discover()
+            .into_iter()
+            .map(|app| HexInstalledApplicationSnapshot {
+                name: app.name,
+                bundle_id: app.bundle_id,
+                path: app.path.display().to_string(),
+            })
+            .collect();
+        let _ = tx.send(apps);
+        sink.notify_wakeup();
     });
     rx
 }
@@ -1119,15 +1277,181 @@ impl EngineCore {
         self.callback_sink.notify_wakeup();
     }
 
+    fn start_runtime_workers_if_needed(&mut self) {
+        if !self.start_workers || !self.instance_lock_held || self.preview_dictation_hud {
+            return;
+        }
+        if self.recognition_worker.is_some() || self.controller_worker.is_some() {
+            return;
+        }
+
+        let (controller_cmd_sender, controller_cmd_receiver) = mpsc::sync_channel(8);
+        let (meeting_request_sender, meeting_request_receiver) = mpsc::sync_channel(8);
+        let (recognition_control_sender, recognition_control_receiver) = mpsc::sync_channel(8);
+
+        self.meeting_commands = Some(controller_cmd_sender);
+        self.meeting_requests = Some(meeting_request_sender.clone());
+        self.recognition_controls = Some(recognition_control_sender.clone());
+
+        if self.local_api.is_none() {
+            self.local_api = self.event_log.as_ref().and_then(|events| {
+                crate::local_api::LocalApi::start(
+                    events.clone(),
+                    crate::local_api::LocalApiOptions {
+                        developer_control: self
+                            .developer_features_enabled
+                            .then(|| self.developer_sender.clone()),
+                        dictation_control: Some(recognition_control_sender),
+                    },
+                )
+                .map_err(|error| {
+                    tracing::warn!(%error, "could not start local API");
+                    error
+                })
+                .ok()
+            });
+        }
+
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let controller_events = self.controller_event_sender.clone();
+        let worker_root = project_root.clone();
+        self.controller_worker = Some(thread::spawn(move || {
+            if let Err(error) = crate::meeting_watcher::controller_loop(
+                &crate::SHUTDOWN,
+                controller_events.clone(),
+                controller_cmd_receiver,
+                meeting_request_receiver,
+                worker_root,
+            ) {
+                tracing::error!(%error, "meeting controller stopped");
+                let _ = controller_events.send(ControllerEvent::Failed {
+                    title: "Meeting detection stopped".into(),
+                    error: error.to_string(),
+                });
+            }
+        }));
+
+        let setup_ready = onboarding::status(&self.settings.transcription).ready();
+        self.recognition_worker = self.event_log.clone().map(|recognition_events| {
+            let failure_indicator = self.indicator_sender.clone();
+            let recognition_indicator = self.indicator_sender.clone();
+            let meeting_requests = Some(meeting_request_sender);
+            let recognition_history = self.history.clone();
+            let worker_root = project_root;
+            thread::spawn(move || {
+                if !setup_ready {
+                    tracing::info!(
+                        "waiting for permissions and local model before starting hotkey listener"
+                    );
+                    while !crate::SHUTDOWN.load(Ordering::Relaxed) {
+                        let current = AppSettings::load().unwrap_or_default();
+                        if onboarding::status(&current.transcription).ready() {
+                            let _ = onboarding::record_completion();
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(500));
+                    }
+                    if crate::SHUTDOWN.load(Ordering::Relaxed) {
+                        return;
+                    }
+                }
+                if let Err(error) = crate::recognition::listen(
+                    &worker_root,
+                    recognition_events,
+                    None,
+                    crate::config::voice_control(),
+                    &crate::SHUTDOWN,
+                    Some(recognition_indicator),
+                    meeting_requests,
+                    recognition_history,
+                    Some(recognition_control_receiver),
+                ) {
+                    tracing::error!(%error, "desktop recognition stopped");
+                    failure_indicator.send(DictationIndicatorEvent::Failed);
+                }
+            })
+        });
+    }
+
+    fn try_acquire_instance_lock(&mut self) -> Result<(), String> {
+        if self.instance_lock_held {
+            self.instance_conflict_error = None;
+            return Ok(());
+        }
+        match crate::instance::acquire("listener") {
+            Ok(guard) => {
+                self.instance_guard = Some(guard);
+                self.instance_lock_held = true;
+                self.instance_conflict_error = None;
+                self.start_runtime_workers_if_needed();
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            Err(error) => {
+                let message = format!(
+                    "Another HEX instance is already running ({error}). Quit the other HEX process and retry."
+                );
+                self.instance_conflict_error = Some(message.clone());
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Err(message)
+            }
+        }
+    }
+
+    fn quit_other_instances_and_retry(&mut self) -> Result<(), String> {
+        if self.instance_lock_held {
+            self.instance_conflict_error = None;
+            return Ok(());
+        }
+        let my_pid = std::process::id();
+        if let Ok(support_dir) = crate::app_paths::support_dir() {
+            let lock_path = support_dir.join("listener.lock");
+            if let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
+                .arg("-t")
+                .arg(&lock_path)
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Ok(pid) = line.trim().parse::<u32>()
+                        && pid != my_pid
+                    {
+                        let _ = std::process::Command::new("/bin/kill")
+                            .arg("-TERM")
+                            .arg(pid.to_string())
+                            .status();
+                    }
+                }
+            }
+        }
+        for _ in 0..25 {
+            if crate::instance::acquire("listener").is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(60));
+        }
+        self.try_acquire_instance_lock()
+    }
+
     fn permission_snapshot(&self) -> (bool, HexPermissionSnapshot) {
         let status = onboarding::status(&self.settings.transcription);
+        let ready = status.ready();
+        if self.persist_settings
+            && self.instance_lock_held
+            && ready
+            && !onboarding::completion_recorded()
+        {
+            let _ = onboarding::record_completion();
+        }
         let mic_state = match status.microphone {
             PermissionState::Ready => "ready",
             PermissionState::NeedsRequest => "needs_request",
             PermissionState::NeedsSettings => "needs_settings",
         };
         (
-            status.ready(),
+            ready && self.instance_lock_held,
             HexPermissionSnapshot {
                 microphone_granted: status.microphone == PermissionState::Ready,
                 microphone_state: mic_state.to_string(),
@@ -1350,6 +1674,7 @@ impl EngineCore {
             workspace_path: workspace.display().to_string(),
             config_file_path: config_file.display().to_string(),
             workspace_exists,
+            workspace_provisioning: self.personal_workspace_provisioning,
             last_reload_error,
             current_context_label,
             catalog,
@@ -1382,7 +1707,13 @@ impl EngineCore {
         }
     }
 
-    fn refresh_activity_cache(&mut self) {
+    fn refresh_activity_cache(&mut self) -> (bool, bool, bool) {
+        let prev_last_ts = self.recent_events.last().map(VoiceEvent::timestamp_ms);
+        let prev_len = self.recent_events.len();
+        let prev_context = self.current_context.clone();
+        let prev_activity = self.activity.clone();
+        let mut saw_completed_dictation = false;
+
         if let Some(reader) = &mut self.event_reader {
             self.activity.refresh(reader);
             self.recent_events = reader.recent(150);
@@ -1397,7 +1728,34 @@ impl EngineCore {
                     break;
                 }
             }
+            if let Some(prev_ts) = prev_last_ts {
+                for ev in self.recent_events.iter().rev() {
+                    if ev.timestamp_ms() <= prev_ts {
+                        break;
+                    }
+                    if matches!(
+                        ev,
+                        VoiceEvent::Dictation {
+                            phase: crate::events::DictationPhase::Pasted
+                                | crate::events::DictationPhase::Edited
+                                | crate::events::DictationPhase::VoiceAction
+                                | crate::events::DictationPhase::Logged,
+                            ..
+                        }
+                    ) {
+                        saw_completed_dictation = true;
+                        break;
+                    }
+                }
+            }
         }
+
+        let new_last_ts = self.recent_events.last().map(VoiceEvent::timestamp_ms);
+        let activity_changed = new_last_ts != prev_last_ts
+            || self.recent_events.len() != prev_len
+            || self.activity != prev_activity;
+        let context_changed = self.current_context != prev_context;
+        (activity_changed, context_changed, saw_completed_dictation)
     }
 
     fn status_menu_snapshot(&self) -> HexStatusMenuSnapshot {
@@ -1491,6 +1849,8 @@ impl EngineCore {
             version: env!("CARGO_PKG_VERSION").to_string(),
             developer_features_enabled: self.developer_features_enabled,
             pid: std::process::id(),
+            instance_lock_held: self.instance_lock_held,
+            instance_conflict_error: self.instance_conflict_error.clone(),
             setup_ready,
             onboarding_completed: onboarding::completion_recorded(),
             permissions,
@@ -1535,11 +1895,42 @@ impl EngineCore {
         {
             self.opencode_catalog_receiver = None;
             self.opencode_catalog = state;
+            self.last_opencode_missing_check = Instant::now();
             let snapshot = self.bootstrap_snapshot();
             self.enqueue_event(
                 hex_event_tag_e::HEX_EVENT_OPENCODE_CATALOG_UPDATED,
                 &snapshot,
             );
+        }
+
+        if let Some(rx) = &self.personal_workspace_receiver
+            && let Ok(result) = rx.try_recv()
+        {
+            self.personal_workspace_receiver = None;
+            self.personal_workspace_provisioning = false;
+            match result {
+                Ok(status) => {
+                    self.personal_workspace_error = None;
+                    self.personal_commands_status = status;
+                }
+                Err(error) => {
+                    self.personal_workspace_error = Some(error);
+                }
+            }
+            let snapshot = self.bootstrap_snapshot();
+            self.enqueue_event(
+                hex_event_tag_e::HEX_EVENT_PERSONAL_COMMANDS_UPDATED,
+                &snapshot,
+            );
+        }
+
+        if let Some(rx) = &self.app_discovery_receiver
+            && let Ok(apps) = rx.try_recv()
+        {
+            self.app_discovery_receiver = None;
+            self.installed_applications = apps;
+            let snapshot = self.bootstrap_snapshot();
+            self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
         }
 
         let Some(result) = self.transcription_preparation.poll() else {
@@ -1814,6 +2205,7 @@ impl EngineCore {
 
         if let MeetingMenuState::Recording { started, title } = &self.meeting_state {
             let elapsed = meeting::format_duration(started.elapsed().as_millis() as u64);
+            let mut elapsed_changed = false;
             if let HexMeetingPanelSnapshot::Recording {
                 elapsed_text,
                 app_label,
@@ -1821,6 +2213,7 @@ impl EngineCore {
             } = &self.meeting_panel
                 && *elapsed_text != elapsed
             {
+                elapsed_changed = true;
                 self.meeting_panel = HexMeetingPanelSnapshot::Recording {
                     title: title.clone(),
                     app_label: app_label.clone(),
@@ -1829,8 +2222,69 @@ impl EngineCore {
                 let panel = self.meeting_panel.clone();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
             }
-            let snapshot = self.bootstrap_snapshot();
-            self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+            let mut transcript_changed = false;
+            if let Some(active_manifest) = self.meetings_cache.first()
+                && let Ok(support_dir) = crate::app_paths::support_dir()
+            {
+                let dir = support_dir.join("meetings").join(&active_manifest.id);
+                let live_len = std::fs::metadata(dir.join("transcript.live.ndjson"))
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let final_len = std::fs::metadata(dir.join("transcript.ndjson"))
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let combined_len = live_len.saturating_add(final_len);
+                if combined_len != self.active_meeting_transcript_len {
+                    self.active_meeting_transcript_len = combined_len;
+                    transcript_changed = true;
+                }
+            }
+            if transcript_changed {
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(
+                    hex_event_tag_e::HEX_EVENT_MEETING_TRANSCRIPT_DELTA,
+                    &snapshot,
+                );
+            } else if elapsed_changed {
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+            }
+        }
+
+        if self.start_workers {
+            let (activity_changed, context_changed, saw_completed_dictation) =
+                self.refresh_activity_cache();
+            let model_status = crate::recognition::command_model_status();
+            let model_status_changed = model_status != self.last_command_model_status;
+            if model_status_changed {
+                self.last_command_model_status = model_status;
+            }
+            if saw_completed_dictation {
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
+            }
+            if context_changed || model_status_changed {
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(
+                    hex_event_tag_e::HEX_EVENT_PERSONAL_COMMANDS_UPDATED,
+                    &snapshot,
+                );
+            }
+            if activity_changed {
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_ACTIVITY_APPENDED, &snapshot);
+            }
+            if matches!(self.opencode_catalog, OpenCodeCatalogState::Missing)
+                && self.opencode_catalog_receiver.is_none()
+                && self.last_opencode_missing_check.elapsed() >= Duration::from_secs(5)
+            {
+                self.last_opencode_missing_check = Instant::now();
+                if crate::dictation_processor::opencode_installed() {
+                    self.opencode_catalog = OpenCodeCatalogState::Loading;
+                    self.opencode_catalog_receiver =
+                        Some(start_opencode_catalog_worker(self.callback_sink.clone()));
+                }
+            }
         }
     }
 
@@ -1847,7 +2301,7 @@ impl EngineCore {
                     self.personal_commands_status = status;
                 }
                 self.refresh_meetings_cache();
-                self.refresh_activity_cache();
+                let _ = self.refresh_activity_cache();
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
                 Ok(())
@@ -2428,30 +2882,17 @@ impl EngineCore {
                 Ok(())
             }
             HexEngineCommand::ProvisionPersonalCommandsWorkspace => {
-                match crate::personal_commands::initialize_workspace() {
-                    Ok(_) => {
-                        self.personal_workspace_error = None;
-                        if let Ok(mut status) = crate::personal_commands::load_status() {
-                            crate::personal_commands::include_builtin_transformations(&mut status);
-                            self.personal_commands_status = status;
-                        }
-                    }
-                    Err(error) => {
-                        let msg = error.to_string();
-                        self.personal_workspace_error = Some(msg.clone());
-                        let snapshot = self.bootstrap_snapshot();
-                        self.enqueue_event(
-                            hex_event_tag_e::HEX_EVENT_PERSONAL_COMMANDS_UPDATED,
-                            &snapshot,
-                        );
-                        return Err(msg);
-                    }
+                if self.personal_workspace_receiver.is_none() {
+                    self.personal_workspace_provisioning = true;
+                    self.personal_workspace_error = None;
+                    self.personal_workspace_receiver =
+                        Some(start_personal_workspace_worker(self.callback_sink.clone()));
+                    let snapshot = self.bootstrap_snapshot();
+                    self.enqueue_event(
+                        hex_event_tag_e::HEX_EVENT_PERSONAL_COMMANDS_UPDATED,
+                        &snapshot,
+                    );
                 }
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(
-                    hex_event_tag_e::HEX_EVENT_PERSONAL_COMMANDS_UPDATED,
-                    &snapshot,
-                );
                 Ok(())
             }
             HexEngineCommand::OpenPersonalCommandsConfig => {
@@ -2522,7 +2963,8 @@ impl EngineCore {
             HexEngineCommand::ReloadOpenCodeCatalog => {
                 if self.opencode_catalog_receiver.is_none() {
                     self.opencode_catalog = OpenCodeCatalogState::Loading;
-                    self.opencode_catalog_receiver = Some(start_opencode_catalog_worker());
+                    self.opencode_catalog_receiver =
+                        Some(start_opencode_catalog_worker(self.callback_sink.clone()));
                     let snapshot = self.bootstrap_snapshot();
                     self.enqueue_event(
                         hex_event_tag_e::HEX_EVENT_OPENCODE_CATALOG_UPDATED,
@@ -2538,17 +2980,10 @@ impl EngineCore {
                 Ok(())
             }
             HexEngineCommand::DiscoverInstalledApplications => {
-                let apps = crate::application_catalog::discover();
-                self.installed_applications = apps
-                    .into_iter()
-                    .map(|app| HexInstalledApplicationSnapshot {
-                        name: app.name,
-                        bundle_id: app.bundle_id,
-                        path: app.path.display().to_string(),
-                    })
-                    .collect();
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                if self.app_discovery_receiver.is_none() {
+                    self.app_discovery_receiver =
+                        Some(start_app_discovery_worker(self.callback_sink.clone()));
+                }
                 Ok(())
             }
             HexEngineCommand::SetHistoryRetention { retention } => {
@@ -2580,7 +3015,7 @@ impl EngineCore {
                 Ok(())
             }
             HexEngineCommand::RefreshActivity => {
-                self.refresh_activity_cache();
+                let _ = self.refresh_activity_cache();
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_ACTIVITY_APPENDED, &snapshot);
                 Ok(())
@@ -2627,6 +3062,7 @@ impl EngineCore {
                     "locked" => {
                         self.hud.apply(DictationIndicatorEvent::Started);
                         self.hud.telemetry.phase = hex_hud_phase_e::HEX_HUD_PHASE_LOCKED;
+                        self.hud.sync_atomic();
                         if rms.is_some() || peak.is_some() {
                             self.hud.apply(DictationIndicatorEvent::Meter {
                                 average: rms.unwrap_or(0.08),
@@ -2681,6 +3117,18 @@ impl EngineCore {
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
                 Ok(())
             }
+            HexEngineCommand::CompleteOnboarding => {
+                if self.persist_settings {
+                    onboarding::record_completion().map_err(|e| e.to_string())?;
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::RetryInstanceLock => self.try_acquire_instance_lock(),
+            HexEngineCommand::QuitOtherHexInstancesAndRetry => {
+                self.quit_other_instances_and_retry()
+            }
             HexEngineCommand::RequestCheckForUpdates => {
                 let empty = serde_json::json!({});
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_REQUEST_CHECK_FOR_UPDATES, &empty);
@@ -2699,12 +3147,9 @@ impl EngineCore {
 
 pub struct hex_engine_s {
     core: Arc<Mutex<EngineCore>>,
+    atomic_hud: Arc<AtomicHudTelemetry>,
     callback_sink: Arc<CallbackSink>,
     shutdown: Arc<AtomicBool>,
-    _instance: Option<crate::instance::InstanceLock>,
-    local_api: Option<crate::local_api::LocalApi>,
-    recognition_worker: Option<JoinHandle<()>>,
-    controller_worker: Option<JoinHandle<()>>,
     coordinator_worker: Option<JoinHandle<()>>,
     preview_worker: Option<JoinHandle<()>>,
 }
@@ -2781,13 +3226,20 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
     let shutdown = Arc::new(AtomicBool::new(false));
     crate::SHUTDOWN.store(false, Ordering::Relaxed);
 
-    let (settings, instance_guard, event_log, history) = if cfg.start_workers {
+    let (settings, instance_guard, instance_conflict_error, event_log, history) = if cfg
+        .start_workers
+    {
         let log_dir = crate::app_paths::init_process_logging(&crate::SHUTDOWN).ok();
-        let instance_guard = match crate::instance::acquire("listener") {
-            Ok(guard) => Some(guard),
+        let (instance_guard, instance_conflict_error) = match crate::instance::acquire("listener") {
+            Ok(guard) => (Some(guard), None),
             Err(error) => {
-                tracing::warn!(%error, "listener instance lock already held; running in UI-observer mode");
-                None
+                tracing::warn!(%error, "listener instance lock already held; running in conflict state");
+                (
+                    None,
+                    Some(format!(
+                        "Another HEX instance is already running ({error}). Quit the other HEX process and retry."
+                    )),
+                )
             }
         };
         let settings = AppSettings::load().unwrap_or_else(|error| {
@@ -2804,16 +3256,24 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
         let event_log = log_dir
             .map(|dir| dir.join("live.ndjson"))
             .and_then(|path| crate::events::EventLog::create(&path).ok());
-        (settings, instance_guard, event_log, history)
+        (
+            settings,
+            instance_guard,
+            instance_conflict_error,
+            event_log,
+            history,
+        )
     } else {
-        (AppSettings::default(), None, None, None)
+        (AppSettings::default(), None, None, None, None)
     };
 
     let setup_status = onboarding::status(&settings.transcription);
     let setup_ready = setup_status.ready();
+    let instance_lock_held = !cfg.start_workers || instance_guard.is_some();
     if cfg.start_workers {
         tracing::info!(
             setup_ready,
+            instance_lock_held,
             microphone = ?setup_status.microphone,
             input_monitoring = ?setup_status.input_monitoring,
             accessibility = ?setup_status.accessibility,
@@ -2824,98 +3284,7 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
 
     let (indicator_sender, indicator_receiver) = dictation_indicator::channel();
     let (controller_event_sender, controller_event_receiver) = mpsc::sync_channel(32);
-    let (controller_cmd_sender, controller_cmd_receiver) = mpsc::sync_channel(8);
-    let (meeting_request_sender, meeting_request_receiver) = mpsc::sync_channel(8);
-    let (recognition_control_sender, recognition_control_receiver) = mpsc::sync_channel(8);
     let (developer_sender, developer_receiver) = mpsc::sync_channel(8);
-
-    let local_api = if cfg.start_workers && instance_guard.is_some() {
-        event_log.as_ref().and_then(|events| {
-            crate::local_api::LocalApi::start(
-                events.clone(),
-                crate::local_api::LocalApiOptions {
-                    developer_control: cfg
-                        .developer_features_enabled
-                        .then(|| developer_sender.clone()),
-                    dictation_control: Some(recognition_control_sender.clone()),
-                },
-            )
-            .map_err(|error| {
-                tracing::warn!(%error, "could not start local API");
-                error
-            })
-            .ok()
-        })
-    } else {
-        None
-    };
-
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let controller_worker = if cfg.start_workers && !cfg.preview_dictation_hud {
-        let controller_events = controller_event_sender.clone();
-        let worker_root = project_root.clone();
-        Some(thread::spawn(move || {
-            if let Err(error) = crate::meeting_watcher::controller_loop(
-                &crate::SHUTDOWN,
-                controller_events.clone(),
-                controller_cmd_receiver,
-                meeting_request_receiver,
-                worker_root,
-            ) {
-                tracing::error!(%error, "meeting controller stopped");
-                let _ = controller_events.send(ControllerEvent::Failed {
-                    title: "Meeting detection stopped".into(),
-                    error: error.to_string(),
-                });
-            }
-        }))
-    } else {
-        None
-    };
-
-    let recognition_worker =
-        if cfg.start_workers && instance_guard.is_some() && !cfg.preview_dictation_hud {
-            event_log.map(|recognition_events| {
-            let failure_indicator = indicator_sender.clone();
-            let recognition_indicator = indicator_sender.clone();
-            let meeting_requests = Some(meeting_request_sender.clone());
-            let recognition_history = history.clone();
-            let worker_root = project_root.clone();
-            thread::spawn(move || {
-                if !setup_ready {
-                    tracing::info!(
-                        "waiting for permissions and local model before starting hotkey listener"
-                    );
-                    while !crate::SHUTDOWN.load(Ordering::Relaxed) {
-                        let current = AppSettings::load().unwrap_or_default();
-                        if onboarding::status(&current.transcription).ready() {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(500));
-                    }
-                    if crate::SHUTDOWN.load(Ordering::Relaxed) {
-                        return;
-                    }
-                }
-                if let Err(error) = crate::recognition::listen(
-                    &worker_root,
-                    recognition_events,
-                    None,
-                    crate::config::voice_control(),
-                    &crate::SHUTDOWN,
-                    Some(recognition_indicator),
-                    meeting_requests,
-                    recognition_history,
-                    Some(recognition_control_receiver),
-                ) {
-                    tracing::error!(%error, "desktop recognition stopped");
-                    failure_indicator.send(DictationIndicatorEvent::Failed);
-                }
-            })
-        })
-        } else {
-            None
-        };
 
     let preview_worker = if cfg.preview_dictation_hud {
         let preview_sender = indicator_sender.clone();
@@ -2969,7 +3338,9 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
         StatusSnapshot::default()
     };
     crate::personal_commands::include_builtin_transformations(&mut personal_commands_status);
-    let opencode_catalog_receiver = cfg.start_workers.then(start_opencode_catalog_worker);
+    let opencode_catalog_receiver = cfg
+        .start_workers
+        .then(|| start_opencode_catalog_worker(callback_sink.clone()));
     let opencode_catalog = if cfg.start_workers {
         OpenCodeCatalogState::Loading
     } else {
@@ -2988,39 +3359,58 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
         None
     };
 
+    let atomic_hud = Arc::new(AtomicHudTelemetry::default());
     let mut initial_core = EngineCore {
         developer_features_enabled: cfg.developer_features_enabled,
         persist_settings: cfg.start_workers,
+        start_workers: cfg.start_workers,
+        preview_dictation_hud: cfg.preview_dictation_hud,
+        instance_lock_held,
+        instance_conflict_error,
+        instance_guard,
+        local_api: None,
+        recognition_worker: None,
+        controller_worker: None,
+        event_log,
+        developer_sender,
+        controller_event_sender,
         settings,
-        hud: HudTelemetryTracker::default(),
+        hud: HudTelemetryTracker::with_atomic(atomic_hud.clone()),
         meeting_state: MeetingMenuState::Idle,
         meeting_panel: HexMeetingPanelSnapshot::Hidden,
         pending_offer: None,
         ready_panel_deadline: None,
+        active_meeting_transcript_len: 0,
         transcription_preparation: TranscriptionPreparation::default(),
         transcription_deletion_error: None,
         available_microphones,
         opencode_catalog,
         opencode_catalog_receiver,
+        last_opencode_missing_check: Instant::now(),
         personal_commands_status,
+        personal_workspace_provisioning: false,
+        personal_workspace_receiver: None,
         personal_workspace_error: None,
         installed_applications: Vec::new(),
+        app_discovery_receiver: None,
         meetings_cache,
         event_reader,
         activity: DesktopActivity::default(),
         recent_events: Vec::new(),
         current_context: (None, None),
+        last_command_model_status: crate::recognition::command_model_status(),
         history,
-        recognition_controls: cfg.start_workers.then_some(recognition_control_sender),
-        meeting_commands: cfg.start_workers.then_some(controller_cmd_sender),
-        meeting_requests: cfg.start_workers.then_some(meeting_request_sender),
+        recognition_controls: None,
+        meeting_commands: None,
+        meeting_requests: None,
         indicator_sender,
         mailbox: VecDeque::new(),
         next_generation: 0,
         callback_sink: callback_sink.clone(),
     };
     if cfg.start_workers {
-        initial_core.refresh_activity_cache();
+        let _ = initial_core.refresh_activity_cache();
+        initial_core.start_runtime_workers_if_needed();
     }
     let core = Arc::new(Mutex::new(initial_core));
 
@@ -3043,12 +3433,9 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
 
     Box::into_raw(Box::new(hex_engine_s {
         core,
+        atomic_hud,
         callback_sink,
         shutdown,
-        _instance: instance_guard,
-        local_api,
-        recognition_worker,
-        controller_worker,
         coordinator_worker,
         preview_worker,
     }))
@@ -3066,11 +3453,18 @@ fn run_coordinator_loop(
         let mut did_work = false;
         while let Ok(event) = indicator_receiver.try_recv() {
             did_work = true;
+            let is_completed = matches!(event, DictationIndicatorEvent::JobCompleted { .. });
             let mut guard = core.lock().unwrap_or_else(|e| e.into_inner());
             let phase_changed = guard.hud.apply(event);
             if phase_changed {
                 let telemetry = guard.hud.telemetry;
                 guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HUD_CHANGED, &telemetry);
+            }
+            if is_completed {
+                let _ = guard.refresh_activity_cache();
+                let snapshot = guard.bootstrap_snapshot();
+                guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
+                guard.enqueue_event(hex_event_tag_e::HEX_EVENT_ACTIVITY_APPENDED, &snapshot);
             }
         }
         while let Ok(event) = controller_events.try_recv() {
@@ -3094,11 +3488,20 @@ fn run_coordinator_loop(
         if !did_work {
             match indicator_receiver.recv_timeout(Duration::from_millis(16)) {
                 Ok(event) => {
+                    let is_completed =
+                        matches!(event, DictationIndicatorEvent::JobCompleted { .. });
                     let mut guard = core.lock().unwrap_or_else(|e| e.into_inner());
                     let phase_changed = guard.hud.apply(event);
                     if phase_changed {
                         let telemetry = guard.hud.telemetry;
                         guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HUD_CHANGED, &telemetry);
+                    }
+                    if is_completed {
+                        let _ = guard.refresh_activity_cache();
+                        let snapshot = guard.bootstrap_snapshot();
+                        guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
+                        guard
+                            .enqueue_event(hex_event_tag_e::HEX_EVENT_ACTIVITY_APPENDED, &snapshot);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -3162,11 +3565,16 @@ pub unsafe extern "C" fn hex_engine_free(engine: hex_engine_t) {
     let mut boxed = unsafe { Box::from_raw(engine) };
     boxed.shutdown.store(true, Ordering::Release);
     crate::SHUTDOWN.store(true, Ordering::Release);
-    {
-        let guard = boxed.core.lock().unwrap_or_else(|e| e.into_inner());
+    let (local_api, recognition_worker, controller_worker) = {
+        let mut guard = boxed.core.lock().unwrap_or_else(|e| e.into_inner());
         guard.transcription_preparation.cancel();
-    }
-    if let Some(mut local_api) = boxed.local_api.take() {
+        (
+            guard.local_api.take(),
+            guard.recognition_worker.take(),
+            guard.controller_worker.take(),
+        )
+    };
+    if let Some(mut local_api) = local_api {
         local_api.shutdown();
     }
     if let Some(worker) = boxed.preview_worker.take() {
@@ -3175,10 +3583,10 @@ pub unsafe extern "C" fn hex_engine_free(engine: hex_engine_t) {
     if let Some(worker) = boxed.coordinator_worker.take() {
         let _ = worker.join();
     }
-    if let Some(worker) = boxed.recognition_worker.take() {
+    if let Some(worker) = recognition_worker {
         let _ = worker.join();
     }
-    if let Some(worker) = boxed.controller_worker.take() {
+    if let Some(worker) = controller_worker {
         let _ = worker.join();
     }
 }
@@ -3224,8 +3632,7 @@ pub unsafe extern "C" fn hex_engine_read_hud_telemetry(
     let Some(engine_ref) = (unsafe { engine.as_ref() }) else {
         return hex_hud_telemetry_s::default();
     };
-    let guard = engine_ref.core.lock().unwrap_or_else(|e| e.into_inner());
-    guard.hud.telemetry
+    engine_ref.atomic_hud.load()
 }
 
 #[unsafe(no_mangle)]
@@ -3599,10 +4006,30 @@ int main(void) {{
         });
         assert_eq!(harness.wakeups.load(Ordering::SeqCst), 1);
 
-        let telemetry = unsafe { hex_engine_read_hud_telemetry(engine) };
+        let telemetry = {
+            // Hold the engine core mutex on this thread while reading HUD telemetry
+            // to prove hex_engine_read_hud_telemetry is lock-free (no deadlock).
+            let _held_lock = unsafe { (*engine).core.lock().unwrap() };
+            unsafe { hex_engine_read_hud_telemetry(engine) }
+        };
         assert_eq!(telemetry.phase, hex_hud_phase_e::HEX_HUD_PHASE_LISTENING);
         assert!(telemetry.is_capturing);
         assert!(telemetry.rms_level > 0.4);
+
+        {
+            let mut guard = unsafe { (*engine).core.lock().unwrap() };
+            guard.instance_lock_held = false;
+            guard.instance_conflict_error = Some("Another HEX instance is running".into());
+            let snap = guard.bootstrap_snapshot();
+            assert!(!snap.instance_lock_held);
+            assert!(!snap.setup_ready);
+            assert_eq!(
+                snap.instance_conflict_error.as_deref(),
+                Some("Another HEX instance is running")
+            );
+            guard.instance_lock_held = true;
+            guard.instance_conflict_error = None;
+        }
 
         unsafe { hex_engine_tick(engine) };
         let delivered = harness.events.lock().unwrap();

@@ -254,7 +254,15 @@ public struct HexCommandsPane: View {
                             .foregroundStyle(.green)
                     }
 
-                    if cmdSnap.workspaceExists {
+                    if cmdSnap.workspaceProvisioning {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Creating Config…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if cmdSnap.workspaceExists {
                         Button("Open hex.config.ts") {
                             store.runtime.dispatch(.openPersonalCommandsConfig)
                         }
@@ -453,11 +461,15 @@ public struct HexMeetingsPane: View {
                     .tint(.red)
                     .controlSize(.small)
                 } else if meetingMenu?.canStart == true {
-                    Button(meetingMenu?.buttonTitle ?? "Start Recording") {
+                    let startLabel = (meetingMenu?.buttonTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                        ? (meetingMenu?.buttonTitle ?? "Start Recording")
+                        : "Start Recording"
+                    Button(startLabel) {
                         store.runtime.dispatch(.startMeeting())
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
+                    .disabled(snapshot?.instanceLockHeld == false)
                 }
 
                 Button {

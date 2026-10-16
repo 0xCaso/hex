@@ -205,5 +205,20 @@ struct HexEngineClientTests {
         #expect(store.filteredCommands.isEmpty)
         store.commandsSearchQuery = ""
         #expect(store.filteredCommands.count == totalCommands)
+
+        // Error routing: non-destructive failure populates bannerError; destructive failure populates alertError
+        store.dismissBannerError()
+        store.dismissAlertError()
+        #expect(runtime.dispatch(.setDoubleTapOnly(enabled: true)) == false)
+        #expect(store.bannerError?.contains("Double-tap only") == true)
+        #expect(store.alertError == nil)
+
+        store.dismissBannerError()
+        let activeModel = runtime.snapshot?.activeModelId ?? "parakeet-tdt-0.6b-v3"
+        #expect(runtime.dispatch(.deleteTranscriptionModel(modelId: activeModel)) == false)
+        #expect(store.bannerError != nil)
+        #expect(store.alertError != nil)
+        store.dismissAlertError()
+        store.dismissBannerError()
     }
 }

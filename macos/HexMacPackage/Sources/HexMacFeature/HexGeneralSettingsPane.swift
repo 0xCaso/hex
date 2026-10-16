@@ -486,6 +486,28 @@ public struct HexOnboardingView: View {
                         store.isModelPickerPresented = true
                     }
                 }
+
+                if let prepError = snapshot?.transcriptionCatalog.preparationError, !prepError.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(prepError)
+                            .font(.caption)
+                        Spacer()
+                        Button("Retry") {
+                            let modelId = snapshot?.activeModelId ?? "parakeet-tdt-0.6b-v3"
+                            let lang = snapshot?.activeLanguage ?? "en"
+                            store.runtime.dispatch(
+                                .chooseTranscriptionModel(
+                                    modelId: modelId,
+                                    language: lang,
+                                    recognitionHints: nil
+                                )
+                            )
+                        }
+                        .controlSize(.small)
+                    }
+                }
             }
 
             if snapshot?.setupReady == true {
@@ -543,6 +565,7 @@ public struct HexOnboardingView: View {
 public struct HexGeneralSettingsPane: View {
     public var store: HexSettingsStore
     public var onCheckForUpdates: (() -> Void)?
+    @State private var volumeDraft: Double?
 
     public init(store: HexSettingsStore, onCheckForUpdates: (() -> Void)? = nil) {
         self.store = store
@@ -854,19 +877,26 @@ public struct HexGeneralSettingsPane: View {
 
     @ViewBuilder
     private func appAndFeedbackSection(snapshot: HexBootstrapSnapshot, settings: HexAppSettings) -> some View {
+        let effectiveVolume = volumeDraft.map(Float.init) ?? snapshot.soundVolume
         Section("App & Feedback") {
             HStack(spacing: 12) {
                 Text("Feedback sound volume")
                 Spacer()
                 Slider(
                     value: Binding(
-                        get: { Double(snapshot.soundVolume) },
-                        set: { store.runtime.dispatch(.setSoundVolume(volume: Float($0))) }
+                        get: { volumeDraft ?? Double(snapshot.soundVolume) },
+                        set: { volumeDraft = $0 }
                     ),
-                    in: 0...1
+                    in: 0...1,
+                    onEditingChanged: { editing in
+                        if !editing, let committed = volumeDraft {
+                            volumeDraft = nil
+                            store.runtime.dispatch(.setSoundVolume(volume: Float(committed)))
+                        }
+                    }
                 )
                 .frame(width: 180)
-                Text(snapshot.soundVolume <= 0.001 ? "Off" : "\(Int((snapshot.soundVolume * 100).rounded()))%")
+                Text(effectiveVolume <= 0.001 ? "Off" : "\(Int((effectiveVolume * 100).rounded()))%")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(width: 40, alignment: .trailing)

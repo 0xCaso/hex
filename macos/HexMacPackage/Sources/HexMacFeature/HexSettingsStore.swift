@@ -111,6 +111,8 @@ public final class HexSettingsStore {
     public var isModelPickerPresented: Bool = false
     public var pendingReleaseMicrophoneConfirmation: Bool = false
     public var pendingKeepMicrophoneReadyConfirmation: Bool = false
+    public var bannerError: String?
+    public var alertError: String?
 
     // Shortcut capture
     public var activeShortcutTarget: String?
@@ -165,15 +167,67 @@ public final class HexSettingsStore {
     public init(runtime: HexEngineRuntime) {
         self.runtime = runtime
         self.launchAtLoginState = LaunchAtLoginController.currentState()
-        if let snapshot = runtime.snapshot, !snapshot.setupReady {
+        if let snapshot = runtime.snapshot, !snapshot.setupReady && snapshot.instanceLockHeld {
             self.selectedSection = .onboarding
+        }
+        runtime.onCommandFailed = { [weak self] command, message in
+            guard let self else { return }
+            self.bannerError = message
+            switch command {
+            case .deleteMeeting, .deleteTranscriptionModel, .deleteHistoryEntry,
+                 .clearHistory, .quitOtherHexInstancesAndRetry:
+                self.alertError = message
+            default:
+                break
+            }
+        }
+        runtime.onEventReceived = { [weak self] tag in
+            guard let self else { return }
+            switch tag {
+            case .historyUpdated:
+                self.refreshHistory()
+            case .meetingTranscriptDelta:
+                if self.selectedSection == .meetings {
+                    self.refreshSelectedMeetingDetailAsync()
+                }
+            default:
+                break
+            }
         }
         refreshHistory()
         syncSelectionWithSnapshot()
     }
 
+    public func dismissBannerError() {
+        bannerError = nil
+    }
+
+    public func dismissAlertError() {
+        alertError = nil
+    }
+
+    public func retryInstanceLock() {
+        if runtime.dispatch(.retryInstanceLock) {
+            bannerError = nil
+        }
+    }
+
+    public func quitOtherHexAndRetry() {
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.kitlangton.hex2")
+        where app.processIdentifier != myPid {
+            app.terminate()
+        }
+        if runtime.dispatch(.quitOtherHexInstancesAndRetry) {
+            bannerError = nil
+        }
+    }
+
     public func handleSnapshotUpdate(_ snapshot: HexBootstrapSnapshot) {
         if selectedSection == .onboarding && snapshot.setupReady {
+            if !snapshot.onboardingCompleted {
+                runtime.dispatch(.recordOnboardingCompletion)
+            }
             selectedSection = .settings
         }
         syncSelectionWithSnapshot()
@@ -181,12 +235,13 @@ public final class HexSettingsStore {
             refreshHistory()
         }
         if selectedSection == .meetings {
-            refreshSelectedMeetingDetail()
+            refreshSelectedMeetingDetailIfChanged(in: snapshot)
         }
     }
 
     public func selectSection(_ section: HexWindowSection) {
         cancelRecordingShortcut()
+        bannerError = nil
         selectedSection = section
         switch section {
         case .history:
@@ -204,7 +259,7 @@ public final class HexSettingsStore {
             }
         case .meetings:
             runtime.dispatch(.refreshMeetings)
-            refreshSelectedMeetingDetail()
+            refreshSelectedMeetingDetailAsync()
         case .activity:
             runtime.dispatch(.refreshActivity)
         default:
@@ -531,7 +586,7 @@ public final class HexSettingsStore {
         selectedMeetingId = id
         renamingMeetingId = nil
         confirmingDeleteMeetingId = nil
-        refreshSelectedMeetingDetail()
+        refreshSelectedMeetingDetailAsync()
     }
 
     public func refreshSelectedMeetingDetail() {
@@ -546,13 +601,67 @@ public final class HexSettingsStore {
         selectedMeetingDetail = runtime.fetchMeetingDetail(meetingId: id)
     }
 
+    public func refreshSelectedMeetingDetailAsync() {
+        let meetings = filteredMeetings
+        if selectedMeetingId == nil || !meetings.contains(where: { $0.id == selectedMeetingId }) {
+            selectedMeetingId = meetings.first?.id
+        }
+        guard let id = selectedMeetingId else {
+            selectedMeetingDetail = nil
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let detail = await self.runtime.fetchMeetingDetailAsync(meetingId: id)
+            if self.selectedMeetingId == id {
+                self.selectedMeetingDetail = detail
+            }
+        }
+    }
+
+    private func refreshSelectedMeetingDetailIfChanged(in snapshot: HexBootstrapSnapshot) {
+        let meetings = filteredMeetings
+        if selectedMeetingId == nil || !meetings.contains(where: { $0.id == selectedMeetingId }) {
+            selectedMeetingId = meetings.first?.id
+        }
+        guard let id = selectedMeetingId,
+              let row = snapshot.meetings.first(where: { $0.id == id })
+        else {
+            selectedMeetingDetail = nil
+            return
+        }
+        guard var currentDetail = selectedMeetingDetail, currentDetail.manifest.id == id else {
+            refreshSelectedMeetingDetailAsync()
+            return
+        }
+        let prev = currentDetail.manifest
+        let structuralChange = prev.status != row.status
+            || prev.title != row.title
+            || prev.displayTitle != row.displayTitle
+            || prev.summarizing != row.summarizing
+            || prev.notesSummary != row.notesSummary
+            || prev.notesMarkdown != row.notesMarkdown
+            || prev.exportPath != row.exportPath
+            || prev.exportError != row.exportError
+            || prev.error != row.error
+        if structuralChange {
+            refreshSelectedMeetingDetailAsync()
+        } else if prev.durationMs != row.durationMs || prev.durationLabel != row.durationLabel {
+            currentDetail.manifest = row
+            selectedMeetingDetail = currentDetail
+        }
+    }
+
     public func commitMeetingRename() {
         guard let id = renamingMeetingId else { return }
         let trimmed = meetingRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else {
+            bannerError = "Meeting title cannot be empty."
+            return
+        }
         if runtime.dispatch(.renameMeeting(id: id, title: trimmed)) {
             renamingMeetingId = nil
-            refreshSelectedMeetingDetail()
+            refreshSelectedMeetingDetailAsync()
         }
     }
 
@@ -562,7 +671,7 @@ public final class HexSettingsStore {
             if selectedMeetingId == id {
                 selectedMeetingId = nil
             }
-            refreshSelectedMeetingDetail()
+            refreshSelectedMeetingDetailAsync()
         }
     }
 

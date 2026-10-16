@@ -66,6 +66,10 @@ public final class HexEngineRuntime {
     public var onQuitRequested: (() -> Void)?
     @ObservationIgnored
     public var onDeveloperCommandRequested: ((Data) -> Void)?
+    @ObservationIgnored
+    public var onCommandFailed: ((HexEngineCommand, String) -> Void)?
+    @ObservationIgnored
+    public var onEventReceived: ((HexEventTag) -> Void)?
 
     @ObservationIgnored
     private var engineHandle: hex_engine_t?
@@ -181,21 +185,30 @@ public final class HexEngineRuntime {
         }
         defer { hex_string_free(errorSlice) }
         if !succeeded {
+            let resolvedMessage: String
             if let errorData = Self.data(from: errorSlice) {
                 if let obj = try? JSONSerialization.jsonObject(with: errorData) as? [String: Any],
                    let msg = obj["error"] as? String
                 {
-                    self.lastError = msg
+                    resolvedMessage = msg
                 } else if let message = String(data: errorData, encoding: .utf8) {
-                    self.lastError = message
+                    resolvedMessage = message
                 } else {
-                    self.lastError = "Engine command failed"
+                    resolvedMessage = "Engine command failed"
                 }
             } else {
-                self.lastError = "Engine command failed"
+                resolvedMessage = "Engine command failed"
             }
+            self.lastError = resolvedMessage
+            onCommandFailed?(command, resolvedMessage)
         } else {
-            self.lastError = nil
+            switch command {
+            case .refreshSnapshot, .refreshStatus, .refreshMeetings, .refreshActivity,
+                 .discoverInstalledApplications, .reloadOpenCodeCatalog, .setHotkeyCaptureActive:
+                break
+            default:
+                self.lastError = nil
+            }
         }
         return succeeded
     }
@@ -208,6 +221,25 @@ public final class HexEngineRuntime {
     public func fetchMeetingDetail(meetingId: String) -> HexMeetingDetailSnapshot? {
         guard let data = copyMeetingDetailJSON(meetingId: meetingId) else { return nil }
         return try? decoder.decode(HexMeetingDetailSnapshot.self, from: data)
+    }
+
+    public func fetchMeetingDetailAsync(meetingId: String) async -> HexMeetingDetailSnapshot? {
+        guard let handle = engineHandle else { return nil }
+        let rawHandle = Int(bitPattern: handle)
+        return await Task.detached(priority: .userInitiated) {
+            guard let ptr = hex_engine_t(bitPattern: rawHandle) else { return nil }
+            let idBytes = Array(meetingId.utf8CString.dropLast())
+            let slice = idBytes.withUnsafeBufferPointer { buffer in
+                hex_engine_copy_meeting_detail_json(
+                    ptr,
+                    hex_slice_s(ptr: buffer.baseAddress, len: buffer.count)
+                )
+            }
+            defer { hex_string_free(slice) }
+            guard let slicePtr = slice.ptr, slice.len > 0 else { return nil }
+            let data = Data(bytes: slicePtr, count: slice.len)
+            return try? JSONDecoder().decode(HexMeetingDetailSnapshot.self, from: data)
+        }.value
     }
 
     public func copyHistoryPageJSON(query: String = "", limit: UInt32 = 100) -> Data? {
@@ -248,7 +280,8 @@ public final class HexEngineRuntime {
 
         switch tag {
         case .readinessChanged, .settingsChanged, .modelPrepUpdated, .meetingStateChanged,
-             .opencodeCatalogUpdated, .personalCommandsUpdated, .historyUpdated, .activityAppended:
+             .meetingTranscriptDelta, .opencodeCatalogUpdated, .personalCommandsUpdated,
+             .historyUpdated, .activityAppended:
             if let decoded = try? decoder.decode(HexBootstrapSnapshot.self, from: data) {
                 self.snapshot = decoded
                 self.hudTelemetry = decoded.hudTelemetry
@@ -257,6 +290,7 @@ public final class HexEngineRuntime {
                 onHudTelemetryUpdated?(decoded.hudTelemetry)
                 onMeetingPanelUpdated?(decoded.meetingPanel)
             }
+            onEventReceived?(tag)
         case .hudChanged:
             if let decoded = try? decoder.decode(HexHudTelemetry.self, from: data) {
                 self.hudTelemetry = decoded
@@ -319,7 +353,10 @@ public final class HexEngineRuntime {
         if snapshot?.statusMenu.preparingModelTitle != nil {
             return true
         }
-        if snapshot?.opencodeCatalog.state == "loading" {
+        if snapshot?.opencodeCatalog.state == "loading" || snapshot?.opencodeCatalog.state == "missing" {
+            return true
+        }
+        if snapshot?.commandsSnapshot.workspaceProvisioning == true {
             return true
         }
         if snapshot?.transcriptionCatalog.models.contains(where: \.preparing) == true {

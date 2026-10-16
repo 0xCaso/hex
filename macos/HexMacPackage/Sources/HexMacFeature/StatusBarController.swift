@@ -56,6 +56,26 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
 
     public func rebuildMenu(from statusMenu: HexStatusMenuSnapshot?) {
         menu.removeAllItems()
+        let instanceLocked = runtime.snapshot?.instanceLockHeld ?? true
+
+        if !instanceLocked {
+            let conflictItem = NSMenuItem(
+                title: "Another HEX instance is running",
+                action: nil,
+                keyEquivalent: ""
+            )
+            conflictItem.isEnabled = false
+            menu.addItem(conflictItem)
+
+            let quitOtherItem = NSMenuItem(
+                title: "Quit Other HEX & Retry",
+                action: #selector(handleQuitOtherHexAndRetry(_:)),
+                keyEquivalent: ""
+            )
+            quitOtherItem.target = self
+            menu.addItem(quitOtherItem)
+            menu.addItem(.separator())
+        }
 
         if let meeting = statusMenu?.meeting, meeting.visible {
             if let statusTitle = meeting.statusTitle {
@@ -77,12 +97,16 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
                 menu.addItem(stopItem)
             }
             if meeting.canStart {
+                let startTitle = meeting.buttonTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Start Recording"
+                    : meeting.buttonTitle
                 let startItem = NSMenuItem(
-                    title: meeting.buttonTitle,
+                    title: startTitle,
                     action: #selector(handleStartMeeting(_:)),
                     keyEquivalent: ""
                 )
                 startItem.target = self
+                startItem.isEnabled = instanceLocked
                 menu.addItem(startItem)
             }
             let meetingsItem = NSMenuItem(
@@ -101,6 +125,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
             keyEquivalent: ""
         )
         pasteLastItem.target = self
+        pasteLastItem.isEnabled = instanceLocked
         menu.addItem(pasteLastItem)
 
         let settingsItem = NSMenuItem(
@@ -216,6 +241,15 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func handlePasteLastDictation(_ sender: Any?) {
         runtime.dispatch(.pasteLastDictation)
+    }
+
+    @objc private func handleQuitOtherHexAndRetry(_ sender: Any?) {
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.kitlangton.hex2")
+        where app.processIdentifier != myPid {
+            app.terminate()
+        }
+        runtime.dispatch(.quitOtherHexInstancesAndRetry)
     }
 
     @objc private func handleOpenSettings(_ sender: Any?) {
