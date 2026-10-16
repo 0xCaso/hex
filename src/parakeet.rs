@@ -2394,3 +2394,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "dictation_tail_tests.rs"]
+mod dictation_tail_tests;
