@@ -150,22 +150,24 @@ fn release_boundary_harness() {
                     ..samples.len().saturating_sub(32))
                     .map(|index| (samples[index] - reference[reference_start + index]).abs())
                     .fold(0.0, f32::max);
+                let merged = matches!(
+                    plan,
+                    IncrementalPlan::Join {
+                        merged_short_tail: true,
+                        ..
+                    }
+                );
                 for threads in [0, 1] {
                     model.session.set_threads_for_test(threads).unwrap();
-                    let plan = match &plan {
-                        IncrementalPlan::Join { prefix, tail_start } => IncrementalPlan::Join {
-                            prefix: prefix.clone(),
-                            tail_start: *tail_start,
-                        },
-                        IncrementalPlan::Unsegmented => IncrementalPlan::Unsegmented,
-                        IncrementalPlan::Fallback(reason) => IncrementalPlan::Fallback(reason),
-                    };
-                    let text = transcribe_clip(samples.clone(), plan, None, |samples, _| {
-                        Ok(run(&mut model, samples))
-                    })
-                    .unwrap();
+                    let started = std::time::Instant::now();
+                    let text =
+                        transcribe_clip(samples.clone(), plan.clone(), None, |samples, _| {
+                            Ok(run(&mut model, samples))
+                        })
+                        .unwrap();
+                    let release_ms = started.elapsed().as_millis();
                     println!(
-                        "release{offset_ms:+}ms incremental={incremental} cuts={cuts} threads={threads} missing={missing} tail_diff={max_tail_diff:.5} {text:?}"
+                        "release{offset_ms:+}ms incremental={incremental} cuts={cuts} merged={merged} threads={threads} release_ms={release_ms} missing={missing} tail_diff={max_tail_diff:.5} {text:?}"
                     );
                 }
             }

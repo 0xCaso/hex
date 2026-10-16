@@ -361,6 +361,11 @@ impl DictationClip {
         self.capture_generation
     }
 
+    /// Captured 16 kHz audio from `start` to the end of the clip.
+    pub fn samples_from(&self, start: usize) -> &[f32] {
+        &self.samples[start.min(self.samples.len())..]
+    }
+
     #[cfg(test)]
     pub fn for_test(samples: Vec<f32>, cuts: Vec<usize>, capture_generation: Option<u64>) -> Self {
         Self {

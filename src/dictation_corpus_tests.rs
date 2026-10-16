@@ -314,25 +314,18 @@ fn evaluate_dictation_corpus() {
 
     let mut items: Vec<(String, String, String, PathBuf, String)> = Vec::new();
 
-    let say_manifest = corpus_dir.join("synthetic/say_manifest.json");
-    if say_manifest.exists() {
-        let entries: Vec<SyntheticManifestEntry> =
-            serde_json::from_slice(&fs::read(&say_manifest).unwrap()).unwrap();
-        for e in entries {
-            items.push((
-                e.id,
-                e.source,
-                e.category,
-                corpus_dir.join("synthetic").join(e.wav),
-                e.text,
-            ));
+    // `pause_manifest.json` comes from `scripts/dictation-pause-fixtures.sh`.
+    for manifest in [
+        "say_manifest.json",
+        "elevenlabs_manifest.json",
+        "pause_manifest.json",
+    ] {
+        let manifest = corpus_dir.join("synthetic").join(manifest);
+        if !manifest.exists() {
+            continue;
         }
-    }
-
-    let el_manifest = corpus_dir.join("synthetic/elevenlabs_manifest.json");
-    if el_manifest.exists() {
         let entries: Vec<SyntheticManifestEntry> =
-            serde_json::from_slice(&fs::read(&el_manifest).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
         for e in entries {
             items.push((
                 e.id,

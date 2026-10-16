@@ -171,11 +171,19 @@ struct SpeculativeTranscript {
     broken: Option<&'static str>,
 }
 
+/// A final piece shorter than the segmenter's own minimum piece gives Parakeet
+/// too little context: a lone word after a pause comes back empty or misheard,
+/// so it is transcribed together with the piece before it.
+const SHORT_TAIL_SAMPLES: usize =
+    crate::pause_segmenter::MINIMUM_PIECE.as_millis() as usize * TRANSCRIPTION_SAMPLES_PER_MS;
+
+#[derive(Clone)]
 enum IncrementalPlan {
     Unsegmented,
     Join {
         prefix: Vec<String>,
         tail_start: usize,
+        merged_short_tail: bool,
     },
     Fallback(&'static str),
 }
@@ -252,14 +260,28 @@ impl SpeculativeTranscript {
         } else {
             let mut prefix = state.pieces;
             prefix.truncate(clip.cuts().len());
-            return IncrementalPlan::Join { prefix, tail_start };
+            let tail = clip.samples_from(tail_start);
+            let merged_short_tail =
+                tail.len() < SHORT_TAIL_SAMPLES && !crate::dictation::is_near_silent_samples(tail);
+            let tail_start = if merged_short_tail {
+                prefix.pop();
+                clip.cuts().iter().rev().nth(1).copied().unwrap_or(0)
+            } else {
+                tail_start
+            };
+            return IncrementalPlan::Join {
+                prefix,
+                tail_start,
+                merged_short_tail,
+            };
         };
         IncrementalPlan::Fallback(reason)
     }
 }
 
-/// Transcribes only the tail when every earlier piece already has a result;
-/// otherwise transcribes the whole clip exactly as without segmentation.
+/// Transcribes only the tail when every earlier piece already has a result
+/// (a short tail together with the last piece); otherwise transcribes the
+/// whole clip exactly as without segmentation.
 fn transcribe_clip(
     mut samples: Vec<f32>,
     plan: IncrementalPlan,
@@ -267,7 +289,11 @@ fn transcribe_clip(
     transcribe: impl FnOnce(Vec<f32>, Option<&DictationProtocol>) -> Result<String>,
 ) -> Result<String> {
     match plan {
-        IncrementalPlan::Join { prefix, tail_start } => {
+        IncrementalPlan::Join {
+            prefix,
+            tail_start,
+            merged_short_tail,
+        } => {
             samples.drain(..tail_start);
             let tail_ms = samples.len() / TRANSCRIPTION_SAMPLES_PER_MS;
             let text = if crate::dictation::is_near_silent_samples(&samples) {
@@ -278,6 +304,7 @@ fn transcribe_clip(
             tracing::info!(
                 pieces = prefix.len(),
                 tail_ms,
+                merged_short_tail,
                 "joined incremental transcription"
             );
             Ok(join_segments(
@@ -2278,7 +2305,8 @@ mod tests {
         assert_eq!(text, "First piece. Second piece, tail words.");
 
         // A near-silent tail after the final pause cut skips inference rather
-        // than feeding room tone to the model.
+        // than feeding room tone to the model, and short as it is, it does not
+        // re-transcribe the piece before it.
         let mut speculative = SpeculativeTranscript::default();
         speculative.record(
             &piece(6, 0),
@@ -2297,6 +2325,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(text, "Spoken before pause.");
+    }
+
+    #[test]
+    fn a_short_final_piece_is_transcribed_with_the_piece_before_it() {
+        let selection = TranscriptionSelection::default();
+        let audio = || (0..160_000).map(|sample| sample as f32).collect::<Vec<_>>();
+        // Cuts at 3 s and 8.5 s leave a 1.5 s tail holding one word.
+        let mut speculative = SpeculativeTranscript::default();
+        speculative.record(&piece(7, 0), selection.clone(), Ok("First piece.".into()));
+        speculative.record(&piece(7, 1), selection.clone(), Ok("An amazing.".into()));
+        let clip = DictationClip::for_test(audio(), vec![48_000, 136_000], Some(7));
+        let plan = speculative.take_plan(&clip, &selection, false);
+        let IncrementalPlan::Join {
+            prefix,
+            tail_start,
+            merged_short_tail,
+        } = plan.clone()
+        else {
+            panic!("complete pieces must join");
+        };
+        assert_eq!(prefix, ["First piece."]);
+        assert_eq!(tail_start, 48_000);
+        assert!(merged_short_tail);
+        let text = transcribe_clip(
+            clip.into_transcription_samples(),
+            plan,
+            None,
+            |samples, _| {
+                assert_eq!(samples.len(), 112_000);
+                assert_eq!(samples[0], 48_000.0);
+                Ok("An amazing world.".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(text, "First piece. An amazing world.");
+
+        // With a single cut, the short tail joins the whole first piece.
+        let mut speculative = SpeculativeTranscript::default();
+        speculative.record(&piece(8, 0), selection.clone(), Ok("An amazing.".into()));
+        let clip = DictationClip::for_test(audio(), vec![140_000], Some(8));
+        let IncrementalPlan::Join {
+            prefix,
+            tail_start,
+            merged_short_tail,
+        } = speculative.take_plan(&clip, &selection, false)
+        else {
+            panic!("complete pieces must join");
+        };
+        assert!(prefix.is_empty());
+        assert_eq!(tail_start, 0);
+        assert!(merged_short_tail);
+
+        // A tail as long as the segmenter's minimum piece stays separate.
+        let mut speculative = SpeculativeTranscript::default();
+        speculative.record(&piece(9, 0), selection.clone(), Ok("First piece.".into()));
+        let clip = DictationClip::for_test(audio(), vec![160_000 - SHORT_TAIL_SAMPLES], Some(9));
+        let IncrementalPlan::Join {
+            prefix,
+            merged_short_tail,
+            ..
+        } = speculative.take_plan(&clip, &selection, false)
+        else {
+            panic!("complete pieces must join");
+        };
+        assert_eq!(prefix, ["First piece."]);
+        assert!(!merged_short_tail);
     }
 
     #[test]
@@ -2392,13 +2486,17 @@ mod tests {
             speculative.record(&piece(5, index), selection.clone(), Ok(text.into()));
         }
         let clip = segmented_clip(5);
-        let IncrementalPlan::Join { prefix, tail_start } =
-            speculative.take_plan(&clip, &selection, false)
+        let IncrementalPlan::Join {
+            prefix,
+            tail_start,
+            merged_short_tail,
+        } = speculative.take_plan(&clip, &selection, false)
         else {
             panic!("complete pieces must join");
         };
         assert_eq!(prefix, ["One.", "Two."]);
         assert_eq!(tail_start, 96_000);
+        assert!(!merged_short_tail, "a four-second tail stays separate");
         assert_eq!(
             plan_reason(&speculative.take_plan(&clip, &selection, false)),
             "missing-pieces"
