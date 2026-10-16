@@ -28,7 +28,8 @@ Speakers are `You` (Kit, his microphone) and `Them` (everyone else, system audio
 remote speakers are not separated. Transcripts come from local speech recognition and contain \
 misheard words, so search is stemmed and fuzzy by default. Typical flow: list_meetings or \
 search_transcripts to find a meeting and timestamp, then get_transcript around it, and \
-get_meeting_notes for stored summaries. Everything is read-only and stays on the machine.";
+get_meeting_notes for a stored title and two-sentence summary. Details, decisions, and action \
+items are only in the transcript. Everything is read-only and stays on the machine.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListMeetingsArgs {
@@ -220,8 +221,10 @@ max_chars and return next_cursor to continue.",
     }
 
     #[tool(
-        description = "Stored Apple Intelligence notes for a meeting: summary, action items with \
-owners, and decisions. Never generates notes; when none are stored it says so.",
+        description = "The stored Apple Intelligence title and summary (at most two sentences) \
+for a meeting. Only a short overview: read the transcript with get_transcript or \
+search_transcripts for details, decisions, and action items. Never generates notes; when none \
+are stored it says so.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn get_meeting_notes(

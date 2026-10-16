@@ -6718,7 +6718,7 @@ impl AppWindow {
                     if copied("notes") {
                         "Copied"
                     } else {
-                        "Copy Notes"
+                        "Copy Summary"
                     },
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -6775,16 +6775,16 @@ impl AppWindow {
             && self.apple_intelligence_availability().is_available()
         {
             if notes_running {
-                actions.push(meeting_progress_action("Writing notes..."));
+                actions.push(meeting_progress_action("Summarizing..."));
             } else {
                 let id = id.clone();
                 actions.push(
                     action(
                         "notes",
                         if meeting.notes.is_some() {
-                            "Regenerate Notes"
+                            "Regenerate Summary"
                         } else {
-                            "Write Notes"
+                            "Summarize"
                         },
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -6911,7 +6911,7 @@ impl AppWindow {
                     .pb_5()
                     .text_size(px(12.0))
                     .text_color(rgb(MUTED))
-                    .child("Writing notes with Apple Intelligence...")
+                    .child("Writing a title and summary with Apple Intelligence...")
             })
         });
 
@@ -9197,109 +9197,27 @@ fn meeting_action_button(id: &'static str, label: &'static str) -> gpui::Statefu
 }
 
 fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
-    let section = |label: &'static str, items: Vec<Div>| {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(compact_section_label(label).px_0().pb_1())
-            .children(items)
-    };
-    let bullet = |marker: Div, text: String| {
-        div()
-            .flex()
-            .items_start()
-            .gap_2()
-            .text_size(px(13.0))
-            .line_height(px(20.0))
-            .text_color(rgb(TEXT_SOFT))
-            .child(marker)
-            .child(div().flex_1().min_w(px(0.0)).child(text))
-    };
-    let dot = || {
-        div()
-            .flex_none()
-            .w(px(12.0))
-            .pt(px(8.0))
-            .flex()
-            .justify_center()
-            .child(div().size(px(4.0)).rounded_full().bg(rgb(FAINT)))
-    };
-    let checkbox = || {
-        div().flex_none().w(px(12.0)).pt(px(4.0)).child(
-            div()
-                .size(px(11.0))
-                .rounded(px(3.0))
-                .border_1()
-                .border_color(rgb(MUTED)),
-        )
-    };
-    let actions = notes
-        .action_items
-        .iter()
-        .map(|item| {
-            bullet(checkbox(), item.task.clone()).when_some(item.owner.clone(), |row, owner| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .mt(px(1.0))
-                        .h(px(18.0))
-                        .px(px(6.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(4.0))
-                        .bg(rgb(CANVAS))
-                        .border_1()
-                        .border_color(rgb(LINE))
-                        .text_size(px(10.0))
-                        .text_color(rgb(MUTED))
-                        .child(owner),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
+    let summary = notes.summary.trim().to_string();
     div()
         .mb_5()
         .pb_5()
         .flex()
         .flex_col()
-        .gap_5()
+        .gap(px(6.0))
         .border_b_1()
         .border_color(rgb(LINE))
-        .when(!notes.summary.is_empty(), |block| {
-            block.child(section(
-                "SUMMARY",
-                notes
-                    .summary
-                    .iter()
-                    .map(|point| bullet(dot(), point.clone()))
-                    .collect(),
-            ))
-        })
-        .when(!actions.is_empty(), |block| {
-            block.child(section("ACTION ITEMS", actions))
-        })
-        .when(!notes.decisions.is_empty(), |block| {
-            block.child(section(
-                "DECISIONS",
-                notes
-                    .decisions
-                    .iter()
-                    .map(|decision| bullet(dot(), decision.clone()))
-                    .collect(),
-            ))
-        })
-        .when(notes.chunks < notes.total_chunks, |block| {
-            block.child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(FAINT))
-                    .child(format!(
-                        "Long meeting: notes cover {} of {} sections.",
-                        notes.chunks, notes.total_chunks
-                    )),
-            )
-        })
+        .child(compact_section_label("SUMMARY").px_0().pb_1())
+        .child(
+            div()
+                .text_size(px(13.0))
+                .line_height(px(20.0))
+                .text_color(rgb(if summary.is_empty() { MUTED } else { TEXT_SOFT }))
+                .child(if summary.is_empty() {
+                    "Nothing to summarize.".to_string()
+                } else {
+                    summary
+                }),
+        )
 }
 
 /// A compact status chip; `Ready` appears only in the detail header, so the
@@ -9487,6 +9405,7 @@ fn preview_meetings(empty: bool) -> (Vec<MeetingManifest>, HashMap<String, Vec<T
                 export_path: None,
                 export_error: None,
                 echo_suppressed_utterances: 0,
+                provisional_title: None,
                 notes: None,
                 notes_error: None,
             }
@@ -9512,30 +9431,12 @@ fn preview_meetings(empty: bool) -> (Vec<MeetingManifest>, HashMap<String, Vec<T
     );
     synced.notes = Some(meeting::MeetingNotes {
         title: "Arcade launch plan".into(),
-        summary: vec![
-            "One login for every Anomaly Arcade game, with friends and quick joins.".into(),
-            "Aim for twenty to thirty games over the next couple of months.".into(),
-            "The build screen needs a proposal before more polish.".into(),
-        ],
-        action_items: vec![
-            meeting::ActionItem {
-                task: "Write the build screen proposal".into(),
-                owner: Some("You".into()),
-            },
-            meeting::ActionItem {
-                task: "Finish the StarCraft prototype".into(),
-                owner: Some("Ryan".into()),
-            },
-            meeting::ActionItem {
-                task: "Try a WebGPU prototype of the gravity well".into(),
-                owner: None,
-            },
-        ],
-        decisions: vec!["Ship the shared login before adding more games.".into()],
+        summary: "One login for every Anomaly Arcade game, aiming for twenty to thirty games \
+over the next couple of months. The build screen needs a proposal before more polish."
+            .into(),
         generated_at_ms: synced_start + 39 * minute,
-        elapsed_ms: 12_000,
-        chunks: 1,
-        total_chunks: 1,
+        elapsed_ms: 4_000,
+        ..Default::default()
     });
     let design_start = now - 27 * 60 * minute;
     let design = manifest(

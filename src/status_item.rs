@@ -405,10 +405,10 @@ fn meeting_menu(state: &crate::meeting_watcher::MeetingMenuState, enabled: bool)
             can_start: false,
             can_stop: false,
         },
-        MeetingMenuState::Recording { started } => {
+        MeetingMenuState::Recording { started, title } => {
             let elapsed = crate::meeting::format_duration(started.elapsed().as_millis() as u64);
             MeetingMenu {
-                status: Some(format!("Recording meeting · {elapsed}")),
+                status: Some(format!("Recording · {} · {elapsed}", menu_title(title))),
                 button_title: format!(" {elapsed}"),
                 recording: true,
                 can_start: false,
@@ -423,6 +423,17 @@ fn meeting_menu(state: &crate::meeting_watcher::MeetingMenuState, enabled: bool)
             can_stop: false,
         },
     }
+}
+
+/// A meeting title short enough for one menu line.
+fn menu_title(title: &str) -> String {
+    const MAX_CHARS: usize = 48;
+    let title = title.trim();
+    if title.chars().count() <= MAX_CHARS {
+        return title.into();
+    }
+    let cut = title.chars().take(MAX_CHARS - 1).collect::<String>();
+    format!("{}…", cut.trim_end())
 }
 
 /// Mirrors the meeting recorder into the menu bar so an active recording
@@ -475,10 +486,17 @@ mod tests {
         assert!(idle.can_start && !idle.can_stop && idle.status.is_none());
         assert!(!meeting_menu(&MeetingMenuState::Idle, false).can_start);
         let started = std::time::Instant::now() - std::time::Duration::from_secs(754);
-        let recording = meeting_menu(&MeetingMenuState::Recording { started }, false);
+        let title = "Zoom call — 2:30 PM".to_string();
+        let recording = meeting_menu(&MeetingMenuState::Recording { started, title }, false);
         assert_eq!(
             recording.status.as_deref(),
-            Some("Recording meeting · 12:34")
+            Some("Recording · Zoom call — 2:30 PM · 12:34")
+        );
+        let title = "A very long provisional title that keeps going past the limit".to_string();
+        let long = meeting_menu(&MeetingMenuState::Recording { started, title }, false);
+        assert_eq!(
+            long.status.as_deref(),
+            Some("Recording · A very long provisional title that keeps going… · 12:34")
         );
         assert_eq!(recording.button_title, " 12:34");
         assert!(recording.can_stop && !recording.can_start);

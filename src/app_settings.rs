@@ -417,8 +417,8 @@ pub struct MeetingSettings {
     pub enabled: bool,
     /// Folder for finished Markdown transcripts; `None` uses the default.
     pub output_folder: Option<PathBuf>,
-    /// Write a title, summary, and action items with Apple Intelligence when
-    /// it is available.
+    /// Title meetings and write a two-sentence summary with Apple
+    /// Intelligence when it is available.
     pub summarize_with_apple_intelligence: bool,
 }
 

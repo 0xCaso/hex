@@ -3,16 +3,9 @@ import Foundation
 import FoundationModels
 #endif
 
-private struct BridgeActionItem: Codable {
-    let task: String
-    let owner: String
-}
-
 private struct BridgeNotes: Codable {
     let title: String
-    let summary: [String]
-    let actionItems: [BridgeActionItem]
-    let decisions: [String]
+    let summary: String
 }
 
 private struct BridgeError: LocalizedError {
@@ -25,54 +18,48 @@ private struct BridgeError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// Distinguishes an oversized prompt so Rust can split the chunk once.
+/// Distinguishes an oversized prompt so Rust can shorten the excerpt once.
 private let contextWindowMarker = "context-window:"
 
 #if canImport(FoundationModels)
 @available(macOS 26.0, *)
 @Generable
-private struct GeneratedActionItem {
-    @Guide(description: "One concrete follow-up task as a short imperative, without the owner's name")
-    let task: String
-    @Guide(description: "The person responsible exactly as stated, You for the recording user, or an empty string when no owner was stated")
-    let owner: String
+private struct GeneratedNotes {
+    @Guide(description: "A short, specific meeting title of at most eight words, without dates or the word meeting")
+    let title: String
+    @Guide(description: "At most two short sentences on what the meeting covered and concluded")
+    let summary: String
 }
 
 @available(macOS 26.0, *)
 @Generable
-private struct GeneratedNotes {
+private struct GeneratedTitle {
     @Guide(description: "A short, specific meeting title of at most eight words, without dates or the word meeting")
     let title: String
-    @Guide(description: "The main topics discussed and their outcomes, one short sentence each, not repeating action items", .maximumCount(5))
-    let summary: [String]
-    @Guide(description: "Every follow-up task someone agreed to do, including the recording person (You)", .maximumCount(8))
-    let actionItems: [GeneratedActionItem]
-    @Guide(description: "Decisions the participants agreed on", .maximumCount(5))
-    let decisions: [String]
 }
 
 @available(macOS 26.0, *)
-private func generate(instructions: String, prompt: String) async throws -> BridgeNotes {
+private func generate(instructions: String, prompt: String, titleOnly: Bool) async throws -> BridgeNotes {
     let model = SystemLanguageModel(
         useCase: .general,
         guardrails: .permissiveContentTransformations
     )
     let session = LanguageModelSession(model: model, instructions: instructions)
     do {
+        if titleOnly {
+            let response = try await session.respond(
+                to: prompt,
+                generating: GeneratedTitle.self,
+                options: GenerationOptions(temperature: 0.2, maximumResponseTokens: 60)
+            )
+            return BridgeNotes(title: response.content.title, summary: "")
+        }
         let response = try await session.respond(
             to: prompt,
             generating: GeneratedNotes.self,
-            options: GenerationOptions(temperature: 0.2, maximumResponseTokens: 900)
+            options: GenerationOptions(temperature: 0.2, maximumResponseTokens: 220)
         )
-        let notes = response.content
-        return BridgeNotes(
-            title: notes.title,
-            summary: notes.summary,
-            actionItems: notes.actionItems.map {
-                BridgeActionItem(task: $0.task, owner: $0.owner)
-            },
-            decisions: notes.decisions
-        )
+        return BridgeNotes(title: response.content.title, summary: response.content.summary)
     } catch LanguageModelSession.GenerationError.exceededContextWindowSize(let context) {
         throw BridgeError("\(contextWindowMarker) \(context.debugDescription)")
     }
@@ -159,6 +146,7 @@ public func hexAppleIntelligenceContextSize() -> Int {
 public func hexAppleIntelligenceNotes(
     _ instructions: UnsafePointer<CChar>?,
     _ prompt: UnsafePointer<CChar>?,
+    _ titleOnly: Bool,
     _ timeoutMs: UInt64,
     _ errorOutput: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
 ) -> UnsafeMutablePointer<CChar>? {
@@ -170,7 +158,7 @@ public func hexAppleIntelligenceNotes(
     let instructionText = String(cString: instructions)
     let promptText = String(cString: prompt)
     let result = blocking(timeout: TimeInterval(timeoutMs) / 1_000) {
-        try await generate(instructions: instructionText, prompt: promptText)
+        try await generate(instructions: instructionText, prompt: promptText, titleOnly: titleOnly)
     }
     switch result {
     case .success(let notes):

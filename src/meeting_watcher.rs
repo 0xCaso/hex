@@ -43,7 +43,8 @@ enum ControllerCommand {
 enum ControllerEvent {
     Offer(MeetingCandidate),
     Starting,
-    RecordingStarted,
+    RecordingStarted { title: String },
+    Retitled { title: String },
     Transcribing,
     CallEnded { app: String },
     Finished(Box<meeting::MeetingManifest>),
@@ -58,7 +59,7 @@ struct ActiveRecording {
     app_label: String,
     presence: CallPresence,
     stop: Arc<AtomicBool>,
-    started: Receiver<()>,
+    updates: Receiver<meeting::RecordingUpdate>,
     reported_started: bool,
     worker: JoinHandle<Result<meeting::MeetingManifest>>,
 }
@@ -68,7 +69,7 @@ struct ActiveRecording {
 pub enum MeetingMenuState {
     Idle,
     Starting,
-    Recording { started: Instant },
+    Recording { started: Instant, title: String },
     Transcribing,
 }
 
@@ -207,6 +208,8 @@ fn run_panel_preview(preview: PanelPreview) -> Result<()> {
             manifest.title = meeting::default_title(None, manifest.created_at_ms);
             manifest.notes = Some(meeting::MeetingNotes {
                 title: "Q4 launch plan and docs owners".into(),
+                summary: "The team set the Q4 launch for November 12. Docs owners are still open."
+                    .into(),
                 ..Default::default()
             });
             PanelKind::Ready(Box::new(manifest))
@@ -791,11 +794,20 @@ async fn drive_ui(
                     meeting_state = MeetingMenuState::Starting;
                     update_app_window(&ui.app_window, cx, |window, cx| window.meeting_starting(cx));
                 }
-                ControllerEvent::RecordingStarted => {
+                ControllerEvent::RecordingStarted { title } => {
                     meeting_state = MeetingMenuState::Recording {
                         started: Instant::now(),
+                        title,
                     };
                     update_app_window(&ui.app_window, cx, |window, cx| window.meeting_started(cx));
+                }
+                ControllerEvent::Retitled { title } => {
+                    if let MeetingMenuState::Recording { title: shown, .. } = &mut meeting_state {
+                        *shown = title;
+                    }
+                    update_app_window(&ui.app_window, cx, |window, cx| {
+                        window.meeting_updated_notes(cx);
+                    });
                 }
                 ControllerEvent::CallEnded { app } => {
                     close_window(offer_window.take(), cx);
@@ -986,7 +998,7 @@ fn controller_loop(
                 ControllerCommand::Record(candidate) if recording.is_none() => {
                     let stop = Arc::new(AtomicBool::new(false));
                     let worker_stop = stop.clone();
-                    let (started_sender, started) = mpsc::sync_channel(1);
+                    let (update_sender, updates) = mpsc::sync_channel(4);
                     let start = candidate.recording_start();
                     let worker_project_root = project_root.clone();
                     let worker = thread::spawn(move || {
@@ -994,7 +1006,7 @@ fn controller_loop(
                             start,
                             &worker_stop,
                             &worker_project_root,
-                            Some(started_sender),
+                            Some(update_sender),
                         )
                     });
                     let _ = events.send(ControllerEvent::Starting);
@@ -1004,7 +1016,7 @@ fn controller_loop(
                         app_label: candidate.source.label().into(),
                         presence: CallPresence::default(),
                         stop,
-                        started,
+                        updates,
                         reported_started: false,
                         worker,
                     });
@@ -1021,13 +1033,21 @@ fn controller_loop(
             }
         }
 
-        if let Some(active) = &mut recording
-            && !active.reported_started
-            && active.started.try_recv().is_ok()
-        {
-            active.reported_started = true;
-            if !active.stop.load(Ordering::Relaxed) {
-                let _ = events.send(ControllerEvent::RecordingStarted);
+        if let Some(active) = &mut recording {
+            for update in active.updates.try_iter() {
+                match update {
+                    meeting::RecordingUpdate::Started { title } => {
+                        active.reported_started = true;
+                        active.title = title.clone();
+                        if !active.stop.load(Ordering::Relaxed) {
+                            let _ = events.send(ControllerEvent::RecordingStarted { title });
+                        }
+                    }
+                    meeting::RecordingUpdate::Retitled { title } => {
+                        active.title = title.clone();
+                        let _ = events.send(ControllerEvent::Retitled { title });
+                    }
+                }
             }
         }
 
@@ -1332,10 +1352,16 @@ impl Render for MeetingPanel {
                 let reveal_path = path.clone();
                 let copy_path = path.clone();
                 let entity = cx.entity();
+                let summary = manifest
+                    .notes
+                    .as_ref()
+                    .map(|notes| notes.summary.trim().to_string())
+                    .filter(|summary| !summary.is_empty());
                 let subtitle = match (&path, &manifest.export_error) {
                     _ if meeting::notes_in_progress(&manifest.id) => {
-                        "Writing notes with Apple Intelligence…".into()
+                        "Summarizing with Apple Intelligence…".into()
                     }
+                    _ if summary.is_some() => summary.unwrap_or_default(),
                     (Some(path), _) => path
                         .file_name()
                         .map(|name| name.to_string_lossy().to_string())
@@ -1343,9 +1369,11 @@ impl Render for MeetingPanel {
                     (None, Some(error)) => format!("Markdown not saved: {error}"),
                     (None, None) => "Saved in Meetings".into(),
                 };
-                let title = match &manifest.notes {
-                    Some(_) => format!("Ready · {}", meeting::display_title(manifest)),
-                    None => "Meeting transcript ready".into(),
+                let title = meeting::display_title(manifest);
+                let title = if title == manifest.title && manifest.notes.is_none() {
+                    "Meeting transcript ready".into()
+                } else {
+                    format!("Ready · {title}")
                 };
                 (
                     rgb(0x5ac46a),

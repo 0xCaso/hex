@@ -14,6 +14,7 @@ unsafe extern "C" {
     fn hex_apple_intelligence_notes(
         instructions: *const c_char,
         prompt: *const c_char,
+        title_only: bool,
         timeout_ms: u64,
         error: *mut *mut c_char,
     ) -> *mut c_char;
@@ -52,7 +53,7 @@ impl Availability {
     /// One line for the Meetings settings row.
     pub fn description(self) -> &'static str {
         match self {
-            Self::Available => "Titles, summaries, and action items, written on this Mac",
+            Self::Available => "Meeting titles and short summaries, written on this Mac",
             Self::DeviceNotEligible => "This Mac does not support Apple Intelligence",
             Self::AppleIntelligenceNotEnabled => {
                 "Turn on Apple Intelligence in System Settings to use this"
@@ -87,18 +88,10 @@ pub fn context_tokens() -> usize {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct GeneratedNotes {
     pub title: String,
-    pub summary: Vec<String>,
-    pub action_items: Vec<GeneratedActionItem>,
-    pub decisions: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-pub struct GeneratedActionItem {
-    pub task: String,
-    pub owner: String,
+    #[serde(default)]
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,11 +110,30 @@ impl std::fmt::Display for GenerationError {
     }
 }
 
-/// Generates structured meeting notes with guided generation. Blocks the
-/// calling thread for at most `timeout`; the bridge runs at utility priority.
+/// Generates a meeting title and short summary with guided generation.
+/// Blocks the calling thread for at most `timeout`; the bridge runs at
+/// utility priority.
 pub fn generate_notes(
     instructions: &str,
     prompt: &str,
+    timeout: Duration,
+) -> Result<GeneratedNotes, GenerationError> {
+    generate(instructions, prompt, false, timeout)
+}
+
+/// Generates only a meeting title, which needs far fewer output tokens.
+pub fn generate_title(
+    instructions: &str,
+    prompt: &str,
+    timeout: Duration,
+) -> Result<String, GenerationError> {
+    generate(instructions, prompt, true, timeout).map(|notes| notes.title)
+}
+
+fn generate(
+    instructions: &str,
+    prompt: &str,
+    title_only: bool,
     timeout: Duration,
 ) -> Result<GeneratedNotes, GenerationError> {
     let instructions =
@@ -134,6 +146,7 @@ pub fn generate_notes(
         hex_apple_intelligence_notes(
             instructions.as_ptr(),
             prompt.as_ptr(),
+            title_only,
             timeout.as_millis().min(u64::MAX as u128) as u64,
             &mut error,
         )

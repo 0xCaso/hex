@@ -29,9 +29,7 @@ mod notes;
 pub mod query;
 #[path = "meeting_transcript.rs"]
 mod transcript;
-pub use notes::{
-    ActionItem, MeetingNotes, display_title, notes_in_progress, notes_wanted, spawn_summary,
-};
+pub use notes::{MeetingNotes, display_title, notes_in_progress, notes_wanted, spawn_summary};
 #[cfg(debug_assertions)]
 pub use notes::{summarize, summarize_file};
 
@@ -42,6 +40,15 @@ pub struct MeetingStart {
     pub title: Option<String>,
     /// The detected call application, such as `Zoom`.
     pub app: Option<String>,
+}
+
+/// What the recorder reports to its owner while it runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordingUpdate {
+    /// Capture started; the title is the one the meeting shows.
+    Started { title: String },
+    /// A provisional title from the transcript so far.
+    Retitled { title: String },
 }
 
 pub fn default_title(app: Option<&str>, created_at_ms: u64) -> String {
@@ -124,6 +131,10 @@ pub struct MeetingManifest {
     pub export_error: Option<String>,
     #[serde(default)]
     pub echo_suppressed_utterances: u64,
+    /// A title generated from the transcript while recording; shown only
+    /// while `title` is the default and no notes title exists.
+    #[serde(default)]
+    pub provisional_title: Option<String>,
     /// Apple Intelligence notes generated after final publication.
     #[serde(default)]
     pub notes: Option<MeetingNotes>,
@@ -264,7 +275,7 @@ pub fn record(
     start: MeetingStart,
     shutdown: &AtomicBool,
     project_root: &Path,
-    started_sender: Option<SyncSender<()>>,
+    updates: Option<SyncSender<RecordingUpdate>>,
 ) -> Result<MeetingManifest> {
     let (_, transcription_selection) = crate::app_settings::transcription_selection();
     let transcription_model = crate::transcription_models::validate(&transcription_selection)?;
@@ -313,6 +324,7 @@ pub fn record(
         export_path: None,
         export_error: None,
         echo_suppressed_utterances: 0,
+        provisional_title: None,
         notes: None,
         notes_error: None,
     };
@@ -442,11 +454,14 @@ pub fn record(
             cleanup_failed_setup(Some(stream), sender, writer, live_worker);
             return Err(error);
         }
-        if let Some(started_sender) = started_sender {
-            let _ = started_sender.send(());
+        if let Some(updates) = &updates {
+            let _ = updates.send(RecordingUpdate::Started {
+                title: display_title(&manifest),
+            });
         }
 
         let started = Instant::now();
+        let titles = notes::ProvisionalTitles::start(manifest.id.clone());
         println!("Recording '{}' (Ctrl-C to stop)", manifest.title);
         while !shutdown.load(Ordering::Relaxed)
             && stream_error
@@ -455,8 +470,15 @@ pub fn record(
                 .is_none()
             && !writer.is_finished()
         {
+            if let Some(title) = titles.take() {
+                record_provisional_title(&meeting_dir, &mut manifest, title, updates.as_ref());
+            }
             thread::sleep(Duration::from_millis(100));
         }
+        if let Some(title) = titles.take() {
+            record_provisional_title(&meeting_dir, &mut manifest, title, updates.as_ref());
+        }
+        drop(titles);
         let stop_result = stream.stop_capture();
         drop(stream);
         drop(sender);
@@ -521,6 +543,24 @@ pub fn record(
         persist_meeting_failure(&meeting_dir, error);
     }
     result
+}
+
+fn record_provisional_title(
+    directory: &Path,
+    manifest: &mut MeetingManifest,
+    title: String,
+    updates: Option<&SyncSender<RecordingUpdate>>,
+) {
+    manifest.provisional_title = Some(title);
+    if let Err(error) = write_manifest(directory, manifest) {
+        tracing::warn!(%error, meeting = manifest.id, "could not record provisional meeting title");
+        return;
+    }
+    if let Some(updates) = updates {
+        let _ = updates.try_send(RecordingUpdate::Retitled {
+            title: display_title(manifest),
+        });
+    }
 }
 
 fn join_capture_workers(
@@ -858,7 +898,7 @@ fn transcribe(
     let mut markdown = BufWriter::new(File::create(&markdown_temporary)?);
     set_owner_only(&ndjson_temporary, false)?;
     set_owner_only(&markdown_temporary, false)?;
-    writeln!(markdown, "# {}\n", manifest.title)?;
+    writeln!(markdown, "# {}\n", display_title(manifest))?;
     for entry in &transcript {
         serde_json::to_writer(&mut ndjson, entry)?;
         ndjson.write_all(b"\n")?;
@@ -1004,7 +1044,7 @@ pub fn day_label(milliseconds: u64, now_ms: u64) -> String {
 pub fn notes_markdown(notes: &MeetingNotes) -> String {
     notes::render_notes_block(notes)
         .lines()
-        .filter(|line| !line.starts_with("<!--") && !line.starts_with("_Notes written"))
+        .filter(|line| !line.starts_with("<!--") && !line.starts_with("_Written on this Mac"))
         .collect::<Vec<_>>()
         .join("\n")
         .trim()

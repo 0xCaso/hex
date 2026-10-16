@@ -415,7 +415,7 @@ impl Library {
             if meeting.in_progress {
                 let _ = writeln!(
                     output,
-                    "No notes yet: the meeting is still {}. HEX writes notes after it is transcribed.",
+                    "No notes yet: the meeting is still {}. HEX writes a title and summary after it is transcribed.",
                     status_name(meeting.status)
                 );
             } else {
@@ -435,41 +435,31 @@ impl Library {
         };
         let _ = writeln!(
             output,
-            "Apple Intelligence notes, generated {}{}",
+            "Apple Intelligence title and summary, generated {}{}",
             iso_local(notes.generated_at_ms),
-            if notes.chunks < notes.total_chunks {
-                format!(
-                    " from {} of {} transcript chunks (sampled)",
-                    notes.chunks, notes.total_chunks
-                )
+            if notes.excerpted() {
+                " from an excerpt of the transcript"
             } else {
-                String::new()
+                ""
             }
         );
         if !notes.title.trim().is_empty() {
             let _ = writeln!(output, "Title: {}", notes.title.trim());
         }
-        let _ = writeln!(output, "\nSummary:");
-        write_list(&mut output, notes.summary.iter().map(String::as_str));
-        let _ = writeln!(output, "\nAction items:");
-        if notes.action_items.is_empty() {
-            let _ = writeln!(output, "- (none)");
-        }
-        for item in &notes.action_items {
-            match item.owner.as_deref().map(str::trim) {
-                Some(owner) if !owner.is_empty() => {
-                    let _ = writeln!(output, "- [{owner}] {}", item.task.trim());
-                }
-                _ => {
-                    let _ = writeln!(output, "- {}", item.task.trim());
-                }
-            }
-        }
-        let _ = writeln!(output, "\nDecisions:");
-        write_list(&mut output, notes.decisions.iter().map(String::as_str));
+        let summary = notes.summary.trim();
         let _ = writeln!(
             output,
-            "\nNotes are model-written and may be wrong; verify with get_transcript."
+            "Summary: {}",
+            if summary.is_empty() {
+                "(none)"
+            } else {
+                summary
+            }
+        );
+        let _ = writeln!(
+            output,
+            "\nThis is only a short model-written overview and may be wrong. Read the transcript \
+with get_transcript or search_transcripts for details, decisions, and action items."
         );
         Ok(output)
     }
@@ -503,17 +493,6 @@ impl Library {
             transcript_markdown(&meeting.entries)
         );
         Ok(output)
-    }
-}
-
-fn write_list<'a>(output: &mut String, items: impl Iterator<Item = &'a str>) {
-    let mut empty = true;
-    for item in items {
-        empty = false;
-        let _ = writeln!(output, "- {}", item.trim());
-    }
-    if empty {
-        let _ = writeln!(output, "- (none)");
     }
 }
 
@@ -688,17 +667,7 @@ fn passages(manifest: &MeetingManifest, entries: &[TranscriptEntry]) -> Vec<Pass
         .map(|(source, start, _, _, text)| Passage::new(PassageKind::Speech(source), start, text))
         .collect::<Vec<_>>();
     if let Some(notes) = &manifest.notes {
-        let mut text = notes.title.trim().to_string();
-        for line in notes
-            .summary
-            .iter()
-            .chain(notes.decisions.iter())
-            .map(String::as_str)
-            .chain(notes.action_items.iter().map(|item| item.task.as_str()))
-        {
-            text.push_str(". ");
-            text.push_str(line.trim());
-        }
+        let text = format!("{}. {}", notes.title.trim(), notes.summary.trim());
         passages.push(Passage::new(PassageKind::Notes, 0, text));
     }
     passages

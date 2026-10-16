@@ -323,6 +323,7 @@ fn capture_failures_are_persisted_instead_of_looking_interrupted() {
         export_path: None,
         export_error: None,
         echo_suppressed_utterances: 0,
+        provisional_title: None,
         notes: None,
         notes_error: None,
     };

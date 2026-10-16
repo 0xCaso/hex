@@ -171,9 +171,10 @@ substitute for source inspection or a second roadmap.
   byte-offset transcript tailing, and the echo-filtered live view.
 - `meeting_echo`: 20 ms energy envelopes of both tracks and the signal-level
   bleed/local classification of microphone segments.
-- `meeting_notes`: post-publication map/reduce meeting notes (title, summary,
-  action items, decisions) with bounded chunks and deadline, manifest storage,
-  and marker-delimited in-place Markdown updates.
+- `meeting_notes`: a bounded provisional title while recording, then one
+  post-publication call over a bounded transcript excerpt for the final title
+  and a two-sentence summary, with deadline, manifest storage, and
+  marker-delimited in-place Markdown updates.
 - `meeting_query`: read-only meeting queries for agents (`meeting::query`):
   lock-aware listing, in-memory BM25 full-text search with stemming and fuzzy
   matching, transcript paging, stored notes, and Markdown rendering. It never

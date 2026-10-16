@@ -1159,7 +1159,7 @@ impl LocalTime {
 
 pub(super) fn render_markdown(manifest: &MeetingManifest, entries: &[TranscriptEntry]) -> String {
     let started = LocalTime::from_ms(manifest.created_at_ms);
-    let mut markdown = format!("# {}\n\n", manifest.title.trim());
+    let mut markdown = format!("# {}\n\n", super::display_title(manifest).trim());
     markdown.push_str(&format!(
         "- **Date:** {}, {}\n",
         started.date(),
@@ -1217,7 +1217,7 @@ pub(super) fn export_markdown(
     let stem = format!(
         "{} {}",
         LocalTime::from_ms(manifest.created_at_ms).file_stamp(),
-        file_title(&manifest.title)
+        file_title(&super::display_title(manifest))
     );
     let path = (1..=100)
         .map(|attempt| {

@@ -1,106 +1,133 @@
-//! Meeting notes from Apple's on-device model: a title, summary, action items,
-//! and decisions generated after final publication, stored in the manifest,
-//! and written into the user's Markdown copy.
+//! Meeting titles and short summaries from Apple's on-device model. A
+//! provisional title is written while the meeting records; after final
+//! publication one call over a bounded excerpt writes the final title and a
+//! summary of at most two sentences. Agents read the transcript for detail.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
-    MeetingManifest, MeetingStatus, TranscriptEntry, TranscriptPublication, coalesce_transcript,
-    format_duration, read_manifest, root, sync_directory, write_manifest,
+    MeetingManifest, MeetingStatus, TranscriptEntry, TranscriptPublication, TranscriptReader,
+    coalesce_transcript, format_duration, read_manifest, root, sync_directory, write_manifest,
 };
 use crate::apple_intelligence::{self, GeneratedNotes, GenerationError};
 use crate::events::now_ms;
 
 /// Room left in the context for instructions, the schema, and the response.
-const RESERVED_TOKENS: usize = 1_800;
+const RESERVED_TOKENS: usize = 1_000;
 const MIN_USABLE_TOKENS: usize = 1_000;
 /// Conservative for English speech, which averages about four per token.
 const CHARS_PER_TOKEN: usize = 3;
 const FALLBACK_CONTEXT_TOKENS: usize = 4_096;
-/// Longer transcripts are sampled evenly down to this many chunks.
-const MAX_CHUNKS: usize = 12;
-const TOTAL_DEADLINE: Duration = Duration::from_secs(4 * 60);
-const CALL_TIMEOUT: Duration = Duration::from_secs(90);
+/// Prompt size bounds latency more than the context does: about 3,000
+/// tokens of transcript keeps one call near four seconds on an M2 Max.
+const FINAL_EXCERPT_CHARS: usize = 12_000;
+const TITLE_EXCERPT_CHARS: usize = 5_000;
+/// Long turns are split so a monologue can still be sampled.
+const LINE_CHARS: usize = 600;
+const GAP_MARKER: &str = "[…]";
+const TOTAL_DEADLINE: Duration = Duration::from_secs(90);
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+const TITLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DICTATION_WAIT: Duration = Duration::from_secs(30);
 const MAX_TITLE_WORDS: usize = 8;
-const MAX_SUMMARY: usize = 5;
-const MAX_ACTION_ITEMS: usize = 12;
-const MAX_DECISIONS: usize = 5;
+const MAX_SUMMARY_SENTENCES: usize = 2;
+const MAX_SUMMARY_CHARS: usize = 400;
+
+/// Provisional titles: the first once the opening has enough speech, one
+/// refresh ten minutes in, and at most three attempts in all.
+const TITLE_SPEECH_MS: u64 = 90_000;
+const TITLE_WORDS: usize = 600;
+const MIN_TITLE_WORDS: usize = 60;
+const TITLE_REFRESH_MS: u64 = 10 * 60_000;
+const TITLE_RETRY_MS: u64 = 60_000;
+const MAX_TITLE_ATTEMPTS: u8 = 3;
+const TITLE_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(super) const NOTES_START: &str = "<!-- hex:notes -->";
 pub(super) const NOTES_END: &str = "<!-- /hex:notes -->";
 
-const MAP_INSTRUCTIONS: &str = "You write concise, factual notes from a meeting transcript. \
-Each line starts with a timestamp and a speaker label: You is the person who recorded the \
-meeting, and Them is one or more other participants. Use only what the transcript says. \
-The summary covers the topics discussed and their outcomes; do not repeat action items there. \
-List every task someone agreed to do as an action item, including tasks You agreed to do. \
-Write each task as a short imperative without the owner's name. Set the owner to You when the \
-recording person committed to it, to a name only when that name was stated, and otherwise \
-leave it empty. Never invent names, dates, or numbers.";
+const NOTES_INSTRUCTIONS: &str = "You title and summarize meeting transcripts. Each line starts \
+with a timestamp and a speaker label: You is the person who recorded the meeting, and Them is \
+one or more other participants. A long meeting is excerpted, and […] marks skipped parts. Write \
+one short, specific title for the whole meeting and a summary of at most two short sentences \
+on the main topics and outcomes. Use only what the transcript says; never invent names, dates, \
+or numbers.";
 
-const REDUCE_INSTRUCTIONS: &str = "You merge notes from consecutive parts of one meeting into \
-final notes for the whole meeting. Write one short title for the whole meeting. The summary \
-covers the main topics and their outcomes in at most five short sentences, without repeating \
-action items. Keep every distinct decision as one short sentence. Combine duplicates and use \
-only what the notes say.";
+const TITLE_INSTRUCTIONS: &str = "You name meetings from the first part of their transcript. \
+Each line starts with a timestamp and a speaker label: You is the person who recorded the \
+meeting, and Them is one or more other participants. Write one short, specific title naming \
+the main topic. Use only what the transcript says.";
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MeetingNotes {
     pub title: String,
-    pub summary: Vec<String>,
-    pub action_items: Vec<ActionItem>,
-    pub decisions: Vec<String>,
-    pub generated_at_ms: u64,
-    pub elapsed_ms: u64,
-    /// Transcript chunks summarized; fewer than `total_chunks` when a long
-    /// meeting was sampled.
-    pub chunks: usize,
-    pub total_chunks: usize,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ActionItem {
-    pub task: String,
+    /// At most two sentences. Older manifests stored a list of points, and
+    /// action items and decisions, which are read as joined text or ignored.
+    #[serde(default, deserialize_with = "summary_text")]
+    pub summary: String,
     #[serde(default)]
-    pub owner: Option<String>,
+    pub generated_at_ms: u64,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    /// Transcript characters in the prompt; fewer than `transcript_chars`
+    /// when a long meeting was excerpted.
+    #[serde(default)]
+    pub excerpt_chars: usize,
+    #[serde(default)]
+    pub transcript_chars: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct Budget {
-    pub chunk_chars: usize,
-    pub max_chunks: usize,
-}
-
-impl Budget {
-    pub(super) fn for_context(tokens: usize) -> Self {
-        let tokens = if tokens == 0 {
-            FALLBACK_CONTEXT_TOKENS
-        } else {
-            tokens
-        };
-        Self {
-            chunk_chars: tokens
-                .saturating_sub(RESERVED_TOKENS)
-                .max(MIN_USABLE_TOKENS)
-                * CHARS_PER_TOKEN,
-            max_chunks: MAX_CHUNKS,
-        }
+impl MeetingNotes {
+    pub fn excerpted(&self) -> bool {
+        self.excerpt_chars < self.transcript_chars
     }
 }
 
-/// Renders coalesced turns as labeled lines packed into chunks of at most
-/// `chunk_chars`. A turn longer than one chunk is split at word boundaries.
-pub(super) fn transcript_chunks(entries: &[TranscriptEntry], chunk_chars: usize) -> Vec<String> {
-    let chunk_chars = chunk_chars.max(80);
+fn summary_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Summary {
+        Text(String),
+        Points(Vec<String>),
+    }
+    Ok(match Option::<Summary>::deserialize(deserializer)? {
+        Some(Summary::Text(text)) => text,
+        Some(Summary::Points(points)) => points
+            .iter()
+            .map(|point| point.trim())
+            .filter(|point| !point.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => String::new(),
+    })
+}
+
+/// Characters of transcript one prompt may carry for a context window.
+pub(super) fn excerpt_budget(context_tokens: usize, cap: usize) -> usize {
+    let tokens = if context_tokens == 0 {
+        FALLBACK_CONTEXT_TOKENS
+    } else {
+        context_tokens
+    };
+    (tokens
+        .saturating_sub(RESERVED_TOKENS)
+        .max(MIN_USABLE_TOKENS)
+        * CHARS_PER_TOKEN)
+        .min(cap)
+}
+
+/// Coalesced turns as `[mm:ss] You: text` lines, split at word boundaries
+/// so no line exceeds `LINE_CHARS`.
+fn transcript_lines(entries: &[TranscriptEntry]) -> Vec<String> {
     let mut lines = Vec::new();
     for turn in coalesce_transcript(entries.iter().cloned()) {
         let prefix = format!(
@@ -110,7 +137,7 @@ pub(super) fn transcript_chunks(entries: &[TranscriptEntry], chunk_chars: usize)
         );
         let mut line = prefix.clone();
         for word in turn.text.split_whitespace() {
-            if line.len() > prefix.len() && line.len() + 1 + word.len() > chunk_chars {
+            if line.len() > prefix.len() && line.len() + 1 + word.len() > LINE_CHARS {
                 lines.push(std::mem::replace(&mut line, prefix.clone()));
             }
             if line.len() > prefix.len() {
@@ -122,255 +149,132 @@ pub(super) fn transcript_chunks(entries: &[TranscriptEntry], chunk_chars: usize)
             lines.push(line);
         }
     }
-    pack(lines, chunk_chars)
+    lines
 }
 
-fn pack(lines: Vec<String>, chunk_chars: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut chunk = String::new();
-    for line in lines {
-        if !chunk.is_empty() && chunk.len() + 1 + line.len() > chunk_chars {
-            chunks.push(std::mem::take(&mut chunk));
-        }
-        if !chunk.is_empty() {
-            chunk.push('\n');
-        }
-        chunk.push_str(&line);
-    }
-    if !chunk.is_empty() {
-        chunks.push(chunk);
-    }
-    chunks
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct Excerpt {
+    pub text: String,
+    pub transcript_chars: usize,
 }
 
-/// Keeps at most `max` chunks, evenly spaced across the meeting.
-pub(super) fn sample_chunks(chunks: Vec<String>, max: usize) -> Vec<String> {
-    let total = chunks.len();
-    if total <= max || max == 0 {
-        return chunks;
+/// The whole transcript when it fits in `max_chars`; otherwise the opening,
+/// evenly spaced passages from the middle, and the ending, with `[…]` where
+/// lines were skipped.
+pub(super) fn excerpt(entries: &[TranscriptEntry], max_chars: usize) -> Excerpt {
+    let lines = transcript_lines(entries);
+    let size = |range: std::ops::Range<usize>| -> usize {
+        lines[range.clone()].iter().map(String::len).sum::<usize>() + range.len().saturating_sub(1)
+    };
+    let transcript_chars = size(0..lines.len());
+    if transcript_chars <= max_chars {
+        return Excerpt {
+            text: lines.join("\n"),
+            transcript_chars,
+        };
     }
-    let keep = (0..max)
-        .map(|index| index * total / max)
-        .collect::<BTreeSet<_>>();
-    chunks
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, chunk)| keep.contains(&index).then_some(chunk))
-        .collect()
+    // Each window may cost a gap marker and two newlines.
+    let gap = GAP_MARKER.len() + 2;
+    let windows = (max_chars / 2_000).clamp(1, 6);
+    let usable = max_chars.saturating_sub((windows + 1) * gap);
+    let take_forward = |start: usize, end: usize, budget: usize| {
+        let mut stop = start;
+        let mut used = 0;
+        while stop < end && used + lines[stop].len() < budget {
+            used += lines[stop].len() + 1;
+            stop += 1;
+        }
+        stop
+    };
+    let head_end = take_forward(0, lines.len(), usable * 3 / 10);
+    let mut tail_start = lines.len();
+    let mut used = 0;
+    while tail_start > head_end && used + lines[tail_start - 1].len() < usable / 5 {
+        used += lines[tail_start - 1].len() + 1;
+        tail_start -= 1;
+    }
+    let mut ranges = Vec::with_capacity(windows + 2);
+    ranges.push(0..head_end);
+    let middle = tail_start.saturating_sub(head_end);
+    let window_budget = (usable - usable * 3 / 10 - usable / 5) / windows;
+    for index in 0..windows {
+        let center = head_end + (2 * index + 1) * middle / (2 * windows);
+        let start = center.max(ranges.last().map_or(0, |range| range.end));
+        let end = take_forward(start, tail_start, window_budget);
+        if end > start {
+            ranges.push(start..end);
+        }
+    }
+    ranges.push(tail_start..lines.len());
+
+    let mut text = String::new();
+    let mut previous_end = 0;
+    for range in ranges.into_iter().filter(|range| !range.is_empty()) {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        if range.start > previous_end {
+            text.push_str(GAP_MARKER);
+            text.push('\n');
+        }
+        text.push_str(&lines[range.clone()].join("\n"));
+        previous_end = range.end;
+    }
+    if previous_end < lines.len() {
+        text.push('\n');
+        text.push_str(GAP_MARKER);
+    }
+    Excerpt {
+        text,
+        transcript_chars,
+    }
 }
 
 pub(super) struct Summary {
     pub notes: GeneratedNotes,
-    pub chunks: usize,
-    pub total_chunks: usize,
+    pub excerpt_chars: usize,
+    pub transcript_chars: usize,
     pub calls: usize,
 }
 
-/// Map each chunk to partial notes, then reduce them in batches that fit
-/// one chunk until one set remains. A chunk that still exceeds the context is
-/// split in half once. Every call receives the time left before `deadline`.
+/// One call over a bounded excerpt. A prompt that still exceeds the context
+/// is retried once with half the excerpt; every call receives the time left
+/// before `deadline`.
 pub(super) fn summarize_entries(
     entries: &[TranscriptEntry],
-    budget: Budget,
+    max_chars: usize,
     deadline: Instant,
     mut generate: impl FnMut(&str, &str, Duration) -> Result<GeneratedNotes, GenerationError>,
 ) -> Result<Summary> {
-    let all_chunks = transcript_chunks(entries, budget.chunk_chars);
-    if all_chunks.is_empty() {
-        return Err(eyre!("the transcript has no speech to summarize"));
-    }
-    let total_chunks = all_chunks.len();
-    let chunks = sample_chunks(all_chunks, budget.max_chunks);
-    let chunk_count = chunks.len();
+    let mut max_chars = max_chars;
     let mut calls = 0;
-    let mut call = |instructions: &str, prompt: &str| {
+    loop {
+        let excerpt = excerpt(entries, max_chars);
+        if excerpt.text.is_empty() {
+            return Err(eyre!("the transcript has no speech to summarize"));
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(GenerationError::Failed(
-                "Apple Intelligence did not finish in time".into(),
-            ));
+            return Err(eyre!("Apple Intelligence did not finish in time"));
         }
         calls += 1;
-        generate(instructions, prompt, remaining.min(CALL_TIMEOUT))
-    };
-
-    let mut partials = Vec::new();
-    for (index, chunk) in chunks.iter().enumerate() {
-        let prompt = map_prompt(chunk, index, chunk_count);
-        match call(MAP_INSTRUCTIONS, &prompt) {
-            Ok(notes) => partials.push(normalize(notes)),
-            Err(GenerationError::ContextWindow) => {
-                let (first, second) = split_chunk(chunk);
-                for half in [first, second].into_iter().filter(|half| !half.is_empty()) {
-                    let notes = call(MAP_INSTRUCTIONS, &map_prompt(&half, index, chunk_count))
-                        .map_err(|error| eyre!("{error}"))?;
-                    partials.push(normalize(notes));
-                }
+        let prompt = format!("Meeting transcript:\n\n{}", excerpt.text);
+        match generate(NOTES_INSTRUCTIONS, &prompt, remaining.min(CALL_TIMEOUT)) {
+            Ok(notes) => {
+                return Ok(Summary {
+                    notes: GeneratedNotes {
+                        title: clean_title(&notes.title),
+                        summary: clean_summary(&notes.summary),
+                    },
+                    excerpt_chars: excerpt.text.len(),
+                    transcript_chars: excerpt.transcript_chars,
+                    calls,
+                });
             }
+            Err(GenerationError::ContextWindow) if calls == 1 => max_chars /= 2,
             Err(error) => return Err(eyre!("{error}")),
         }
     }
-
-    while partials.len() > 1 {
-        let mut merged = Vec::new();
-        for batch in reduce_batches(&partials, budget.chunk_chars) {
-            if batch.len() == 1 {
-                merged.push(batch[0].clone());
-                continue;
-            }
-            match call(REDUCE_INSTRUCTIONS, &reduce_prompt(batch)) {
-                // The model drops tasks when merging many parts; keep every
-                // partial action item instead.
-                Ok(notes) => merged.push(normalize(GeneratedNotes {
-                    action_items: merged_action_items(batch),
-                    ..notes
-                })),
-                Err(GenerationError::ContextWindow) => merged.push(merge_mechanically(batch)),
-                Err(error) => return Err(eyre!("{error}")),
-            }
-        }
-        partials = merged;
-    }
-    Ok(Summary {
-        notes: partials.pop().unwrap_or_default(),
-        chunks: chunk_count,
-        total_chunks,
-        calls,
-    })
-}
-
-fn map_prompt(chunk: &str, index: usize, count: usize) -> String {
-    if count == 1 {
-        format!("Meeting transcript:\n\n{chunk}")
-    } else {
-        format!(
-            "Meeting transcript, part {} of {count}:\n\n{chunk}",
-            index + 1
-        )
-    }
-}
-
-fn split_chunk(chunk: &str) -> (String, String) {
-    let lines = chunk.lines().collect::<Vec<_>>();
-    if lines.len() > 1 {
-        let middle = lines.len() / 2;
-        return (lines[..middle].join("\n"), lines[middle..].join("\n"));
-    }
-    let middle = chunk.len() / 2;
-    let split = chunk[..middle]
-        .rfind(char::is_whitespace)
-        .or_else(|| {
-            chunk
-                .char_indices()
-                .map(|(index, _)| index)
-                .find(|i| *i >= middle)
-        })
-        .unwrap_or(chunk.len());
-    (chunk[..split].trim().into(), chunk[split..].trim().into())
-}
-
-/// Groups consecutive partials so each batch fits one chunk, with at least
-/// two per batch so every round makes progress.
-fn reduce_batches(partials: &[GeneratedNotes], chunk_chars: usize) -> Vec<&[GeneratedNotes]> {
-    let mut batches = Vec::new();
-    let mut start = 0;
-    while start < partials.len() {
-        let mut end = start;
-        let mut chars = 0;
-        while end < partials.len() {
-            let size = render_partial(&partials[end], end - start).len();
-            if end - start >= 2 && chars + size > chunk_chars {
-                break;
-            }
-            chars += size;
-            end += 1;
-        }
-        batches.push(&partials[start..end]);
-        start = end;
-    }
-    batches
-}
-
-fn render_partial(notes: &GeneratedNotes, index: usize) -> String {
-    let mut text = format!("Part {} notes\nTitle: {}\n", index + 1, notes.title);
-    let mut section = |label: &str, items: Vec<String>| {
-        if !items.is_empty() {
-            text.push_str(label);
-            text.push_str(":\n");
-            for item in items {
-                text.push_str("- ");
-                text.push_str(&item);
-                text.push('\n');
-            }
-        }
-    };
-    section("Points", notes.summary.clone());
-    section(
-        "Action items",
-        notes
-            .action_items
-            .iter()
-            .map(|item| match item.owner.trim() {
-                "" => item.task.clone(),
-                owner => format!("{} (owner: {owner})", item.task),
-            })
-            .collect(),
-    );
-    section("Decisions", notes.decisions.clone());
-    text
-}
-
-fn reduce_prompt(batch: &[GeneratedNotes]) -> String {
-    let parts = batch
-        .iter()
-        .enumerate()
-        .map(|(index, notes)| render_partial(notes, index))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("Notes from consecutive parts of one meeting:\n\n{parts}")
-}
-
-fn merged_action_items(batch: &[GeneratedNotes]) -> Vec<apple_intelligence::GeneratedActionItem> {
-    batch
-        .iter()
-        .flat_map(|notes| notes.action_items.clone())
-        .collect()
-}
-
-fn merge_mechanically(batch: &[GeneratedNotes]) -> GeneratedNotes {
-    normalize(GeneratedNotes {
-        title: batch
-            .first()
-            .map(|notes| notes.title.clone())
-            .unwrap_or_default(),
-        summary: batch
-            .iter()
-            .flat_map(|notes| notes.summary.clone())
-            .collect(),
-        action_items: merged_action_items(batch),
-        decisions: batch
-            .iter()
-            .flat_map(|notes| notes.decisions.clone())
-            .collect(),
-    })
-}
-
-fn clean_item(item: &str) -> String {
-    item.trim()
-        .trim_start_matches(['-', '*', '•'])
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn clean_list(items: Vec<String>, max: usize) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    items
-        .iter()
-        .map(|item| clean_item(item))
-        .filter(|item| !item.is_empty() && seen.insert(item.to_lowercase()))
-        .take(max)
-        .collect()
 }
 
 pub(super) fn clean_title(title: &str) -> String {
@@ -384,45 +288,35 @@ pub(super) fn clean_title(title: &str) -> String {
     words.trim_end_matches(['.', ':', ';', ',']).to_string()
 }
 
-fn clean_owner(owner: &str) -> Option<String> {
-    let owner = clean_item(owner);
-    let lower = owner.to_lowercase();
-    (!owner.is_empty()
-        && ![
-            "none",
-            "n/a",
-            "na",
-            "unknown",
-            "unspecified",
-            "not stated",
-            "unassigned",
-            "tbd",
-        ]
-        .contains(&lower.as_str()))
-    .then(|| if lower == "you" { "You".into() } else { owner })
-}
-
-fn normalize(notes: GeneratedNotes) -> GeneratedNotes {
-    let mut seen = BTreeSet::new();
-    GeneratedNotes {
-        title: clean_title(&notes.title),
-        summary: clean_list(notes.summary, MAX_SUMMARY),
-        action_items: notes
-            .action_items
-            .into_iter()
-            .filter_map(|item| {
-                let task = clean_item(&item.task);
-                (!task.is_empty() && seen.insert(task.to_lowercase())).then(|| {
-                    apple_intelligence::GeneratedActionItem {
-                        task,
-                        owner: clean_owner(&item.owner).unwrap_or_default(),
-                    }
-                })
-            })
-            .take(MAX_ACTION_ITEMS)
-            .collect(),
-        decisions: clean_list(notes.decisions, MAX_DECISIONS),
+/// One paragraph of at most two sentences and `MAX_SUMMARY_CHARS`.
+fn clean_summary(summary: &str) -> String {
+    let text = summary
+        .split_whitespace()
+        .map(|word| word.trim_start_matches(['-', '*', '•']))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut end = text.len();
+    let mut sentences = 0;
+    for (index, character) in text.char_indices() {
+        if matches!(character, '.' | '!' | '?')
+            && text[index + 1..].starts_with(|next: char| next.is_whitespace())
+        {
+            sentences += 1;
+            if sentences == MAX_SUMMARY_SENTENCES {
+                end = index + 1;
+                break;
+            }
+        }
     }
+    let text = &text[..end];
+    if text.len() <= MAX_SUMMARY_CHARS {
+        return text.into();
+    }
+    let cut = text[..text.floor_char_boundary(MAX_SUMMARY_CHARS)]
+        .rfind(' ')
+        .unwrap_or(MAX_SUMMARY_CHARS);
+    format!("{}…", text[..cut].trim_end_matches([',', ';', ':']))
 }
 
 impl MeetingNotes {
@@ -430,74 +324,222 @@ impl MeetingNotes {
         Self {
             title: summary.notes.title,
             summary: summary.notes.summary,
-            action_items: summary
-                .notes
-                .action_items
-                .into_iter()
-                .map(|item| ActionItem {
-                    owner: (!item.owner.is_empty()).then_some(item.owner),
-                    task: item.task,
-                })
-                .collect(),
-            decisions: summary.notes.decisions,
             generated_at_ms: now_ms(),
             elapsed_ms: elapsed.as_millis() as u64,
-            chunks: summary.chunks,
-            total_chunks: summary.total_chunks,
+            excerpt_chars: summary.excerpt_chars,
+            transcript_chars: summary.transcript_chars,
         }
     }
 }
 
-/// The title shown for a meeting: the generated title replaces only a
-/// default app-and-time title, so a named meeting keeps its name.
+/// The title shown for a meeting. A meeting with a default app-and-time
+/// title shows its generated title, else its provisional title; a named or
+/// renamed meeting keeps its name.
 pub fn display_title(manifest: &MeetingManifest) -> String {
-    match &manifest.notes {
-        Some(notes)
-            if !notes.title.trim().is_empty()
-                && manifest.title
-                    == super::default_title(manifest.app.as_deref(), manifest.created_at_ms) =>
-        {
-            notes.title.clone()
-        }
-        _ => manifest.title.clone(),
+    if manifest.title != super::default_title(manifest.app.as_deref(), manifest.created_at_ms) {
+        return manifest.title.clone();
     }
+    manifest
+        .notes
+        .as_ref()
+        .map(|notes| notes.title.trim())
+        .filter(|title| !title.is_empty())
+        .or_else(|| {
+            manifest
+                .provisional_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+        })
+        .map_or_else(|| manifest.title.clone(), str::to_owned)
 }
 
 pub(super) fn render_notes_block(notes: &MeetingNotes) -> String {
-    let mut block = format!("{NOTES_START}\n## Summary\n\n");
-    if notes.summary.is_empty() {
-        block.push_str("_Nothing to summarize._\n");
+    let summary = notes.summary.trim();
+    format!(
+        "{NOTES_START}\n## Summary\n\n{}\n\n_Written on this Mac by Apple Intelligence; the transcript below has the details._\n{NOTES_END}\n",
+        if summary.is_empty() {
+            "_Nothing to summarize._"
+        } else {
+            summary
+        }
+    )
+}
+
+/// How far a recording has come, for deciding when to name it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct Progress {
+    /// Summed duration of transcribed speech from both sides.
+    pub speech_ms: u64,
+    pub words: usize,
+    /// The end of the latest transcribed speech.
+    pub timeline_ms: u64,
+}
+
+impl Progress {
+    pub fn of(entries: &[TranscriptEntry]) -> Self {
+        entries
+            .iter()
+            .fold(Self::default(), |progress, entry| Self {
+                speech_ms: progress.speech_ms + entry.end_ms.saturating_sub(entry.start_ms),
+                words: progress.words + entry.text.split_whitespace().count(),
+                timeline_ms: progress.timeline_ms.max(entry.end_ms),
+            })
     }
-    for point in &notes.summary {
-        block.push_str(&format!("- {point}\n"));
-    }
-    block.push_str("\n## Action items\n\n");
-    if notes.action_items.is_empty() {
-        block.push_str("_None noted._\n");
-    }
-    for item in &notes.action_items {
-        match &item.owner {
-            Some(owner) => block.push_str(&format!("- [ ] {} — **{owner}**\n", item.task)),
-            None => block.push_str(&format!("- [ ] {}\n", item.task)),
+}
+
+/// When to ask for a provisional title: once about 90 seconds of speech
+/// (or 600 words) exist, then once more ten minutes in. Failures retry a
+/// minute later, with at most three attempts in all.
+#[derive(Debug, Default)]
+pub(super) struct TitlePlan {
+    named: u8,
+    attempts: u8,
+    retry_at_ms: u64,
+}
+
+impl TitlePlan {
+    pub fn due(&self, progress: Progress) -> bool {
+        if self.attempts >= MAX_TITLE_ATTEMPTS || progress.timeline_ms < self.retry_at_ms {
+            return false;
+        }
+        match self.named {
+            0 => {
+                progress.words >= MIN_TITLE_WORDS
+                    && (progress.speech_ms >= TITLE_SPEECH_MS || progress.words >= TITLE_WORDS)
+            }
+            1 => progress.timeline_ms >= TITLE_REFRESH_MS,
+            _ => false,
         }
     }
-    block.push_str("\n## Decisions\n\n");
-    if notes.decisions.is_empty() {
-        block.push_str("_None noted._\n");
+
+    pub fn record(&mut self, named: bool, progress: Progress) {
+        self.attempts += 1;
+        if named {
+            self.named += 1;
+        } else {
+            self.retry_at_ms = progress.timeline_ms + TITLE_RETRY_MS;
+        }
     }
-    for decision in &notes.decisions {
-        block.push_str(&format!("- {decision}\n"));
+
+    pub fn finished(&self) -> bool {
+        self.named >= 2 || self.attempts >= MAX_TITLE_ATTEMPTS
     }
-    if notes.chunks < notes.total_chunks {
-        block.push_str(&format!(
-            "\n_Long meeting: notes cover {} of {} transcript sections._\n",
-            notes.chunks, notes.total_chunks
-        ));
+}
+
+/// Names a recording meeting in the background. The recorder takes each new
+/// title and records it in its manifest; dropping this stops the worker and
+/// discards a title still being generated.
+pub(super) struct ProvisionalTitles {
+    stop: Arc<AtomicBool>,
+    latest: Arc<Mutex<Option<String>>>,
+}
+
+impl ProvisionalTitles {
+    pub fn start(id: String) -> Self {
+        let titles = Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            latest: Arc::new(Mutex::new(None)),
+        };
+        let stop = titles.stop.clone();
+        let latest = titles.latest.clone();
+        if let Err(error) = thread::Builder::new()
+            .name("meeting-title".into())
+            .spawn(move || {
+                crate::parakeet::deprioritize_background_thread();
+                name_while_recording(&id, &stop, &latest);
+            })
+        {
+            tracing::warn!(%error, "could not start provisional meeting titles");
+        }
+        titles
     }
-    block.push_str("\n_Notes written on this Mac by Apple Intelligence._\n");
-    block.push_str(NOTES_END);
-    block.push('\n');
-    block
+
+    pub fn take(&self) -> Option<String> {
+        self.latest
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+}
+
+impl Drop for ProvisionalTitles {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn name_while_recording(id: &str, stop: &AtomicBool, latest: &Mutex<Option<String>>) {
+    let mut reader = TranscriptReader::default();
+    let mut plan = TitlePlan::default();
+    let mut next_check = Instant::now() + TITLE_CHECK_INTERVAL;
+    while !stop.load(Ordering::Relaxed) && !plan.finished() {
+        if Instant::now() < next_check {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+        next_check = Instant::now() + TITLE_CHECK_INTERVAL;
+        let entries = match reader.read(id) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::debug!(%error, meeting = id, "could not read the transcript for a title");
+                continue;
+            }
+        };
+        let progress = Progress::of(&entries);
+        if !plan.due(progress) || !notes_wanted() {
+            continue;
+        }
+        if !wait_for_dictation(stop) {
+            return;
+        }
+        let started = Instant::now();
+        let result = provisional_title(
+            &entries,
+            excerpt_budget(apple_intelligence::context_tokens(), TITLE_EXCERPT_CHARS),
+            TITLE_TIMEOUT,
+            apple_intelligence::generate_title,
+        );
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        match result {
+            Ok(title) => {
+                tracing::info!(
+                    meeting = id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    words = progress.words,
+                    "generated provisional meeting title"
+                );
+                *latest.lock().unwrap_or_else(|error| error.into_inner()) = Some(title);
+                plan.record(true, progress);
+            }
+            Err(error) => {
+                tracing::warn!(%error, meeting = id, "could not generate a provisional meeting title");
+                plan.record(false, progress);
+            }
+        }
+    }
+}
+
+/// One title-only call over the transcript so far.
+pub(super) fn provisional_title(
+    entries: &[TranscriptEntry],
+    max_chars: usize,
+    timeout: Duration,
+    generate: impl FnOnce(&str, &str, Duration) -> Result<String, GenerationError>,
+) -> Result<String> {
+    let excerpt = excerpt(entries, max_chars);
+    if excerpt.text.is_empty() {
+        return Err(eyre!("the transcript has no speech yet"));
+    }
+    let prompt = format!("Meeting transcript so far:\n\n{}", excerpt.text);
+    let title =
+        clean_title(&generate(TITLE_INSTRUCTIONS, &prompt, timeout).map_err(|e| eyre!("{e}"))?);
+    if title.is_empty() {
+        return Err(eyre!("Apple Intelligence returned an empty title"));
+    }
+    Ok(title)
 }
 
 /// Rewrites only HEX's parts of the Markdown: the heading when it still
@@ -647,11 +689,17 @@ pub fn notes_wanted() -> bool {
         && apple_intelligence::availability().is_available()
 }
 
-fn wait_for_dictation() {
+/// Yields to dictation for at most `DICTATION_WAIT`. Returns false when
+/// `stop` was set meanwhile.
+fn wait_for_dictation(stop: &AtomicBool) -> bool {
     let started = Instant::now();
     while crate::parakeet::dictation_busy() && started.elapsed() < DICTATION_WAIT {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
         thread::sleep(Duration::from_millis(100));
     }
+    !stop.load(Ordering::Relaxed)
 }
 
 /// Generates notes for one completed meeting with the real model and records
@@ -676,12 +724,13 @@ fn summarize_claimed(id: &str, _claim: InProgress) -> Result<MeetingManifest> {
     }
     let entries = super::completed_transcript(id, Some(TranscriptPublication::Final))?.entries;
     let started = Instant::now();
+    let never = AtomicBool::new(false);
     let result = summarize_entries(
         &entries,
-        Budget::for_context(apple_intelligence::context_tokens()),
+        excerpt_budget(apple_intelligence::context_tokens(), FINAL_EXCERPT_CHARS),
         started + TOTAL_DEADLINE,
         |instructions, prompt, timeout| {
-            wait_for_dictation();
+            wait_for_dictation(&never);
             apple_intelligence::generate_notes(instructions, prompt, timeout)
         },
     );
@@ -691,7 +740,8 @@ fn summarize_claimed(id: &str, _claim: InProgress) -> Result<MeetingManifest> {
         Ok(summary) => {
             tracing::info!(
                 meeting = id,
-                chunks = summary.chunks,
+                excerpt_chars = summary.excerpt_chars,
+                transcript_chars = summary.transcript_chars,
                 calls = summary.calls,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "generated meeting notes"
@@ -761,13 +811,27 @@ pub(super) fn entries_from_markdown(markdown: &str) -> Vec<TranscriptEntry> {
         }
     }
     entries.retain(|entry| !entry.text.is_empty());
+    // Markdown has start times only: a turn lasts until the next one, or
+    // about 150 words a minute for the last.
+    let starts = entries
+        .iter()
+        .skip(1)
+        .map(|entry| entry.start_ms)
+        .collect::<Vec<_>>();
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let spoken = entry.start_ms + entry.text.split_whitespace().count() as u64 * 400;
+        entry.end_ms = starts
+            .get(index)
+            .map_or(spoken, |next| (*next).max(entry.start_ms));
+    }
     entries
 }
 
-/// Runs the real model on a transcript file without recording anything.
-/// Debug CLI: `hex meeting summarize <path>`.
+/// Runs the real model on a transcript file without recording anything:
+/// first the provisional title at the point a recording would ask for it,
+/// then the final title and summary. Debug CLI: `hex meeting summarize <path>`.
 #[cfg(debug_assertions)]
-pub fn summarize_file(path: &Path, chunk_chars: Option<usize>) -> Result<String> {
+pub fn summarize_file(path: &Path, excerpt_chars: Option<usize>) -> Result<String> {
     let availability = apple_intelligence::availability();
     if !availability.is_available() {
         return Err(eyre!("{}", availability.description()));
@@ -776,41 +840,53 @@ pub fn summarize_file(path: &Path, chunk_chars: Option<usize>) -> Result<String>
         fs::read_to_string(path).wrap_err_with(|| format!("could not read {}", path.display()))?;
     let entries = entries_from_markdown(&text);
     let context = apple_intelligence::context_tokens();
-    let mut budget = Budget::for_context(context);
-    if let Some(chunk_chars) = chunk_chars {
-        budget.chunk_chars = chunk_chars;
-    }
+    let mut report = String::new();
+
+    let plan = TitlePlan::default();
+    let opening = (1..=entries.len())
+        .find(|count| plan.due(Progress::of(&entries[..*count])))
+        .unwrap_or(entries.len());
+    let progress = Progress::of(&entries[..opening]);
     let started = Instant::now();
-    let mut timings = Vec::new();
+    let title = provisional_title(
+        &entries[..opening],
+        excerpt_budget(context, TITLE_EXCERPT_CHARS),
+        TITLE_TIMEOUT,
+        apple_intelligence::generate_title,
+    );
+    report.push_str(&format!(
+        "provisional title at {} ({} words, {}s of speech): {} · {:.1}s\n",
+        format_duration(progress.timeline_ms),
+        progress.words,
+        progress.speech_ms / 1_000,
+        match &title {
+            Ok(title) => title.clone(),
+            Err(error) => format!("failed: {error}"),
+        },
+        started.elapsed().as_secs_f32()
+    ));
+
+    let max_chars = excerpt_chars.unwrap_or_else(|| excerpt_budget(context, FINAL_EXCERPT_CHARS));
+    let started = Instant::now();
     let summary = summarize_entries(
         &entries,
-        budget,
+        max_chars,
         started + TOTAL_DEADLINE,
-        |instructions, prompt, timeout| {
-            let call = Instant::now();
-            let result = apple_intelligence::generate_notes(instructions, prompt, timeout);
-            timings.push(format!(
-                "{} chars {:.1}s",
-                prompt.len(),
-                call.elapsed().as_secs_f32()
-            ));
-            result
-        },
+        apple_intelligence::generate_notes,
     )?;
     let elapsed = started.elapsed();
-    let chars = entries.iter().map(|entry| entry.text.len()).sum::<usize>();
+    let calls = summary.calls;
     let notes = MeetingNotes::from_summary(summary, elapsed);
-    Ok(format!(
-        "# {}\n\n{}\ncontext {context} tokens · transcript {} turns, {chars} chars · chunk budget {} chars · {} of {} chunks · calls: {}\ntotal {:.1}s\n",
+    report.push_str(&format!(
+        "\n# {}\n\n{}\ncontext {context} tokens · transcript {} turns, {} chars · excerpt {} chars (budget {max_chars}) · calls {calls}\nfinal title + summary {:.1}s\n",
         notes.title,
         render_notes_block(&notes),
         entries.len(),
-        budget.chunk_chars,
-        notes.chunks,
-        notes.total_chunks,
-        timings.join(", "),
+        notes.transcript_chars,
+        notes.excerpt_chars,
         elapsed.as_secs_f32()
-    ))
+    ));
+    Ok(report)
 }
 
 /// Summarizes on a utility-QoS thread and reports the outcome. Returns false
@@ -835,7 +911,6 @@ pub fn spawn_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apple_intelligence::GeneratedActionItem;
     use crate::meeting::MeetingSource;
 
     fn entry(source: MeetingSource, start_ms: u64, text: &str) -> TranscriptEntry {
@@ -863,149 +938,153 @@ mod tests {
             .collect()
     }
 
-    fn notes(title: &str, points: &[&str]) -> GeneratedNotes {
+    fn generated(title: &str, summary: &str) -> GeneratedNotes {
         GeneratedNotes {
             title: title.into(),
-            summary: points.iter().map(|point| point.to_string()).collect(),
-            action_items: vec![GeneratedActionItem {
-                task: format!("Follow up on {title}"),
-                owner: "none".into(),
-            }],
-            decisions: Vec::new(),
+            summary: summary.into(),
         }
     }
 
     #[test]
-    fn budget_scales_with_the_context_window() {
-        assert_eq!(Budget::for_context(4_096).chunk_chars, 2_296 * 3);
-        assert_eq!(Budget::for_context(8_192).chunk_chars, 6_392 * 3);
-        assert_eq!(Budget::for_context(0), Budget::for_context(4_096));
-        assert_eq!(Budget::for_context(1_000).chunk_chars, 3_000);
-    }
-
-    #[test]
-    fn chunks_pack_labeled_turns_and_split_long_turns() {
-        let entries = vec![
-            entry(MeetingSource::Microphone, 0, "Hello there."),
-            entry(MeetingSource::System, 5_000, &"word ".repeat(60)),
-        ];
-        let chunks = transcript_chunks(&entries, 120);
-        assert_eq!(chunks[0], "[00:00] You: Hello there.");
-        assert!(chunks.iter().all(|chunk| chunk.len() <= 120), "{chunks:?}");
-        assert!(
-            chunks[1..]
-                .iter()
-                .all(|chunk| chunk.starts_with("[00:05] Them: word"))
+    fn excerpt_budget_scales_with_the_context_window_up_to_the_cap() {
+        assert_eq!(excerpt_budget(4_096, usize::MAX), 3_096 * 3);
+        assert_eq!(
+            excerpt_budget(0, usize::MAX),
+            excerpt_budget(4_096, usize::MAX)
         );
-        let words = chunks
-            .iter()
-            .flat_map(|chunk| chunk.split_whitespace())
-            .filter(|word| *word == "word")
-            .count();
-        assert_eq!(words, 60);
+        assert_eq!(excerpt_budget(1_000, usize::MAX), 3_000);
+        assert_eq!(
+            excerpt_budget(8_192, FINAL_EXCERPT_CHARS),
+            FINAL_EXCERPT_CHARS
+        );
     }
 
     #[test]
-    fn long_meetings_are_sampled_evenly_to_the_chunk_limit() {
-        let chunks = (0..30).map(|index| index.to_string()).collect::<Vec<_>>();
-        let sampled = sample_chunks(chunks, 12);
-        assert_eq!(sampled.len(), 12);
-        assert_eq!(sampled.first().map(String::as_str), Some("0"));
-        assert_eq!(sampled.last().map(String::as_str), Some("27"));
-        assert_eq!(sample_chunks(vec!["a".into()], 12), ["a"]);
-    }
-
-    #[test]
-    fn a_short_transcript_needs_one_call() {
+    fn a_short_transcript_is_sent_whole_in_one_call() {
         let mut prompts = Vec::new();
         let summary = summarize_entries(
             &conversation(4),
-            Budget::for_context(8_192),
+            FINAL_EXCERPT_CHARS,
             Instant::now() + Duration::from_secs(60),
             |instructions, prompt, _| {
                 prompts.push((instructions.to_string(), prompt.to_string()));
-                Ok(notes("\"Launch plan review.\"", &["- Plan", "plan", ""]))
+                Ok(generated(
+                    "\"Launch plan review.\"",
+                    "- They reviewed the launch plan.  Docs move to Friday. Then more. And more.",
+                ))
             },
         )
         .unwrap();
         assert_eq!(summary.calls, 1);
-        assert_eq!(prompts[0].0, MAP_INSTRUCTIONS);
+        assert_eq!(prompts[0].0, NOTES_INSTRUCTIONS);
         assert!(
             prompts[0]
                 .1
                 .starts_with("Meeting transcript:\n\n[00:00] You: Turn 0")
         );
+        assert!(
+            prompts[0]
+                .1
+                .ends_with("[00:30] Them: Turn 3 talks about the launch plan and the docs.")
+        );
         assert_eq!(summary.notes.title, "Launch plan review");
-        assert_eq!(summary.notes.summary, ["Plan"]);
-        assert_eq!(summary.notes.action_items[0].owner, "");
+        assert_eq!(
+            summary.notes.summary,
+            "They reviewed the launch plan. Docs move to Friday."
+        );
+        assert_eq!(summary.excerpt_chars, summary.transcript_chars);
     }
 
     #[test]
-    fn chunks_map_then_reduce_into_one_set_of_notes() {
-        let mut maps = 0;
-        let mut reduce_prompts = Vec::new();
-        let summary = summarize_entries(
-            &conversation(40),
-            Budget {
-                chunk_chars: 700,
-                max_chunks: 12,
-            },
-            Instant::now() + Duration::from_secs(60),
-            |instructions, prompt, _| {
-                if instructions == MAP_INSTRUCTIONS {
-                    maps += 1;
-                    assert!(prompt.contains(" of "), "{prompt}");
-                    Ok(notes(&format!("Part {maps}"), &[&format!("Point {maps}")]))
-                } else {
-                    reduce_prompts.push(prompt.to_string());
-                    Ok(notes("Launch plan", &["Merged"]))
-                }
-            },
-        )
-        .unwrap();
-        assert!(summary.total_chunks > 2);
-        assert_eq!(maps, summary.chunks);
-        assert!(!reduce_prompts.is_empty());
-        assert!(reduce_prompts[0].contains("Part 1 notes\nTitle: Part 1\nPoints:\n- Point 1"));
-        assert!(reduce_prompts.iter().all(|prompt| prompt.len() < 2_000));
-        assert_eq!(summary.notes.title, "Launch plan");
-        assert_eq!(summary.calls, maps + reduce_prompts.len());
-        let tasks = summary
-            .notes
-            .action_items
+    fn long_meetings_are_excerpted_from_the_opening_middle_and_ending() {
+        let entries = conversation(400);
+        let excerpt = excerpt(&entries, 12_000);
+        assert!(excerpt.text.len() < excerpt.transcript_chars);
+        assert!(excerpt.text.len() <= 12_000, "{}", excerpt.text.len());
+        let lines = excerpt.text.lines().collect::<Vec<_>>();
+        assert!(
+            lines
+                .iter()
+                .all(|line| *line == GAP_MARKER || line.starts_with('['))
+        );
+        let turns = lines
             .iter()
-            .map(|item| item.task.as_str())
+            .filter_map(|line| line.split_whitespace().nth(3)?.parse::<usize>().ok())
             .collect::<Vec<_>>();
-        assert_eq!(tasks.len(), maps.min(MAX_ACTION_ITEMS));
-        assert_eq!(tasks[0], "Follow up on Part 1");
+        assert_eq!(turns.first(), Some(&0));
+        assert_eq!(turns.last(), Some(&399));
+        assert!(turns.windows(2).all(|pair| pair[0] < pair[1]));
+        // Evenly spaced passages from the middle, separated by gaps.
+        assert!(turns.iter().any(|turn| (100..200).contains(turn)));
+        assert!(turns.iter().any(|turn| (200..300).contains(turn)));
+        assert!(lines.iter().filter(|line| **line == GAP_MARKER).count() >= 3);
+
+        let whole = super::excerpt(&entries[..3], 4_000);
+        assert_eq!(whole.text.len(), whole.transcript_chars);
+        assert_eq!(whole.text.lines().count(), 3);
     }
 
     #[test]
-    fn an_oversized_chunk_is_split_once() {
-        let mut calls = 0;
+    fn long_turns_are_split_into_lines_that_can_be_sampled() {
+        let entries = vec![
+            entry(MeetingSource::Microphone, 0, "Hello there."),
+            entry(MeetingSource::System, 5_000, &"word ".repeat(400)),
+        ];
+        let lines = transcript_lines(&entries);
+        assert_eq!(lines[0], "[00:00] You: Hello there.");
+        assert!(lines.len() > 2);
+        assert!(lines.iter().all(|line| line.len() <= LINE_CHARS));
+        assert!(
+            lines[1..]
+                .iter()
+                .all(|line| line.starts_with("[00:05] Them: word"))
+        );
+        let words = lines
+            .iter()
+            .flat_map(|line| line.split_whitespace())
+            .filter(|word| *word == "word")
+            .count();
+        assert_eq!(words, 400);
+    }
+
+    #[test]
+    fn context_overflow_halves_the_excerpt_once_and_failures_stop() {
+        let mut sizes = Vec::new();
         let summary = summarize_entries(
-            &conversation(6),
-            Budget::for_context(8_192),
+            &conversation(400),
+            8_000,
             Instant::now() + Duration::from_secs(60),
-            |instructions, _, _| {
-                calls += 1;
-                match (calls, instructions == MAP_INSTRUCTIONS) {
-                    (1, true) => Err(GenerationError::ContextWindow),
-                    (_, true) => Ok(notes(&format!("Half {calls}"), &[&format!("P{calls}")])),
-                    (_, false) => Ok(notes("Merged", &["All"])),
+            |_, prompt, _| {
+                sizes.push(prompt.len());
+                if sizes.len() == 1 {
+                    Err(GenerationError::ContextWindow)
+                } else {
+                    Ok(generated("Launch", "Short."))
                 }
             },
         )
         .unwrap();
-        assert_eq!(calls, 4);
-        assert_eq!(summary.notes.title, "Merged");
-    }
+        assert_eq!(summary.calls, 2);
+        assert!(sizes[1] < sizes[0] * 2 / 3, "{sizes:?}");
 
-    #[test]
-    fn failures_and_the_deadline_stop_generation() {
+        let mut calls = 0;
         let error = summarize_entries(
             &conversation(4),
-            Budget::for_context(8_192),
+            8_000,
+            Instant::now() + Duration::from_secs(60),
+            |_, _, _| {
+                calls += 1;
+                Err(GenerationError::ContextWindow)
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(error.to_string().contains("context"), "{error}");
+
+        let error = summarize_entries(
+            &conversation(4),
+            8_000,
             Instant::now() + Duration::from_secs(60),
             |_, _, _| Err(GenerationError::Failed("model busy".into())),
         )
@@ -1014,55 +1093,101 @@ mod tests {
         assert_eq!(error.to_string(), "model busy");
 
         let mut called = false;
-        let error = summarize_entries(
-            &conversation(4),
-            Budget::for_context(8_192),
-            Instant::now(),
-            |_, _, _| {
-                called = true;
-                Ok(GeneratedNotes::default())
-            },
-        )
+        let error = summarize_entries(&conversation(4), 8_000, Instant::now(), |_, _, _| {
+            called = true;
+            Ok(GeneratedNotes::default())
+        })
         .err()
         .unwrap();
         assert!(!called);
         assert!(error.to_string().contains("in time"));
+        assert!(summarize_entries(&[], 8_000, Instant::now(), |_, _, _| unreachable!()).is_err());
+    }
+
+    #[test]
+    fn titles_and_summaries_are_normalized() {
+        assert_eq!(
+            clean_title("“One two three four five six seven eight nine ten.”"),
+            "One two three four five six seven eight"
+        );
+        assert_eq!(
+            clean_summary("Version 2.1 ships. Docs follow."),
+            "Version 2.1 ships. Docs follow."
+        );
+        assert_eq!(clean_summary("No end punctuation"), "No end punctuation");
+        let long = clean_summary(&"word ".repeat(200));
+        assert!(long.len() <= MAX_SUMMARY_CHARS + "…".len() && long.ends_with('…'));
+    }
+
+    #[test]
+    fn provisional_titles_use_the_title_prompt_over_the_transcript_so_far() {
+        let title = provisional_title(
+            &conversation(6),
+            5_000,
+            Duration::from_secs(5),
+            |instructions, prompt, _| {
+                assert_eq!(instructions, TITLE_INSTRUCTIONS);
+                assert!(prompt.starts_with("Meeting transcript so far:\n\n[00:00] You: Turn 0"));
+                Ok("**Launch plan.**".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(title, "Launch plan");
         assert!(
-            summarize_entries(&[], Budget::for_context(0), Instant::now(), |_, _, _| {
-                unreachable!()
-            })
+            provisional_title(
+                &conversation(2),
+                5_000,
+                Duration::from_secs(5),
+                |_, _, _| Ok(" ".into())
+            )
             .is_err()
         );
     }
 
     #[test]
-    fn titles_and_owners_are_normalized() {
+    fn titles_are_requested_after_the_opening_then_once_at_ten_minutes() {
+        let progress = |speech_s: u64, words: usize, timeline_s: u64| Progress {
+            speech_ms: speech_s * 1_000,
+            words,
+            timeline_ms: timeline_s * 1_000,
+        };
+        let mut plan = TitlePlan::default();
+        assert!(!plan.due(progress(60, 150, 70)));
+        assert!(!plan.due(progress(120, 30, 130)), "too few words");
+        assert!(plan.due(progress(90, 200, 100)));
+        assert!(plan.due(progress(40, 600, 50)), "600 words suffice");
+
+        plan.record(false, progress(90, 200, 100));
+        assert!(!plan.due(progress(120, 260, 150)), "retries a minute later");
+        assert!(plan.due(progress(140, 300, 160)));
+        plan.record(true, progress(140, 300, 160));
+        assert!(!plan.due(progress(500, 2_000, 599)));
+        assert!(plan.due(progress(500, 2_000, 600)));
+        plan.record(true, progress(500, 2_000, 600));
+        assert!(plan.finished());
+        assert!(!plan.due(progress(3_000, 9_000, 3_600)));
+
+        let mut failing = TitlePlan::default();
+        for minute in 0..3 {
+            failing.record(false, progress(100, 300, 100 + minute * 60));
+        }
+        assert!(failing.finished());
+
+        let entries = conversation(3);
         assert_eq!(
-            clean_title("“One two three four five six seven eight nine ten.”"),
-            "One two three four five six seven eight"
+            Progress::of(&entries),
+            Progress {
+                speech_ms: 3_000,
+                words: 30,
+                timeline_ms: 21_000
+            }
         );
-        assert_eq!(clean_owner(" you "), Some("You".into()));
-        assert_eq!(clean_owner("Not stated"), None);
-        assert_eq!(clean_owner("Dana"), Some("Dana".into()));
     }
 
     fn meeting_notes() -> MeetingNotes {
         MeetingNotes {
             title: "Launch plan review".into(),
-            summary: vec!["Ship v2 on Friday".into()],
-            action_items: vec![
-                ActionItem {
-                    task: "Write release notes".into(),
-                    owner: Some("You".into()),
-                },
-                ActionItem {
-                    task: "Update docs".into(),
-                    owner: None,
-                },
-            ],
-            decisions: Vec::new(),
-            chunks: 1,
-            total_chunks: 1,
+            summary: "They agreed to ship v2 on Friday.".into(),
             ..Default::default()
         }
     }
@@ -1072,9 +1197,8 @@ mod tests {
     #[test]
     fn notes_are_inserted_above_the_transcript_and_regenerate_idempotently() {
         let block = render_notes_block(&meeting_notes());
-        assert!(block.contains("## Summary\n\n- Ship v2 on Friday\n"));
-        assert!(block.contains("- [ ] Write release notes — **You**\n- [ ] Update docs\n"));
-        assert!(block.contains("## Decisions\n\n_None noted._\n"));
+        assert!(block.contains("## Summary\n\nThey agreed to ship v2 on Friday.\n"));
+        assert!(!block.contains("Action items") && !block.contains("Decisions"));
 
         let first = apply_notes(EXPORT, "Zoom call — 2:30 PM", "Launch plan review", &block);
         assert!(first.starts_with("# Launch plan review\n\n- **Date:**"));
@@ -1087,7 +1211,7 @@ mod tests {
 
         let mut changed = meeting_notes();
         changed.title = "Release sync".into();
-        changed.summary = vec!["Ship v2 next week".into()];
+        changed.summary = "They moved v2 to next week.".into();
         let regenerated = apply_notes(
             &first,
             "Launch plan review",
@@ -1095,8 +1219,8 @@ mod tests {
             &render_notes_block(&changed),
         );
         assert!(regenerated.starts_with("# Release sync\n"));
-        assert!(regenerated.contains("- Ship v2 next week\n"));
-        assert!(!regenerated.contains("Ship v2 on Friday"));
+        assert!(regenerated.contains("They moved v2 to next week.\n"));
+        assert!(!regenerated.contains("Friday"));
         assert_eq!(regenerated.matches(NOTES_START).count(), 1);
         assert_eq!(regenerated.matches("## Transcript").count(), 1);
     }
@@ -1117,9 +1241,8 @@ mod tests {
         assert!(appended.starts_with("# Notes\n\nSome text\n\n<!-- hex:notes -->"));
     }
 
-    #[test]
-    fn notes_title_replaces_only_default_titles() {
-        let mut manifest: MeetingManifest = serde_json::from_value(serde_json::json!({
+    fn manifest() -> MeetingManifest {
+        serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "id": "1",
             "title": "placeholder",
@@ -1131,15 +1254,44 @@ mod tests {
             "microphone": {"file": "microphone.wav", "samples": 0, "dropped_packets": 0},
             "error": null
         }))
-        .unwrap();
-        assert!(manifest.notes.is_none());
+        .unwrap()
+    }
+
+    #[test]
+    fn generated_and_provisional_titles_replace_only_default_titles() {
+        let mut manifest = manifest();
+        assert!(manifest.notes.is_none() && manifest.provisional_title.is_none());
         manifest.app = Some("Zoom".into());
         manifest.title = super::super::default_title(Some("Zoom"), manifest.created_at_ms);
         assert_eq!(display_title(&manifest), manifest.title);
+        manifest.provisional_title = Some("Launch planning".into());
+        assert_eq!(display_title(&manifest), "Launch planning");
         manifest.notes = Some(meeting_notes());
         assert_eq!(display_title(&manifest), "Launch plan review");
         manifest.title = "Design sync".into();
         assert_eq!(display_title(&manifest), "Design sync");
+    }
+
+    #[test]
+    fn older_notes_with_points_action_items_and_decisions_still_read() {
+        let notes: MeetingNotes = serde_json::from_value(serde_json::json!({
+            "title": "Scheduled sessions",
+            "summary": ["Dax proposed scheduled sessions.", " ", "They agreed to try it."],
+            "action_items": [{"task": "Write the spec", "owner": "You"}],
+            "decisions": ["Ship next week."],
+            "generated_at_ms": 1,
+            "elapsed_ms": 2,
+            "chunks": 1,
+            "total_chunks": 3
+        }))
+        .unwrap();
+        assert_eq!(
+            notes.summary,
+            "Dax proposed scheduled sessions. They agreed to try it."
+        );
+        assert!(!notes.excerpted());
+        let written = serde_json::to_value(&notes).unwrap();
+        assert!(written.get("action_items").is_none());
     }
 
     #[test]
@@ -1163,13 +1315,13 @@ mod tests {
                 TranscriptEntry {
                     source: MeetingSource::Microphone,
                     start_ms: 1_000,
-                    end_ms: 1_000,
+                    end_ms: 4_000,
                     text: "Hi.".into()
                 },
                 TranscriptEntry {
                     source: MeetingSource::System,
                     start_ms: 4_000,
-                    end_ms: 4_000,
+                    end_ms: 4_400,
                     text: "Hello.".into()
                 },
             ]
