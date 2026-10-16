@@ -306,11 +306,11 @@ fn add_item(
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct ModelMenuEntry {
-    model: TranscriptionModelId,
-    title: String,
-    selected: bool,
-    enabled: bool,
+pub(crate) struct ModelMenuEntry {
+    pub(crate) model: TranscriptionModelId,
+    pub(crate) title: String,
+    pub(crate) selected: bool,
+    pub(crate) enabled: bool,
 }
 
 fn model_from_tag(tag: isize) -> Option<TranscriptionModelId> {
@@ -320,7 +320,7 @@ fn model_from_tag(tag: isize) -> Option<TranscriptionModelId> {
         .map(|model| model.id)
 }
 
-fn model_menu_entries(
+pub(crate) fn model_menu_entries(
     settings: &AppSettings,
     preparing: bool,
     installed: impl Fn(&ModelDefinition, &str) -> bool,
@@ -380,15 +380,18 @@ pub fn update_transcription(settings: &AppSettings, status: &PreparationStatus) 
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct MeetingMenu {
-    status: Option<String>,
-    button_title: String,
-    recording: bool,
-    can_start: bool,
-    can_stop: bool,
+pub(crate) struct MeetingMenu {
+    pub(crate) status: Option<String>,
+    pub(crate) button_title: String,
+    pub(crate) recording: bool,
+    pub(crate) can_start: bool,
+    pub(crate) can_stop: bool,
 }
 
-fn meeting_menu(state: &crate::meeting_watcher::MeetingMenuState, enabled: bool) -> MeetingMenu {
+pub(crate) fn meeting_menu(
+    state: &crate::meeting_watcher::MeetingMenuState,
+    enabled: bool,
+) -> MeetingMenu {
     use crate::meeting_watcher::MeetingMenuState;
     match state {
         MeetingMenuState::Idle => MeetingMenu {

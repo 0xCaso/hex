@@ -1,7 +1,5 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -14,7 +12,7 @@ type Prepare = dyn Fn(&TranscriptionSelection, bool, &AtomicBool, &AtomicU64) ->
 /// Application-owned preparation shared by Settings and the menu bar.
 /// At most one worker runs; a newer request replaces the single pending request.
 #[derive(Clone)]
-pub struct TranscriptionPreparation(Rc<RefCell<State>>);
+pub struct TranscriptionPreparation(Arc<Mutex<State>>);
 
 impl gpui::Global for TranscriptionPreparation {}
 
@@ -54,7 +52,7 @@ impl Default for TranscriptionPreparation {
 
 impl TranscriptionPreparation {
     fn with_prepare(prepare: Arc<Prepare>) -> Self {
-        Self(Rc::new(RefCell::new(State {
+        Self(Arc::new(Mutex::new(State {
             prepare,
             active: None,
             pending: None,
@@ -62,9 +60,13 @@ impl TranscriptionPreparation {
         })))
     }
 
+    fn lock_state(&self) -> MutexGuard<'_, State> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     pub fn start(&self, selection: TranscriptionSelection, installed_only: bool) {
         self.cancel();
-        let mut state = self.0.borrow_mut();
+        let mut state = self.lock_state();
         state.error = None;
         state.pending = Some(Request {
             selection,
@@ -75,7 +77,7 @@ impl TranscriptionPreparation {
     }
 
     pub fn cancel(&self) {
-        let mut state = self.0.borrow_mut();
+        let mut state = self.lock_state();
         state.pending = None;
         if let Some(task) = &state.active {
             task.canceled.store(true, Ordering::Release);
@@ -84,7 +86,7 @@ impl TranscriptionPreparation {
 
     /// Only the application controller consumes completions and commits settings.
     pub fn poll(&self) -> Option<Result<TranscriptionSelection, String>> {
-        let mut state = self.0.borrow_mut();
+        let mut state = self.lock_state();
         if !state.active.as_ref()?.worker.is_finished() {
             return None;
         }
@@ -99,7 +101,7 @@ impl TranscriptionPreparation {
     }
 
     pub fn status(&self) -> PreparationStatus {
-        let state = self.0.borrow();
+        let state = self.lock_state();
         let request = state.pending.as_ref().or_else(|| {
             state
                 .active
@@ -123,7 +125,7 @@ impl TranscriptionPreparation {
     }
 
     pub fn set_error(&self, error: Option<String>) {
-        self.0.borrow_mut().error = error;
+        self.lock_state().error = error;
     }
 }
 
@@ -284,7 +286,8 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !preparation
             .0
-            .borrow()
+            .lock()
+            .unwrap()
             .active
             .as_ref()
             .unwrap()
@@ -296,7 +299,7 @@ mod tests {
         }
         preparation.cancel();
         assert!(preparation.poll().is_none());
-        assert!(preparation.0.borrow().active.is_none());
+        assert!(preparation.0.lock().unwrap().active.is_none());
     }
 
     #[test]

@@ -30,17 +30,17 @@ use crate::{config, recognition};
 const PANEL_WIDTH: f32 = 420.0;
 const PANEL_HEIGHT: f32 = 64.0;
 const WINDOW_MARGIN: f32 = 12.0;
-const OFFER_TIMEOUT: Duration = Duration::from_secs(20);
-const READY_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const OFFER_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(15);
 
-enum ControllerCommand {
+pub(crate) enum ControllerCommand {
     Record(MeetingCandidate),
     Dismiss,
     Stop,
     Summarize(String),
 }
 
-enum ControllerEvent {
+pub(crate) enum ControllerEvent {
     Offer(MeetingCandidate),
     Starting,
     RecordingStarted { title: String },
@@ -968,7 +968,7 @@ fn apply_developer_command(
     }
 }
 
-fn controller_loop(
+pub(crate) fn controller_loop(
     shutdown: &AtomicBool,
     events: SyncSender<ControllerEvent>,
     commands: Receiver<ControllerCommand>,

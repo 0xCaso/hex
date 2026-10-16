@@ -98,7 +98,9 @@ fn compile_swift_bridge(name: &str, module: &str, without_autolink: &[&str]) {
         .status()
         .expect("xcrun swiftc is required to compile Swift bridges");
     assert!(status.success(), "{module} compilation failed");
-    println!("cargo:rustc-link-arg={}", object.display());
+    cc::Build::new()
+        .object(&object)
+        .compile(&format!("hex_{name}_swift_bridge"));
 }
 
 fn compile_indicator_shader() {

@@ -1,0 +1,24 @@
+language = "C"
+include_guard = "HEX_H"
+cpp_compat = true
+tab_width = 4
+style = "both"
+usize_is_size_t = true
+
+[parse]
+parse_deps = false
+include = ["voice-control"]
+
+[export]
+include = [
+    "hex_engine_s",
+    "hex_engine_t",
+    "hex_slice_s",
+    "hex_hud_phase_e",
+    "hex_hud_telemetry_s",
+    "hex_event_tag_e",
+    "hex_event_s",
+    "hex_wakeup_cb",
+    "hex_event_cb",
+    "hex_runtime_config_s",
+]
