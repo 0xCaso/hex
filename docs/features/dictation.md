@@ -116,14 +116,21 @@ segmented and not, with the tail). These cover sample-buffer/timestamp logic, no
 a microphone recording. The physical release stays exact; the 200 ms tail is an
 explicit extension of the trim boundary. The opt-in `release_boundary_harness`
 ([dictation_tail_tests.rs](../../src/dictation_tail_tests.rs); `HEX_TAIL_MODEL`,
-`HEX_TAIL_WAVS`) replays recordings through the capture timeline at release
-offsets around the last word. On 2026-10-15 with `say` speech and Unified
-English, before the tail, clips matched the release to the sample; releasing
-100 ms before the speech ended kept the final word, while 150 ms before it lost
-the word or its final consonant. Incremental on/off and 1 versus default decoder
-threads gave identical results. The harness now applies the tail; it has not been
-re-run with it. The tail also keeps any key-up or click sound made at release; no
-filtering is applied.
+`HEX_TAIL_WAVS`) and `evaluate_dictation_corpus`
+([dictation_corpus_tests.rs](../../src/dictation_corpus_tests.rs);
+[`scripts/dictation-corpus.sh`](../../scripts/dictation-corpus.sh),
+`HEX_DICTATION_CORPUS_DIR`) replay recordings through the capture timeline at
+release offsets (`-300 ms` to `+200 ms`) and onset offsets (`-300 ms` to
+`+100 ms`). On 2026-10-15, before the tail, across 102 clips (70 real voice
+recordings, 20 macOS `say` clips, and 12 ElevenLabs `eleven_v4` clips) with
+Unified English, clips matched the release to the sample; releasing at
+`0 ms`..`+200 ms` kept the final word on 10/10 real clips (`-50 ms`: 9/10;
+`-100 ms`: 7/10; `-150 ms`: 4/10; `-200 ms`: 2/10). Warm 450 ms pre-roll kept the
+initial word even when speech began `-300 ms` before press, whereas cold 0 ms
+pre-roll lost initial syllables when speech preceded readiness by `150–300 ms`.
+Incremental on/off and 1 versus default decoder threads gave identical tail
+results. The harnesses now apply the tail; they have not been re-run with it. The
+tail also keeps any key-up or click sound made at release; no filtering is applied.
 The owner in [dictation_audio.rs](../../src/dictation_audio.rs) has
 `cold_capture_restart_rejects_late_open_results_and_closes_after_finish` and
 `pending_open_uses_physical_press_for_intentional_threshold`: controlled opening
@@ -194,8 +201,10 @@ Intentional hotkey capture (Dictation or Voice Action shortcut)
         └── A piece already queued or running -> Keep the audio for the next piece
 Release -> One accepted job for the whole clip
   ├── Every kept cut has a piece transcript, same model, not voice-delimited
-  │    -> Transcribe only the tail -> Join pieces + tail
-  │       // after , ; : - lowercase the next word (not I/acronyms);
+  │    -> Skip tail inference when the tail is near-silent (< -50 dBFS); otherwise transcribe only the tail
+  │    -> Join pieces + tail
+  │       // after , ; : - or a mid-clause function word/hesitation/repeated word,
+  │       // lowercase the next word (not I/acronyms) and drop isolated mid-clause periods;
   │       // otherwise close an unpunctuated piece before a capital
   └── Missing/failed/stale piece, model change, or voice-delimited capture
        -> Transcribe the full clip exactly as with the setting Off
