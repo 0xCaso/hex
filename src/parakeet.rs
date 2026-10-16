@@ -886,7 +886,7 @@ impl DictationWorker {
                     let prepare_ms = prepare_started.elapsed().as_millis();
                     let inference_started = Instant::now();
                     let model_installed =
-                        crate::onboarding::transcription_model_installed(&job.selection);
+                        crate::onboarding::status(&job.selection).transcription_model;
                     let result = transcribe_clip(
                         clip_samples,
                         plan,
@@ -900,7 +900,7 @@ impl DictationWorker {
                                     None => active.transcribe(samples),
                                 }
                             } else {
-                                fallback_transcribe(samples)
+                                fallback_transcribe(&samples)
                             }
                         },
                     )

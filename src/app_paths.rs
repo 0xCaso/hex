@@ -23,7 +23,13 @@ pub fn logs_dir() -> Result<PathBuf> {
 /// alongside stderr, installs the global tracing subscriber, and routes Ctrl-C
 /// to `shutdown`. Returns the logs directory.
 pub fn init_process_logging(shutdown: &'static AtomicBool) -> Result<PathBuf> {
-    let log_dir = logs_dir()?;
+    init_process_logging_at(logs_dir()?, shutdown)
+}
+
+pub(crate) fn init_process_logging_at(
+    log_dir: PathBuf,
+    shutdown: &'static AtomicBool,
+) -> Result<PathBuf> {
     fs::create_dir_all(&log_dir)?;
     let process_log = OpenOptions::new()
         .create(true)

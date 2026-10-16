@@ -4230,7 +4230,9 @@ int main(void) {{
 
     #[test]
     fn headless_ffi_dictation_capture_transcribe_and_paste_cycle() {
-        use crate::app_settings::{LEFT_OPTION_MASK, OPTION_KEY_MASK, TextReplacement};
+        use crate::app_settings::{
+            LEFT_OPTION_MASK, ModifierSide, OPTION_KEY_MASK, TextReplacement,
+        };
         use crate::audio::CaptureInstant;
         use crate::context::ContextSnapshot;
         use crate::dictation::{
@@ -4240,7 +4242,7 @@ int main(void) {{
         use crate::parakeet::{
             DictationJobStage, DictationWorker, TranscriptionTarget, WorkerEvent,
         };
-        use crate::suppression::{HotkeyAction, HotkeySuppression, InputEvent};
+        use crate::suppression::{DictationHotkey, HotkeyAction, InputEvent};
 
         let temp_dir = std::env::temp_dir().join(format!(
             "hex-ffi-dictation-test-{}-{}",
@@ -4248,6 +4250,16 @@ int main(void) {{
             crate::events::now_ms()
         ));
         std::fs::create_dir_all(&temp_dir).unwrap();
+        let log_dir =
+            crate::app_paths::init_process_logging_at(temp_dir.join("logs"), &crate::SHUTDOWN)
+                .expect("initialize process.log");
+        tracing::info!("headless FFI dictation test initialized");
+        let log_contents =
+            std::fs::read_to_string(log_dir.join("process.log")).expect("read process.log");
+        assert!(
+            log_contents.contains("headless FFI dictation test initialized"),
+            "process.log must capture hex crate tracing diagnostics, got: {log_contents:?}"
+        );
         let history_path = temp_dir.join("history.json");
         let history = History::new(HistoryStore::open(
             history_path,
@@ -4297,20 +4309,19 @@ int main(void) {{
             r#"{{"type":"capture_hotkey","target":"dictation","key":null,"key_code":null,"modifier_flags":{left_option_flags}}}"#
         ));
         let active_hotkey = crate::app_settings::runtime_hotkeys().dictation;
-        assert!(active_hotkey.matches_flags(left_option_flags));
+        assert_eq!(active_hotkey.modifiers.option, Some(ModifierSide::Left));
 
-        // 2. Configure a Global mode replacement via FFI and verify runtime profiles update.
-        let mut mode = {
+        // 2. Configure a Global mode replacement via FFI SaveSettings and verify runtime profiles update.
+        let mut settings = {
             let guard = unsafe { (*engine).core.lock().unwrap() };
-            guard.settings.dictation_processing.default_mode.clone()
+            guard.settings.clone()
         };
-        mode.replacements = vec![TextReplacement {
+        settings.dictation_processing.default_mode.replacements = vec![TextReplacement {
             matched_phrase: "initiative".into(),
             output: "milestone".into(),
         }];
-        let update_cmd =
-            serde_json::to_string(&HexEngineCommand::UpdateDefaultMode { mode }).unwrap();
-        dispatch(&update_cmd);
+        let save_cmd = serde_json::to_string(&HexEngineCommand::SaveSettings { settings }).unwrap();
+        dispatch(&save_cmd);
 
         // 3. Load synthetic speech audio from ~/Library/Caches/hex-echo-scratch/synth/part1.wav
         //    when present, or generate a 2-second speech-level waveform.
@@ -4342,44 +4353,36 @@ int main(void) {{
             (sr, samples)
         };
 
-        // 4. Drive HotkeySuppression + DictationCapture across press -> intentional hold -> release + tail.
-        let mut suppression = HotkeySuppression::default();
-        let mut capture = DictationCapture::new(sample_rate).expect("create DictationCapture");
-        let chunk_frames = (sample_rate as usize / 50).max(1); // 20 ms chunks
+        // 4. Drive Hotkey + DictationCapture across press -> intentional hold -> release + tail.
         let mut now = CaptureInstant::from_nanos(1_000_000_000);
+        let mut hotkey = DictationHotkey::new(now, false, active_hotkey);
+        let mut capture = DictationCapture::new(sample_rate);
+        let chunk_frames = (sample_rate as usize / 50).max(1); // 20 ms chunks
 
         // Warm 450 ms pre-roll before hotkey press.
         for chunk in speech_samples.chunks(chunk_frames).take(23) {
             now = now + Duration::from_millis(20);
-            capture.push_samples(chunk, now, None);
+            capture.ingest(chunk, now);
         }
 
         // Press Left Option -> HotkeyAction::Start.
         let press_at = now;
         assert_eq!(
-            suppression.process(
-                InputEvent::Flags {
-                    flags: left_option_flags
-                },
-                active_hotkey,
-                press_at
-            ),
+            hotkey.process(InputEvent::Flags(left_option_flags), press_at),
             Some(HotkeyAction::Start)
         );
         let indicator_sender = {
             let guard = unsafe { (*engine).core.lock().unwrap() };
             guard.indicator_sender.clone()
         };
-        capture
-            .start(press_at, None, None)
-            .expect("start dictation capture");
+        capture.start_at(press_at);
         indicator_sender.send(DictationIndicatorEvent::Started);
 
         // Feed audio through intentional hold (>= MINIMUM_HOLD_DURATION).
         let mut became_intentional = false;
         for chunk in speech_samples.chunks(chunk_frames) {
             now = now + Duration::from_millis(20);
-            capture.push_samples(chunk, now, None);
+            capture.ingest(chunk, now);
             if now.duration_since(press_at) >= MINIMUM_HOLD_DURATION {
                 became_intentional |= capture.become_intentional(now);
             }
@@ -4392,7 +4395,7 @@ int main(void) {{
         // Release Left Option -> HotkeyAction::Finish.
         let release_at = now;
         assert_eq!(
-            suppression.process(InputEvent::Flags { flags: 0 }, active_hotkey, release_at),
+            hotkey.process(InputEvent::Flags(0), release_at),
             Some(HotkeyAction::Finish)
         );
 
@@ -4401,9 +4404,9 @@ int main(void) {{
         let silence_chunk = vec![0.0_f32; chunk_frames];
         for _ in 0..tail_chunks {
             now = now + Duration::from_millis(20);
-            capture.push_samples(&silence_chunk, now, None);
+            capture.ingest(&silence_chunk, now);
         }
-        let finish = capture.finish_at(release_at + POST_RELEASE_TAIL);
+        let finish = capture.finish(release_at + POST_RELEASE_TAIL);
         let Finish::Transcribe(clip) = finish else {
             panic!("expected Finish::Transcribe, got Finish::Discard");
         };
@@ -4415,11 +4418,7 @@ int main(void) {{
         // 5. Submit clip to DictationWorker with a fake paste sink and assert text is pasted and recorded in History.
         let pasted_outputs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let pasted_sink = pasted_outputs.clone();
-        let transformations = Arc::new(crate::personal_commands::TransformationClient::new(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            temp_dir.join("personal-commands.json"),
-        ));
+        let transformations = Arc::new(crate::personal_commands::TransformationClient::default());
         let worker = DictationWorker::start_for_test(
             transformations,
             Some(history),
@@ -4475,7 +4474,11 @@ int main(void) {{
                     WorkerEvent::Completed {
                         result: Err(err), ..
                     } => panic!("dictation worker failed: {err}"),
-                    other => panic!("unexpected worker event: {other:?}"),
+                    WorkerEvent::Cancelled { .. }
+                    | WorkerEvent::ModelFailed(_)
+                    | WorkerEvent::Pasted { .. } => {
+                        panic!("unexpected worker event in dictation test")
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(10));
