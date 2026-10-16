@@ -10,9 +10,10 @@ const page = await browser.newPage({ viewport: { width, height }, deviceScaleFac
 page.on("pageerror", (e) => console.log("pageerror", e))
 page.on("console", (m) => m.type() === "error" && console.log("console", m.text()))
 await page.goto(`${base}/${process.env.HEX_QUERY ?? ""}`)
+if (width < 600) await page.evaluate(() => window.scrollTo(0, 380))
 const state = () => page.locator(".readout__state").innerText()
 const shot = (name: string) =>
-  page.screenshot({ path: `${out}/take-${name}.png`, clip: { x: width * 0.42, y: 40, width: width * 0.58, height: height - 40 } })
+  page.screenshot({ path: `${out}/take-${name}.png`, clip: width < 600 ? { x: 0, y: 380, width, height: height - 380 } : { x: width * 0.42, y: 40, width: width * 0.58, height: height - 40 } })
 const until = async (ok: (s: string) => boolean, ms = 30000) => {
   const t0 = Date.now()
   while (Date.now() - t0 < ms) {

@@ -43,9 +43,11 @@ export default function Hero({ children }: { children: ReactNode }) {
     const scope = scopeRef.current!
     const reduced = matchMedia("(prefers-reduced-motion: reduce)")
     const narrow = matchMedia("(max-width: 900px)")
+    let phaseAt = performance.now()
     const director = new Director(
       {
         phase: (p) => {
+          phaseAt = performance.now()
           setPhase(p)
           if (p === "recording") setTranscript(null)
         },
@@ -145,7 +147,7 @@ export default function Hero({ children }: { children: ReactNode }) {
     const wanted = () => {
       if (!engine || !onScreen || document.visibilityState !== "visible") return false
       if (!reduced.matches) return true
-      return director.phase === "recording" || director.phase === "transcribing" || director.idleFor < 5 || lure.on > 0.01
+      return director.phase === "recording" || director.phase === "transcribing" || performance.now() - phaseAt < 4000 || lure.on > 0.01
     }
     const wake = () => {
       const go = wanted()

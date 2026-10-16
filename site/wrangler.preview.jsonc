@@ -1,0 +1,12 @@
+// A preview of the site on workers.dev, never the production domain:
+// bun run build && bunx wrangler deploy --config wrangler.preview.jsonc
+{
+  "name": "hex-voice-site-preview",
+  "account_id": "19d80aa432b86d110c8e1480cf895f5c",
+  "compatibility_date": "2026-07-19",
+  "assets": {
+    "directory": "./dist"
+  },
+  "workers_dev": true,
+  "routes": []
+}

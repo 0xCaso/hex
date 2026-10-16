@@ -714,6 +714,9 @@ h1 {
   .instrument {
     grid-template-columns: minmax(0, 1fr);
   }
+  .instrument__field {
+    min-height: calc(1.5em * 4 + 1.7rem);
+  }
   .instrument__side {
     width: min(100%, calc(var(--ring) * 0.84));
     margin: 0 auto;
