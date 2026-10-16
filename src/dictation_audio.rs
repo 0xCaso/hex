@@ -16,6 +16,8 @@ use crate::suppression::PendingInputEvents;
 
 const RECOGNITION_QUEUE_CAPACITY: usize = 64;
 const MAX_RECOGNITION_BACKLOG: Duration = Duration::from_millis(500);
+/// How long past the tail itself a finish waits for the stream to deliver it.
+const TAIL_DELIVERY_GRACE: Duration = Duration::from_millis(100);
 
 pub struct RecognitionAudio {
     pub samples: Vec<f32>,
@@ -108,6 +110,7 @@ enum Command {
     },
     Finish {
         at: CaptureInstant,
+        tail: Duration,
         reply: SyncSender<Finish>,
     },
     Cancel {
@@ -311,7 +314,13 @@ impl DictationAudio {
     }
 
     pub fn finish(&self, at: CaptureInstant) -> Result<Finish> {
-        self.call(|reply| Command::Finish { at, reply })
+        self.finish_with_tail(at, Duration::ZERO)
+    }
+
+    /// Finishes at the exact `at` boundary, first waiting a bounded time for
+    /// audio through `at + tail` when the capture would be transcribed.
+    pub fn finish_with_tail(&self, at: CaptureInstant, tail: Duration) -> Result<Finish> {
+        self.call(|reply| Command::Finish { at, tail, reply })
     }
 
     pub fn cancel(&self) -> Result<()> {
@@ -515,16 +524,24 @@ impl Owner {
                 };
                 let _ = reply.send(became_intentional);
             }
-            Command::Finish { at, reply } => {
+            Command::Finish { at, tail, reply } => {
                 self.drain_through(at);
+                let deferred = (self.pending_capture.is_none()
+                    && !tail.is_zero()
+                    && self.capture.would_transcribe(at))
+                .then(|| self.drain_tail(at, tail))
+                .flatten();
                 let finish = if self.pending_capture.take().is_some() {
                     self.input.cancel_open();
                     Finish::Discard
                 } else {
-                    self.capture.finish(at)
+                    self.capture.finish_with_tail(at, tail)
                 };
                 self.state.recording.store(false, Ordering::Release);
                 let _ = reply.send(finish);
+                if let Some(event) = deferred {
+                    self.handle_input(event);
+                }
             }
             Command::Cancel { reply } => {
                 self.pending_capture = None;
@@ -578,6 +595,52 @@ impl Owner {
         }
     }
 
+    /// Waits a bounded time for audio through `ended_at + tail`. A stream
+    /// failure or discontinuity inside the tail must not discard the finishing
+    /// capture, so the first such event is returned for handling afterwards.
+    fn drain_tail(
+        &mut self,
+        ended_at: CaptureInstant,
+        tail: Duration,
+    ) -> Option<RecoveringAudioInputEvent> {
+        let boundary = ended_at + tail;
+        let deadline = Instant::now() + tail + TAIL_DELIVERY_GRACE;
+        while self.state.captured_through.load(Ordering::Acquire) < boundary.as_nanos() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || !self.input.is_open() {
+                tracing::debug!("finished before the post-release tail arrived");
+                break;
+            }
+            let capture_idle = self.capture_idle();
+            let event = self
+                .input
+                .recv_timeout(remaining.min(Duration::from_millis(10)), capture_idle);
+            let continuous = match &event {
+                RecoveringAudioInputEvent::Chunk {
+                    samples,
+                    captured_through,
+                } => self.chunk_gap(samples.len(), *captured_through).is_none(),
+                RecoveringAudioInputEvent::Timeout => true,
+                _ => false,
+            };
+            if !continuous {
+                tracing::warn!(
+                    "microphone stream changed during the post-release tail; finishing with the audio already captured"
+                );
+                return Some(event);
+            }
+            self.handle_input(event);
+        }
+        None
+    }
+
+    fn chunk_gap(&self, frames: usize, captured_through: CaptureInstant) -> Option<Duration> {
+        let captured_from = captured_through.sub_frames(frames, self.sample_rate());
+        self.last_captured_through
+            .map(|previous| captured_from.duration_since(previous))
+            .filter(|gap| *gap > Duration::from_millis(50))
+    }
+
     fn capture_idle(&self) -> bool {
         !self.capture.is_recording()
             && self.pending_capture.is_none()
@@ -590,11 +653,7 @@ impl Owner {
                 samples,
                 captured_through,
             } => {
-                let captured_from = captured_through.sub_frames(samples.len(), self.sample_rate());
-                if let Some(previous) = self.last_captured_through
-                    && captured_from.duration_since(previous) > Duration::from_millis(50)
-                {
-                    let gap = captured_from.duration_since(previous);
+                if let Some(gap) = self.chunk_gap(samples.len(), captured_through) {
                     let was_recording = self.capture.is_recording();
                     let capture_generation = self.state.capture_generation.load(Ordering::Acquire);
                     self.capture = new_capture(self.sample_rate(), &self.recording_environment);
@@ -825,6 +884,7 @@ fn new_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dictation::POST_RELEASE_TAIL;
 
     fn capture_time() -> CaptureInstant {
         CaptureInstant::from_nanos(60_000_000_000)
@@ -901,9 +961,11 @@ mod tests {
                 // The worker takes each piece before the next pause.
                 pieces.extend(received());
             }
-            let Finish::Transcribe(clip) =
-                control(&mut owner, |reply| Command::Finish { at: through, reply })
-            else {
+            let Finish::Transcribe(clip) = control(&mut owner, |reply| Command::Finish {
+                tail: Duration::ZERO,
+                at: through,
+                reply,
+            }) else {
                 panic!("expected transcription");
             };
             if matches!(kind, CaptureKind::Hotkey) {
@@ -947,13 +1009,21 @@ mod tests {
                     assert!(!input.is_recording());
                     match boundary {
                         "finish" => {
-                            control(&mut owner, |reply| Command::Finish { at, reply });
+                            control(&mut owner, |reply| Command::Finish {
+                                tail: Duration::ZERO,
+                                at,
+                                reply,
+                            });
                         }
                         "cancel" => control(&mut owner, |reply| Command::Cancel { reply }),
                         "start" | "start-finish" => {
                             start(&mut owner, at);
                             if boundary == "start-finish" {
-                                control(&mut owner, |reply| Command::Finish { at, reply });
+                                control(&mut owner, |reply| Command::Finish {
+                                    tail: Duration::ZERO,
+                                    at,
+                                    reply,
+                                });
                             }
                         }
                         _ => {}
@@ -997,7 +1067,11 @@ mod tests {
                 }
                 match boundary {
                     "finish" => {
-                        control(&mut owner, |reply| Command::Finish { at, reply });
+                        control(&mut owner, |reply| Command::Finish {
+                            tail: Duration::ZERO,
+                            at,
+                            reply,
+                        });
                     }
                     "cancel" => control(&mut owner, |reply| Command::Cancel { reply }),
                     "start" => start(&mut owner, CaptureInstant::from_nanos(0)),
@@ -1040,6 +1114,7 @@ mod tests {
             } else {
                 assert!(matches!(
                     control(&mut owner, |reply| Command::Finish {
+                        tail: Duration::ZERO,
                         at: at + Duration::from_millis(80),
                         reply,
                     }),
@@ -1098,6 +1173,7 @@ mod tests {
             let finished_at = at + Duration::from_millis(700);
             samples.send((vec![0.25; 4_800], finished_at)).unwrap();
             let finish = control(&mut owner, |reply| Command::Finish {
+                tail: Duration::ZERO,
                 at: finished_at,
                 reply,
             });
@@ -1112,6 +1188,7 @@ mod tests {
             assert!(samples.send((vec![0.25; 480], finished_at)).is_err());
             assert!(matches!(
                 control(&mut owner, |reply| Command::Finish {
+                    tail: Duration::ZERO,
                     at: finished_at,
                     reply
                 }),
@@ -1142,6 +1219,7 @@ mod tests {
             } else {
                 assert!(matches!(
                     control(&mut owner, |reply| Command::Finish {
+                        tail: Duration::ZERO,
                         at: boundary,
                         reply
                     }),
@@ -1160,6 +1238,154 @@ mod tests {
                     })
                 ));
             }
+        }
+    }
+
+    /// Starts an intentional hotkey capture at `at` with 10 ms of warm audio
+    /// and 400 ms of speech at 0.25, returning the release instant.
+    fn intentional_capture(owner: &mut Owner, at: CaptureInstant) -> CaptureInstant {
+        owner.handle_input(RecoveringAudioInputEvent::Chunk {
+            samples: vec![0.25; 480],
+            captured_through: at,
+        });
+        start(owner, at);
+        let released = at + Duration::from_millis(400);
+        owner.handle_input(RecoveringAudioInputEvent::Chunk {
+            samples: vec![0.25; 19_200],
+            captured_through: released,
+        });
+        assert!(control(owner, |reply| Command::BecomeIntentional {
+            at: at + crate::dictation::MINIMUM_HOLD_DURATION,
+            reply,
+        }));
+        released
+    }
+
+    fn finish_after(owner: &mut Owner, at: CaptureInstant, tail: Duration) -> Finish {
+        control(owner, |reply| Command::Finish { at, tail, reply })
+    }
+
+    #[test]
+    fn release_waits_for_its_tail_and_keeps_no_later_audio() {
+        let (mut owner, input, samples) = owner_for_test(true);
+        let released = intentional_capture(&mut owner, capture_time());
+        for (index, value) in [0.5, 0.5, 0.75].into_iter().enumerate() {
+            let through = released + Duration::from_millis(100 * (index as u64 + 1));
+            samples.send((vec![value; 4_800], through)).unwrap();
+        }
+        let Finish::Transcribe(clip) = finish_after(&mut owner, released, POST_RELEASE_TAIL) else {
+            panic!("expected transcription");
+        };
+        assert!(!input.is_recording());
+        assert_eq!(clip.duration_ms(), 610);
+        let clip = clip.into_transcription_samples();
+        assert!((clip[clip.len() - 400] - 0.5).abs() < 0.05);
+        assert!(clip.iter().all(|sample| *sample < 0.6));
+    }
+
+    #[test]
+    fn a_press_inside_the_tail_starts_its_own_capture_after_the_old_one_finishes() {
+        let (mut owner, input, samples) = owner_for_test(true);
+        let released = intentional_capture(&mut owner, capture_time());
+        let pressed = released + Duration::from_millis(100);
+        for through_ms in [100, 200, 300] {
+            let through = released + Duration::from_millis(through_ms);
+            samples.send((vec![0.5; 4_800], through)).unwrap();
+        }
+        // The coordinator serializes the release before the newer press.
+        let Finish::Transcribe(old) = finish_after(&mut owner, released, POST_RELEASE_TAIL) else {
+            panic!("expected transcription");
+        };
+        assert_eq!(old.duration_ms(), 610);
+        let old_generation = input.capture_generation();
+        start(&mut owner, pressed);
+        assert!(input.is_recording());
+        assert_ne!(input.capture_generation(), old_generation);
+        let second_release = pressed + Duration::from_millis(500);
+        samples
+            .send((vec![0.5; 14_400], released + Duration::from_millis(600)))
+            .unwrap();
+        for through_ms in [700, 800] {
+            let through = released + Duration::from_millis(through_ms);
+            samples.send((vec![0.5; 4_800], through)).unwrap();
+        }
+        assert!(control(&mut owner, |reply| Command::BecomeIntentional {
+            at: pressed + crate::dictation::MINIMUM_HOLD_DURATION,
+            reply,
+        }));
+        let Finish::Transcribe(new) = finish_after(&mut owner, second_release, POST_RELEASE_TAIL)
+        else {
+            panic!("expected transcription");
+        };
+        // Its own 450 ms pre-roll, 500 ms hold, and 200 ms tail.
+        assert_eq!(new.duration_ms(), 1_150);
+    }
+
+    #[test]
+    fn a_stalled_or_failed_stream_bounds_the_tail_wait() {
+        for fails in [false, true] {
+            let (mut owner, input, samples) = owner_for_test(true);
+            let released = intentional_capture(&mut owner, capture_time());
+            samples
+                .send((vec![0.5; 2_400], released + Duration::from_millis(50)))
+                .unwrap();
+            if fails {
+                drop(samples);
+            }
+            let started = Instant::now();
+            let Finish::Transcribe(clip) = finish_after(&mut owner, released, POST_RELEASE_TAIL)
+            else {
+                panic!("fails={fails}: the tail must not discard the capture");
+            };
+            let waited = started.elapsed();
+            assert_eq!(clip.duration_ms(), 460, "fails={fails}");
+            assert!(waited < Duration::from_secs(2), "fails={fails}: {waited:?}");
+            if fails {
+                assert!(waited < POST_RELEASE_TAIL, "{waited:?}");
+                assert!(matches!(
+                    input.try_recv_event(),
+                    Some(DictationAudioEvent::Interrupted {
+                        was_recording: false,
+                        ..
+                    })
+                ));
+            } else {
+                assert!(waited >= POST_RELEASE_TAIL, "{waited:?}");
+                assert!(input.try_recv_event().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn escape_and_short_taps_finish_without_waiting_for_a_tail() {
+        for short_tap in [false, true] {
+            let (mut owner, input, _samples) = owner_for_test(true);
+            let at = capture_time();
+            let started = Instant::now();
+            if short_tap {
+                owner.handle_input(RecoveringAudioInputEvent::Chunk {
+                    samples: vec![0.25; 9_600],
+                    captured_through: at + Duration::from_millis(200),
+                });
+                start(&mut owner, at);
+                assert!(matches!(
+                    finish_after(
+                        &mut owner,
+                        at + Duration::from_millis(200),
+                        POST_RELEASE_TAIL
+                    ),
+                    Finish::Discard
+                ));
+            } else {
+                intentional_capture(&mut owner, at);
+                control(&mut owner, |reply| Command::Cancel { reply });
+            }
+            assert!(!input.is_recording());
+            assert!(
+                started.elapsed() < Duration::from_millis(100),
+                "short_tap={short_tap}: {:?}",
+                started.elapsed()
+            );
         }
     }
 
@@ -1205,14 +1431,22 @@ mod tests {
             control(&mut owner, |reply| Command::Cancel { reply });
             assert_eq!(input.capture_generation(), generation);
             let generation = input.capture_generation();
-            control(&mut owner, |reply| Command::Finish { at, reply });
+            control(&mut owner, |reply| Command::Finish {
+                tail: Duration::ZERO,
+                at,
+                reply,
+            });
             assert_eq!(input.capture_generation(), generation);
         }
         let generation = input.capture_generation();
         start(&mut owner, at);
         assert_ne!(input.capture_generation(), generation);
         let generation = input.capture_generation();
-        control(&mut owner, |reply| Command::Finish { at, reply });
+        control(&mut owner, |reply| Command::Finish {
+            tail: Duration::ZERO,
+            at,
+            reply,
+        });
         control(&mut owner, |reply| Command::Cancel { reply });
         assert_eq!(input.capture_generation(), generation);
     }
@@ -1358,6 +1592,7 @@ mod tests {
                 drop(first_samples);
                 assert!(matches!(
                     control(&mut owner, |reply| Command::Finish {
+                        tail: Duration::ZERO,
                         at: pressed_at + Duration::from_millis(250),
                         reply,
                     }),
@@ -1382,6 +1617,7 @@ mod tests {
             if mode == "release-pending" {
                 assert!(matches!(
                     control(&mut owner, |reply| Command::Finish {
+                        tail: Duration::ZERO,
                         at: pressed_at + Duration::from_millis(250),
                         reply,
                     }),
@@ -1409,6 +1645,7 @@ mod tests {
             let finished_at = pressed_at + Duration::from_millis(700);
             samples.send((vec![0.25; 4_800], finished_at)).unwrap();
             let Finish::Transcribe(clip) = control(&mut owner, |reply| Command::Finish {
+                tail: Duration::ZERO,
                 at: finished_at,
                 reply,
             }) else {

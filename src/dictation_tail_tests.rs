@@ -9,7 +9,7 @@ use hound::WavReader;
 
 use super::*;
 use crate::audio::CaptureInstant;
-use crate::dictation::{DictationCapture, Finish, resample_for_parakeet};
+use crate::dictation::{DictationCapture, Finish, POST_RELEASE_TAIL, resample_for_parakeet};
 
 const LEAD: Duration = Duration::from_secs(1);
 const PRE_ROLL: Duration = Duration::from_millis(450);
@@ -50,7 +50,8 @@ fn speech_end(samples: &[f32], rate: u32) -> usize {
 
 /// Feeds 10 ms chunks of `LEAD` silence then speech, presses after the
 /// silence, and releases `release` source samples into the speech while later
-/// audio is already arriving, exactly like a delivered CGEvent release.
+/// audio is already arriving, exactly like a delivered CGEvent release. The
+/// clip keeps the production post-release tail.
 fn capture(
     audio: &[f32],
     rate: u32,
@@ -84,9 +85,9 @@ fn capture(
                 pieces.push(segment);
                 true
             });
-            // A real release arrives up to one buffer after its audio.
-            if through >= released_at + Duration::from_millis(20) {
-                finish = Some(capture.finish(released_at));
+            // The owner finishes once the tail has arrived, up to one buffer late.
+            if through >= released_at + POST_RELEASE_TAIL + Duration::from_millis(20) {
+                finish = Some(capture.finish_with_tail(released_at, POST_RELEASE_TAIL));
             }
         }
     }
@@ -128,7 +129,10 @@ fn release_boundary_harness() {
         );
         for offset_ms in RELEASE_OFFSETS_MS {
             let release = (end as i64 + offset_ms * i64::from(rate) / 1_000) as usize;
-            let expected_len = (samples_for(PRE_ROLL, rate) + release) * 16_000 / rate as usize;
+            let expected_len =
+                (samples_for(PRE_ROLL, rate) + release + samples_for(POST_RELEASE_TAIL, rate))
+                    * 16_000
+                    / rate as usize;
             for incremental in [false, true] {
                 let (clip, pieces) = capture(&audio, rate, release, incremental);
                 let mut speculative = SpeculativeTranscript::default();

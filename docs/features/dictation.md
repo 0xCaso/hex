@@ -86,7 +86,16 @@ These cover gesture decisions, not hardware keyboard-layout or remapping equival
 Keep ready -> Press shortcut                          // dictate.boundaries
   -> Include up to 450 ms of available pre-roll
   -> Delayed handling still uses original event boundaries
-  -> Release excludes audio captured after physical release
+  -> Release excludes audio captured after physical release + 200 ms
+
+Release or locked finishing press                     // dictate.release-tail
+  -> Hold threshold judged on the physical release alone
+  -> Wait for audio through release + 200 ms (POST_RELEASE_TAIL)
+     ├── Arrives -> Clip ends exactly at release + 200 ms
+     └── Stream stalls/fails -> Finish within tail + 100 ms with what arrived
+  -> Same for Voice Action and promotion; not Escape, short taps, voice
+     controls, programmatic stop, meetings, or Linux
+  -> A press inside the tail starts after the old clip finishes, with its own pre-roll
 
 Release when idle -> Press shortcut                   // dictate.cold-microphone
   -> Open microphone asynchronously, no pre-roll
@@ -100,21 +109,31 @@ Source: `DictationCapture` in [dictation.rs](../../src/dictation.rs); checks:
 `delayed_press_reconstructs_audio_from_the_original_boundary`,
 `delayed_release_removes_audio_captured_after_the_physical_release`,
 `capture_continues_past_sixty_seconds_until_explicitly_finished`,
+`release_tail_keeps_audio_through_the_tail_and_no_further`,
+`short_tap_discards_on_its_physical_release_despite_the_tail`,
 `resampled_clips_keep_the_last_word_through_a_delayed_release` (44.1/48 kHz,
-segmented and not). These cover sample-buffer/timestamp logic, not a microphone
-recording. Release trimming is exact, with no post-release grace: a word still
-sounding at release is cut. The opt-in `release_boundary_harness`
+segmented and not, with the tail). These cover sample-buffer/timestamp logic, not
+a microphone recording. The physical release stays exact; the 200 ms tail is an
+explicit extension of the trim boundary. The opt-in `release_boundary_harness`
 ([dictation_tail_tests.rs](../../src/dictation_tail_tests.rs); `HEX_TAIL_MODEL`,
 `HEX_TAIL_WAVS`) replays recordings through the capture timeline at release
 offsets around the last word. On 2026-10-15 with `say` speech and Unified
-English, clips matched the release to the sample; releasing 100 ms before the
-speech ended kept the final word, while 150 ms before it lost the word or its
-final consonant. Incremental on/off and 1 versus default decoder threads gave
-identical results.
+English, before the tail, clips matched the release to the sample; releasing
+100 ms before the speech ended kept the final word, while 150 ms before it lost
+the word or its final consonant. Incremental on/off and 1 versus default decoder
+threads gave identical results. The harness now applies the tail; it has not been
+re-run with it. The tail also keeps any key-up or click sound made at release; no
+filtering is applied.
 The owner in [dictation_audio.rs](../../src/dictation_audio.rs) has
 `cold_capture_restart_rejects_late_open_results_and_closes_after_finish` and
 `pending_open_uses_physical_press_for_intentional_threshold`: controlled opening
-and ownership transitions, not physical device startup latency.
+and ownership transitions, not physical device startup latency. Tail checks there
+drive the owner with a fake stream: `release_waits_for_its_tail_and_keeps_no_later_audio`,
+`a_press_inside_the_tail_starts_its_own_capture_after_the_old_one_finishes`,
+`a_stalled_or_failed_stream_bounds_the_tail_wait`, and
+`escape_and_short_taps_finish_without_waiting_for_a_tail`. The coordinator blocks
+on the tail, so the stop tone, HUD Transcribing, and submission follow the release
+by up to 200 ms (300 ms on a stalled stream); their order is unchanged.
 
 ### Optional Voice Controls
 
@@ -182,7 +201,8 @@ Release -> One accepted job for the whole clip
        -> Transcribe the full clip exactly as with the setting Off
   -> Mode processing, paste, last dictation, history once on the final text
 Short tap, Escape, or new capture -> Piece transcripts are never used
-Delayed release -> Cuts after the physical release are dropped with their pieces
+Delayed release -> Cuts after release + 200 ms are dropped with their pieces
+              // the final tail piece includes the 200 ms tail
 Programmatic/voice-delimited captures and Linux -> Never segmented
 ```
 
