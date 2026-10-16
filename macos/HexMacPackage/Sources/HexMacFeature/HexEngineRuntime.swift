@@ -289,8 +289,24 @@ public final class HexEngineRuntime {
                 if self.shouldPollPeriodicTick {
                     self.tick()
                 }
+                self.maintenanceTicks &+= 1
+                if self.maintenanceTicks % 4 == 0, self.shouldPollReadiness {
+                    self.refreshBootstrapSnapshot()
+                }
             }
         }
+    }
+
+    @ObservationIgnored
+    private var maintenanceTicks: UInt = 0
+
+    /// Permission grants, download progress, and background command-model
+    /// loading change outside any engine event, so poll until they settle.
+    private var shouldPollReadiness: Bool {
+        guard let snapshot else { return false }
+        return !snapshot.setupReady
+            || snapshot.commandsSnapshot.commandModelStatus == "loading"
+            || snapshot.transcriptionCatalog.models.contains(where: \.preparing)
     }
 
     private var shouldPollPeriodicTick: Bool {
