@@ -64,7 +64,7 @@ pub(crate) struct OfflineGgufSession {
 }
 
 impl OfflineGgufSession {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn set_threads_for_test(&mut self, n_threads: i32) -> transcribe_cpp::Result<()> {
         self.options.n_threads = n_threads;
         self.session = None;
