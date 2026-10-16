@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::audio::CaptureInstant;
-use crate::dictation::{DictationCapture, Finish, MINIMUM_HOLD_DURATION, resample_for_parakeet};
+use crate::dictation::{
+    DictationCapture, Finish, MINIMUM_HOLD_DURATION, POST_RELEASE_TAIL, resample_for_parakeet,
+};
 
 const LEAD_SILENCE: Duration = Duration::from_secs(1);
 const TAIL_SILENCE: Duration = Duration::from_secs(1);
@@ -200,8 +202,9 @@ fn has_false_mid_clause_period(offline: &str, joined: &str) -> bool {
 }
 
 /// Feeds 10 ms chunks through `DictationCapture`, starting at `lead` samples
-/// and releasing at `lead + release_samples` while later audio continues to
-/// arrive for 20 ms (matching `CAPTURE_DRAIN_LEAD`).
+/// and releasing at `lead + release_samples`. Like production, the clip keeps
+/// the post-release tail and finishes once that tail plus one 20 ms buffer
+/// (`CAPTURE_DRAIN_LEAD`) has arrived.
 fn simulate_capture(
     padded_audio: &[f32],
     rate: u32,
@@ -240,13 +243,13 @@ fn simulate_capture(
                 pieces.push(segment);
                 true
             });
-            if through >= released_at + Duration::from_millis(20) {
-                finish = Some(capture.finish(released_at));
+            if through >= released_at + POST_RELEASE_TAIL + Duration::from_millis(20) {
+                finish = Some(capture.finish_with_tail(released_at, POST_RELEASE_TAIL));
             }
         }
         fed = next_fed;
     }
-    let finish = finish.unwrap_or_else(|| capture.finish(released_at));
+    let finish = finish.unwrap_or_else(|| capture.finish_with_tail(released_at, POST_RELEASE_TAIL));
     let Finish::Transcribe(clip) = finish else {
         panic!("expected transcription clip");
     };
