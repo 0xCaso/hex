@@ -231,6 +231,10 @@ public final class HexStatusWindowController: NSWindowController, NSWindowDelega
         window?.makeKeyAndOrderFront(nil)
     }
 
+    public func windowDidResignKey(_ notification: Notification) {
+        store.cancelRecordingShortcut()
+    }
+
     public func windowWillClose(_ notification: Notification) {
         store.cancelRecordingShortcut()
         onWindowVisibilityChanged?(false)

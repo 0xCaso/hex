@@ -2081,6 +2081,17 @@ fn finish_dictation(
     let clip = match capture.finish_with_tail(ended_at, tail)? {
         Finish::Transcribe(clip) if !clip.is_near_silent() => clip,
         finish => {
+            match &finish {
+                Finish::Discard => {
+                    tracing::info!("dictation capture discarded before intentional hold threshold");
+                }
+                Finish::Transcribe(clip) => {
+                    tracing::info!(
+                        duration_ms = clip.duration_ms(),
+                        "dictation capture discarded as near-silent"
+                    );
+                }
+            }
             events.dictation(DictationPhase::Discarded, "")?;
             if let Some(indicator) = indicator {
                 indicator.send(DictationIndicatorEvent::Discarded);
@@ -2257,6 +2268,10 @@ fn handle_dictation_event(
             result: Ok(text),
             ..
         } if text.trim().is_empty() => {
+            tracing::info!(
+                job_id = job_id.value(),
+                "dictation job completed with empty transcript; discarding"
+            );
             events.dictation(DictationPhase::Discarded, "")?;
             if let Some(indicator) = indicator {
                 indicator.send(DictationIndicatorEvent::JobCompleted {

@@ -113,9 +113,17 @@ public struct HexShortcutRecorderControl: View {
                     .foregroundStyle(.red)
             }
         }
+        .onChange(of: isRecording) { _, active in
+            if !active {
+                removeMonitor()
+                pendingModifierFlags = 0
+            }
+        }
         .onDisappear {
             if isRecording {
                 stopRecording()
+            } else {
+                removeMonitor()
             }
         }
     }
@@ -144,8 +152,12 @@ public struct HexShortcutRecorderControl: View {
     }
 
     private func handleEvent(_ event: NSEvent) {
+        guard isRecording else {
+            removeMonitor()
+            return
+        }
         let relevantMask: UInt64 = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 23)
-        let rawFlags = UInt64(event.modifierFlags.rawValue)
+        let rawFlags = event.cgEvent?.flags.rawValue ?? UInt64(event.modifierFlags.rawValue)
 
         if event.type == .flagsChanged {
             let activeMods = rawFlags & relevantMask
@@ -299,7 +311,9 @@ public struct HexTranscriptionModelPickerSheet: View {
 
     @ViewBuilder
     private func modelRowCard(_ model: HexTranscriptionModelRow, selectedLanguage: String) -> some View {
-        let supportsLanguage = model.languages.contains(selectedLanguage) || selectedLanguage == "auto"
+        let supportsLanguage =
+            model.languages.contains(selectedLanguage)
+            || (selectedLanguage != "auto" && model.languages.contains("*"))
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(model.name)
@@ -331,7 +345,7 @@ public struct HexTranscriptionModelPickerSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if model.id == "parakeet-tdt-0.6b-v3" && selectedLanguage != "en" && selectedLanguage != "auto" {
+            if model.id == "parakeet_v3" && selectedLanguage != "en" && selectedLanguage != "auto" {
                 Text("Parakeet v3 detects language automatically from speech.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -470,7 +484,7 @@ public struct HexOnboardingView: View {
                             .foregroundStyle(.green)
                     } else {
                         Button("Download Model") {
-                            let modelId = snapshot?.activeModelId ?? "parakeet-tdt-0.6b-v3"
+                            let modelId = snapshot?.activeModelId ?? "parakeet_unified_en"
                             let lang = snapshot?.activeLanguage ?? "en"
                             store.runtime.dispatch(
                                 .chooseTranscriptionModel(
@@ -495,7 +509,7 @@ public struct HexOnboardingView: View {
                             .font(.caption)
                         Spacer()
                         Button("Retry") {
-                            let modelId = snapshot?.activeModelId ?? "parakeet-tdt-0.6b-v3"
+                            let modelId = snapshot?.activeModelId ?? "parakeet_unified_en"
                             let lang = snapshot?.activeLanguage ?? "en"
                             store.runtime.dispatch(
                                 .chooseTranscriptionModel(

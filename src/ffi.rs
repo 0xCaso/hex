@@ -954,6 +954,7 @@ struct EngineCore {
     pending_offer: Option<(MeetingCandidate, Instant)>,
     ready_panel_deadline: Option<Instant>,
     active_meeting_transcript_len: u64,
+    transcription_picker_language: Option<String>,
     transcription_preparation: TranscriptionPreparation,
     transcription_deletion_error: Option<String>,
     available_microphones: Vec<String>,
@@ -1256,6 +1257,8 @@ impl EngineCore {
             .map_err(|e| e.to_string())?;
         if self.persist_settings {
             candidate.save().map_err(|e| e.to_string())?;
+        } else {
+            candidate.apply_runtime();
         }
         self.settings = candidate;
         Ok(())
@@ -1344,8 +1347,8 @@ impl EngineCore {
                         "waiting for permissions and local model before starting hotkey listener"
                     );
                     while !crate::SHUTDOWN.load(Ordering::Relaxed) {
-                        let current = AppSettings::load().unwrap_or_default();
-                        if onboarding::status(&current.transcription).ready() {
+                        let (_, selection) = crate::app_settings::transcription_selection();
+                        if onboarding::status(&selection).ready() {
                             let _ = onboarding::record_completion();
                             break;
                         }
@@ -1383,6 +1386,20 @@ impl EngineCore {
                 self.instance_guard = Some(guard);
                 self.instance_lock_held = true;
                 self.instance_conflict_error = None;
+                if self.event_log.is_none() {
+                    self.event_log = crate::app_paths::logs_dir()
+                        .ok()
+                        .map(|dir| dir.join("live.ndjson"))
+                        .and_then(|path| crate::events::EventLog::create(&path).ok());
+                }
+                if self.event_reader.is_none() {
+                    self.event_reader = crate::app_paths::logs_dir()
+                        .ok()
+                        .map(|dir| EventReader::open(dir.join("live.ndjson")));
+                }
+                if self.history.is_none() {
+                    self.history = History::open_default(self.settings.history_retention).ok();
+                }
                 self.start_runtime_workers_if_needed();
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
@@ -1464,7 +1481,10 @@ impl EngineCore {
     }
 
     fn transcription_catalog_snapshot(&self) -> HexTranscriptionCatalogSnapshot {
-        let selected_language = self.settings.transcription.language.clone();
+        let selected_language = self
+            .transcription_picker_language
+            .clone()
+            .unwrap_or_else(|| self.settings.transcription.language.clone());
         let prep_status = self.transcription_preparation.status();
         let recommendations = crate::transcription_models::choices_for_runtime(&selected_language);
         let languages = LANGUAGES
@@ -1938,6 +1958,7 @@ impl EngineCore {
         };
         match result {
             Ok(selection) => {
+                self.transcription_picker_language = None;
                 if self.persist_settings {
                     if let Err(error) = self.settings.save_transcription(selection) {
                         tracing::warn!(%error, "could not persist prepared transcription model");
@@ -1948,6 +1969,7 @@ impl EngineCore {
                     }
                 } else {
                     self.settings.remember_transcription(selection);
+                    self.settings.apply_runtime();
                     self.transcription_preparation.set_error(None);
                 }
             }
@@ -2262,15 +2284,13 @@ impl EngineCore {
             if saw_completed_dictation {
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
-            }
-            if context_changed || model_status_changed {
+            } else if context_changed || model_status_changed {
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(
                     hex_event_tag_e::HEX_EVENT_PERSONAL_COMMANDS_UPDATED,
                     &snapshot,
                 );
-            }
-            if activity_changed {
+            } else if activity_changed && self.developer_features_enabled {
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_ACTIVITY_APPENDED, &snapshot);
             }
@@ -2346,10 +2366,12 @@ impl EngineCore {
                 crate::transcription_models::validate(&selection).map_err(|e| e.to_string())?;
                 self.transcription_deletion_error = None;
                 self.transcription_preparation.set_error(None);
+                self.transcription_picker_language = Some(selection.language.clone());
                 if is_installed(definition, &selection.language)
                     && self.settings.transcription.model == model
                     && self.settings.transcription.language == selection.language
                 {
+                    self.transcription_picker_language = None;
                     let mut candidate = self.settings.clone();
                     candidate.remember_transcription(selection);
                     self.commit_settings(candidate)?;
@@ -2363,19 +2385,19 @@ impl EngineCore {
                 Ok(())
             }
             HexEngineCommand::SetTranscriptionLanguage { language } => {
-                let mut candidate = self.settings.clone();
-                let current_def =
-                    crate::transcription_models::definition(candidate.transcription.model);
-                if !current_def.supports_language(&language) {
-                    if let Some(first) = crate::transcription_models::choices_for_runtime(&language)
-                        .first()
-                        .map(|c| c.model.id)
-                    {
-                        candidate.transcription.model = first;
-                    }
+                if !LANGUAGES.iter().any(|(code, _)| *code == language) {
+                    return Err(format!("unsupported transcription language: {language}"));
                 }
-                candidate.transcription.language = language;
-                self.commit_settings(candidate)?;
+                self.transcription_picker_language = Some(language.clone());
+                let current_def =
+                    crate::transcription_models::definition(self.settings.transcription.model);
+                if current_def.supports_language(&language)
+                    && (!self.persist_settings || is_installed(current_def, &language))
+                {
+                    let mut candidate = self.settings.clone();
+                    candidate.transcription.language = language;
+                    self.commit_settings(candidate)?;
+                }
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
                 Ok(())
@@ -3229,7 +3251,9 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
     let (settings, instance_guard, instance_conflict_error, event_log, history) = if cfg
         .start_workers
     {
-        let log_dir = crate::app_paths::init_process_logging(&crate::SHUTDOWN).ok();
+        let log_dir = crate::app_paths::init_process_logging(&crate::SHUTDOWN)
+            .ok()
+            .or_else(|| crate::app_paths::logs_dir().ok());
         let (instance_guard, instance_conflict_error) = match crate::instance::acquire("listener") {
             Ok(guard) => (Some(guard), None),
             Err(error) => {
@@ -3246,6 +3270,7 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
             tracing::warn!(%error, "could not load settings.json; using defaults");
             AppSettings::default()
         });
+        settings.apply_runtime();
         let history = match History::open_default(settings.history_retention) {
             Ok(history) => Some(history),
             Err(error) => {
@@ -3264,7 +3289,9 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
             history,
         )
     } else {
-        (AppSettings::default(), None, None, None, None)
+        let settings = AppSettings::default();
+        settings.apply_runtime();
+        (settings, None, None, None, None)
     };
 
     let setup_status = onboarding::status(&settings.transcription);
@@ -3381,6 +3408,7 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
         pending_offer: None,
         ready_panel_deadline: None,
         active_meeting_transcript_len: 0,
+        transcription_picker_language: None,
         transcription_preparation: TranscriptionPreparation::default(),
         transcription_deletion_error: None,
         available_microphones,
@@ -3464,7 +3492,6 @@ fn run_coordinator_loop(
                 let _ = guard.refresh_activity_cache();
                 let snapshot = guard.bootstrap_snapshot();
                 guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
-                guard.enqueue_event(hex_event_tag_e::HEX_EVENT_ACTIVITY_APPENDED, &snapshot);
             }
         }
         while let Ok(event) = controller_events.try_recv() {
@@ -3500,8 +3527,6 @@ fn run_coordinator_loop(
                         let _ = guard.refresh_activity_cache();
                         let snapshot = guard.bootstrap_snapshot();
                         guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
-                        guard
-                            .enqueue_event(hex_event_tag_e::HEX_EVENT_ACTIVITY_APPENDED, &snapshot);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -4201,5 +4226,302 @@ int main(void) {{
         assert_eq!(after_va.settings.voice_action.deadline_seconds, 15);
 
         unsafe { hex_engine_free(engine) };
+    }
+
+    #[test]
+    fn headless_ffi_dictation_capture_transcribe_and_paste_cycle() {
+        use crate::app_settings::{LEFT_OPTION_MASK, OPTION_KEY_MASK, TextReplacement};
+        use crate::audio::CaptureInstant;
+        use crate::context::ContextSnapshot;
+        use crate::dictation::{
+            DictationCapture, Finish, MINIMUM_HOLD_DURATION, POST_RELEASE_TAIL,
+        };
+        use crate::history::{HistoryRetention, HistoryStore};
+        use crate::parakeet::{
+            DictationJobStage, DictationWorker, TranscriptionTarget, WorkerEvent,
+        };
+        use crate::suppression::{HotkeyAction, HotkeySuppression, InputEvent};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "hex-ffi-dictation-test-{}-{}",
+            std::process::id(),
+            crate::events::now_ms()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let history_path = temp_dir.join("history.json");
+        let history = History::new(HistoryStore::open(
+            history_path,
+            HistoryRetention::Week,
+            crate::events::now_ms(),
+        ));
+
+        let cfg = hex_runtime_config_s {
+            userdata: ptr::null_mut(),
+            wakeup_cb: None,
+            event_cb: None,
+            developer_features_enabled: true,
+            start_workers: false,
+            preview_dictation_hud: false,
+        };
+        let engine = unsafe { hex_engine_new(&raw const cfg) };
+        assert!(!engine.is_null());
+
+        {
+            let mut guard = unsafe { (*engine).core.lock().unwrap() };
+            guard.history = Some(history.clone());
+        }
+
+        let dispatch = |json: &str| {
+            let mut err_slice = hex_slice_s::default();
+            let ok = unsafe {
+                hex_engine_dispatch_json(
+                    engine,
+                    hex_slice_s {
+                        ptr: json.as_ptr().cast::<c_char>(),
+                        len: json.len(),
+                    },
+                    &raw mut err_slice,
+                )
+            };
+            if !ok {
+                let err_str = slice_to_str(err_slice).unwrap_or("").to_string();
+                unsafe { hex_string_free(err_slice) };
+                panic!("dispatch failed for {json}: {err_str}");
+            }
+        };
+
+        // 1. Capture Left-Option dictation shortcut with raw CGEventFlags (OPTION | LEFT_OPTION)
+        //    and verify runtime_hotkeys() reflects the left-side binding immediately.
+        let left_option_flags = OPTION_KEY_MASK | LEFT_OPTION_MASK;
+        dispatch(&format!(
+            r#"{{"type":"capture_hotkey","target":"dictation","key":null,"key_code":null,"modifier_flags":{left_option_flags}}}"#
+        ));
+        let active_hotkey = crate::app_settings::runtime_hotkeys().dictation;
+        assert!(active_hotkey.matches_flags(left_option_flags));
+
+        // 2. Configure a Global mode replacement via FFI and verify runtime profiles update.
+        let mut mode = {
+            let guard = unsafe { (*engine).core.lock().unwrap() };
+            guard.settings.dictation_processing.default_mode.clone()
+        };
+        mode.replacements = vec![TextReplacement {
+            matched_phrase: "initiative".into(),
+            output: "milestone".into(),
+        }];
+        let update_cmd =
+            serde_json::to_string(&HexEngineCommand::UpdateDefaultMode { mode }).unwrap();
+        dispatch(&update_cmd);
+
+        // 3. Load synthetic speech audio from ~/Library/Caches/hex-echo-scratch/synth/part1.wav
+        //    when present, or generate a 2-second speech-level waveform.
+        let synth_wav = dirs::home_dir()
+            .map(|h| h.join("Library/Caches/hex-echo-scratch/synth/part1.wav"))
+            .filter(|p| p.is_file());
+        let (sample_rate, speech_samples): (u32, Vec<f32>) = if let Some(path) = synth_wav {
+            let mut reader = hound::WavReader::open(&path).expect("open synth part1.wav");
+            let spec = reader.spec();
+            let max_frames = (spec.sample_rate as usize) * 5;
+            let samples: Vec<f32> = match spec.sample_format {
+                hound::SampleFormat::Int => reader
+                    .samples::<i16>()
+                    .take(max_frames)
+                    .map(|s| f32::from(s.unwrap()) / f32::from(i16::MAX))
+                    .collect(),
+                hound::SampleFormat::Float => reader
+                    .samples::<f32>()
+                    .take(max_frames)
+                    .map(|s| s.unwrap())
+                    .collect(),
+            };
+            (spec.sample_rate, samples)
+        } else {
+            let sr = 16_000_u32;
+            let samples = (0..(sr as usize * 2))
+                .map(|i| ((i as f32 * 220.0 * std::f32::consts::TAU) / sr as f32).sin() * 0.25)
+                .collect();
+            (sr, samples)
+        };
+
+        // 4. Drive HotkeySuppression + DictationCapture across press -> intentional hold -> release + tail.
+        let mut suppression = HotkeySuppression::default();
+        let mut capture = DictationCapture::new(sample_rate).expect("create DictationCapture");
+        let chunk_frames = (sample_rate as usize / 50).max(1); // 20 ms chunks
+        let mut now = CaptureInstant::from_nanos(1_000_000_000);
+
+        // Warm 450 ms pre-roll before hotkey press.
+        for chunk in speech_samples.chunks(chunk_frames).take(23) {
+            now = now + Duration::from_millis(20);
+            capture.push_samples(chunk, now, None);
+        }
+
+        // Press Left Option -> HotkeyAction::Start.
+        let press_at = now;
+        assert_eq!(
+            suppression.process(
+                InputEvent::Flags {
+                    flags: left_option_flags
+                },
+                active_hotkey,
+                press_at
+            ),
+            Some(HotkeyAction::Start)
+        );
+        let indicator_sender = {
+            let guard = unsafe { (*engine).core.lock().unwrap() };
+            guard.indicator_sender.clone()
+        };
+        capture
+            .start(press_at, None, None)
+            .expect("start dictation capture");
+        indicator_sender.send(DictationIndicatorEvent::Started);
+
+        // Feed audio through intentional hold (>= MINIMUM_HOLD_DURATION).
+        let mut became_intentional = false;
+        for chunk in speech_samples.chunks(chunk_frames) {
+            now = now + Duration::from_millis(20);
+            capture.push_samples(chunk, now, None);
+            if now.duration_since(press_at) >= MINIMUM_HOLD_DURATION {
+                became_intentional |= capture.become_intentional(now);
+            }
+        }
+        assert!(
+            became_intentional,
+            "capture must cross MINIMUM_HOLD_DURATION"
+        );
+
+        // Release Left Option -> HotkeyAction::Finish.
+        let release_at = now;
+        assert_eq!(
+            suppression.process(InputEvent::Flags { flags: 0 }, active_hotkey, release_at),
+            Some(HotkeyAction::Finish)
+        );
+
+        // Feed POST_RELEASE_TAIL (200 ms) of audio and finish capture.
+        let tail_chunks = (POST_RELEASE_TAIL.as_millis() as usize / 20).max(1);
+        let silence_chunk = vec![0.0_f32; chunk_frames];
+        for _ in 0..tail_chunks {
+            now = now + Duration::from_millis(20);
+            capture.push_samples(&silence_chunk, now, None);
+        }
+        let finish = capture.finish_at(release_at + POST_RELEASE_TAIL);
+        let Finish::Transcribe(clip) = finish else {
+            panic!("expected Finish::Transcribe, got Finish::Discard");
+        };
+        assert!(
+            !clip.is_near_silent(),
+            "synthetic speech clip must not be near-silent"
+        );
+
+        // 5. Submit clip to DictationWorker with a fake paste sink and assert text is pasted and recorded in History.
+        let pasted_outputs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let pasted_sink = pasted_outputs.clone();
+        let transformations = Arc::new(crate::personal_commands::TransformationClient::new(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            temp_dir.join("personal-commands.json"),
+        ));
+        let worker = DictationWorker::start_for_test(
+            transformations,
+            Some(history),
+            move |text, _mode| {
+                pasted_sink.lock().unwrap().push(text.to_string());
+                Ok(())
+            },
+            |_samples| {
+                Ok("Okay, let's get started. I want to go through each initiative.".to_string())
+            },
+        );
+
+        let job_id = worker
+            .transcribe(
+                clip,
+                TranscriptionTarget::Paste,
+                None,
+                ContextSnapshot::default(),
+            )
+            .expect("submit dictation job");
+        indicator_sender.send(DictationIndicatorEvent::Submitted {
+            job_id: job_id.value(),
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut completed_text = None;
+        while Instant::now() < deadline {
+            if let Some(event) = worker.try_recv() {
+                match event {
+                    WorkerEvent::Stage { job_id, stage } => {
+                        indicator_sender.send(match stage {
+                            DictationJobStage::Transcribing => {
+                                DictationIndicatorEvent::Transcribing {
+                                    job_id: job_id.value(),
+                                }
+                            }
+                            DictationJobStage::Processing => DictationIndicatorEvent::Processing {
+                                job_id: job_id.value(),
+                            },
+                        });
+                    }
+                    WorkerEvent::Completed {
+                        job_id,
+                        result: Ok(text),
+                        ..
+                    } => {
+                        indicator_sender.send(DictationIndicatorEvent::JobCompleted {
+                            job_id: job_id.value(),
+                        });
+                        completed_text = Some(text);
+                        break;
+                    }
+                    WorkerEvent::Completed {
+                        result: Err(err), ..
+                    } => panic!("dictation worker failed: {err}"),
+                    other => panic!("unexpected worker event: {other:?}"),
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let final_text = completed_text.expect("dictation job must complete with transcript");
+        assert!(
+            !final_text.trim().is_empty(),
+            "transcribed text must be non-empty"
+        );
+        assert!(
+            final_text.to_lowercase().contains("started")
+                && final_text.to_lowercase().contains("milestone"),
+            "expected transcript with mode replacement ('initiative' -> 'milestone'), got: {final_text:?}"
+        );
+
+        let pasted = pasted_outputs.lock().unwrap().clone();
+        assert_eq!(pasted, vec![final_text.clone()]);
+
+        // Wait briefly for coordinator loop to process JobCompleted HUD telemetry.
+        let hud_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < hud_deadline {
+            let hud = unsafe { hex_engine_read_hud_telemetry(engine) };
+            if hud.phase == hex_hud_phase_e::HEX_HUD_PHASE_COMPLETED {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            unsafe { hex_engine_read_hud_telemetry(engine) }.phase,
+            hex_hud_phase_e::HEX_HUD_PHASE_COMPLETED
+        );
+
+        // Verify FFI history query returns the pasted dictation entry.
+        let history_slice =
+            unsafe { hex_engine_copy_history_page_json(engine, hex_slice_s::default(), 10) };
+        let history_json = slice_to_str(history_slice).unwrap().to_string();
+        unsafe { hex_string_free(history_slice) };
+        let entries: Vec<crate::history::HistoryEntry> =
+            serde_json::from_str(&history_json).expect("decode history entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].final_text, final_text);
+
+        // Reset global runtime settings back to defaults before freeing.
+        AppSettings::default().apply_runtime();
+        unsafe { hex_engine_free(engine) };
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

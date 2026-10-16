@@ -778,6 +778,194 @@ impl DictationWorker {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_for_test<P, T>(
+        transformations: Arc<crate::personal_commands::TransformationClient>,
+        history: Option<History>,
+        mut paste_sink: P,
+        mut fallback_transcribe: T,
+    ) -> Self
+    where
+        P: FnMut(&str, PasteMode) -> Result<()> + Send + 'static,
+        T: FnMut(&[f32]) -> Result<String> + Send + 'static,
+    {
+        let (inference_jobs, inference_receiver) =
+            mpsc::sync_channel::<InferenceCommand>(INFERENCE_QUEUE_CAPACITY);
+        let (processor_jobs, processor_receiver) = mpsc::sync_channel::<ProcessorJob>(4);
+        let (output_jobs, output_receiver) = mpsc::sync_channel::<OutputJob>(8);
+        let (event_sender, events) = mpsc::channel();
+        let state = Arc::new(Mutex::new(WorkerState {
+            next_sequence: 0,
+            jobs: BTreeMap::new(),
+            pending_pastes: 0,
+        }));
+
+        let output_worker = thread::spawn({
+            let state = state.clone();
+            let events = event_sender.clone();
+            move || {
+                let mut last_transcript = None;
+                let mut meeting_cursor = MeetingPasteCursor::default();
+                let mut ordered = OrderedOutputs::default();
+                while let Ok(job) = output_receiver.recv() {
+                    if matches!(job, OutputJob::PreparePaste) {
+                        continue;
+                    }
+                    for job in ordered.push(job) {
+                        let event = finish_output(
+                            job,
+                            &mut |text, mode, commit| {
+                                if !commit() {
+                                    return Ok(());
+                                }
+                                paste_sink(text, mode)
+                            },
+                            &mut last_transcript,
+                            &mut meeting_cursor,
+                            history.as_ref(),
+                        );
+                        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+                        match &event {
+                            WorkerEvent::Completed { job_id, .. }
+                            | WorkerEvent::Cancelled { job_id } => {
+                                state.jobs.remove(job_id);
+                            }
+                            WorkerEvent::Pasted { .. } => {
+                                state.pending_pastes = state.pending_pastes.saturating_sub(1);
+                            }
+                            WorkerEvent::ModelFailed(_) | WorkerEvent::Stage { .. } => {}
+                        }
+                        drop(state);
+                        if events.send(event).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        let processor_receiver = Arc::new(Mutex::new(processor_receiver));
+        let processor_workers = vec![thread::spawn({
+            let jobs = processor_receiver.clone();
+            let output = output_jobs.clone();
+            let events = event_sender.clone();
+            move || run_processor_worker(&jobs, &output, &events, &transformations)
+        })];
+
+        let inference_worker = thread::spawn({
+            let output = output_jobs.clone();
+            move || {
+                let mut transcriber = WarmTranscriber::default();
+                let mut speculative = SpeculativeTranscript::default();
+                while let Ok(command) = inference_receiver.recv() {
+                    let _busy = DictationInference::begin();
+                    let job = match command {
+                        InferenceCommand::Reload(selection) => {
+                            let _ = transcriber.activate(&selection);
+                            continue;
+                        }
+                        InferenceCommand::Segment(_) => continue,
+                        InferenceCommand::Transcribe(job) => *job,
+                        InferenceCommand::Shutdown => break,
+                    };
+                    if job.control.is_cancelled() {
+                        let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
+                        continue;
+                    }
+                    let _ = event_sender.send(WorkerEvent::Stage {
+                        job_id: job.job_id,
+                        stage: DictationJobStage::Transcribing,
+                    });
+                    let total_started = job.submitted_at;
+                    let queue_ms = total_started.elapsed().as_millis();
+                    let audio_ms = job.clip.duration_ms();
+                    let prepare_started = Instant::now();
+                    let plan =
+                        speculative.take_plan(&job.clip, &job.selection, job.protocol.is_some());
+                    let clip_samples = job.clip.into_transcription_samples();
+                    let prepare_ms = prepare_started.elapsed().as_millis();
+                    let inference_started = Instant::now();
+                    let model_installed =
+                        crate::onboarding::transcription_model_installed(&job.selection);
+                    let result = transcribe_clip(
+                        clip_samples,
+                        plan,
+                        job.protocol.as_deref(),
+                        |samples, protocol| {
+                            if model_installed
+                                && let Ok(active) = transcriber.activate(&job.selection)
+                            {
+                                match protocol {
+                                    Some(protocol) => active.transcribe_voice(samples, protocol),
+                                    None => active.transcribe(samples),
+                                }
+                            } else {
+                                fallback_transcribe(samples)
+                            }
+                        },
+                    )
+                    .map(|text| strip_transcript_protocol(&text, job.protocol.as_deref()))
+                    .map_err(|error| error.to_string());
+                    let timings = JobTimings {
+                        total_started,
+                        queue_ms,
+                        audio_ms,
+                        prepare_ms,
+                        inference_ms: inference_started.elapsed().as_millis(),
+                    };
+                    match result {
+                        Ok(text) if !text.trim().is_empty() => {
+                            if processor_jobs
+                                .send(ProcessorJob {
+                                    job_id: job.job_id,
+                                    control: job.control,
+                                    target: job.target,
+                                    text,
+                                    context: job.context,
+                                    timings,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        result => {
+                            let application = job.context.application;
+                            let result = result.map(|text| CompletedTranscript {
+                                raw: text.clone(),
+                                text,
+                                application,
+                                timings,
+                                processing: None,
+                            });
+                            if output
+                                .send(OutputJob::Completed {
+                                    job_id: job.job_id,
+                                    control: job.control,
+                                    target: job.target,
+                                    result: Box::new(result),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            inference_jobs: Some(inference_jobs),
+            output_jobs: Some(output_jobs),
+            events,
+            state,
+            inference_worker: Some(inference_worker),
+            processor_workers,
+            output_worker: Some(output_worker),
+        }
+    }
+
     pub fn transcribe(
         &self,
         clip: DictationClip,

@@ -560,7 +560,7 @@ public struct HexTranscriptionSelection: Codable, Sendable, Equatable {
     public var recognitionHints: String
 
     public init(
-        model: String = "parakeet-tdt-0.6b-v3",
+        model: String = "parakeet_unified_en",
         language: String = "en",
         recognitionHints: String = ""
     ) {
@@ -1049,7 +1049,7 @@ public struct HexBootstrapSnapshot: Codable, Sendable, Equatable {
         self.statusMenu = try c.decode(HexStatusMenuSnapshot.self, forKey: .statusMenu)
         self.hudTelemetry = try c.decodeIfPresent(HexHudTelemetry.self, forKey: .hudTelemetry) ?? HexHudTelemetry()
         self.meetingPanel = try c.decodeIfPresent(HexMeetingPanelSnapshot.self, forKey: .meetingPanel) ?? .hidden
-        self.activeModelId = try c.decodeIfPresent(String.self, forKey: .activeModelId) ?? "parakeet-tdt-0.6b-v3"
+        self.activeModelId = try c.decodeIfPresent(String.self, forKey: .activeModelId) ?? "parakeet_unified_en"
         self.activeLanguage = try c.decodeIfPresent(String.self, forKey: .activeLanguage) ?? "en"
         self.commandsEnabled = try c.decodeIfPresent(Bool.self, forKey: .commandsEnabled) ?? false
         self.voiceActionEnabled = try c.decodeIfPresent(Bool.self, forKey: .voiceActionEnabled) ?? false

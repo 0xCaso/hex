@@ -810,7 +810,7 @@ impl AppSettings {
         Ok(())
     }
 
-    fn apply_runtime(&self) {
+    pub(crate) fn apply_runtime(&self) {
         let policy =
             u8::from(self.commands_enabled) | (u8::from(self.release_microphone_while_idle) << 1);
         MICROPHONE_POLICY.store(policy, Ordering::Release);

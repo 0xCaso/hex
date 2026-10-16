@@ -284,10 +284,8 @@ public final class HexEngineRuntime {
              .historyUpdated, .activityAppended:
             if let decoded = try? decoder.decode(HexBootstrapSnapshot.self, from: data) {
                 self.snapshot = decoded
-                self.hudTelemetry = decoded.hudTelemetry
                 self.meetingPanel = decoded.meetingPanel
                 onSnapshotUpdated?(decoded)
-                onHudTelemetryUpdated?(decoded.hudTelemetry)
                 onMeetingPanelUpdated?(decoded.meetingPanel)
             }
             onEventReceived?(tag)

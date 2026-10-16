@@ -166,8 +166,14 @@ public final class DictationHUDPanelController: NSObject {
     }
 
     public func handleTelemetryUpdate(_ telemetry: HexHudTelemetry) {
+        let phaseChanged = telemetry.phase != lastPhase
         syncPhaseTransitions(with: telemetry, now: ProcessInfo.processInfo.systemUptime)
-        if telemetry.phase != .hidden {
+        let isActiveCaptureOrTranscribe =
+            telemetry.phase == .listening
+            || telemetry.phase == .locked
+            || telemetry.phase == .voiceAction
+            || telemetry.phase == .transcribing
+        if isActiveCaptureOrTranscribe || (phaseChanged && telemetry.phase != .hidden) {
             ensureActiveDisplayLink()
         }
     }
