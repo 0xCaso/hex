@@ -418,13 +418,14 @@ enum MeetingCommand {
     },
     /// Print applications currently using microphone input.
     Probe,
-    /// Write Apple Intelligence notes for a meeting id, or print notes for a
+    /// Write an Apple Intelligence title and summary for a meeting id, or
+    /// time the provisional title and the final title and summary for a
     /// transcript Markdown file without saving them.
     Summarize {
         target: String,
-        /// Override the per-chunk character budget (file targets only).
+        /// Override the excerpt character budget (file targets only).
         #[arg(long)]
-        chunk_chars: Option<usize>,
+        excerpt_chars: Option<usize>,
     },
     /// Replay a meeting folder's tracks and report which microphone lines
     /// echo suppression keeps.
@@ -443,7 +444,7 @@ enum MeetingCommand {
 #[cfg(target_os = "macos")]
 fn main() -> Result<()> {
     color_eyre::install()?;
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(mcp_alias_arguments(std::env::args_os().collect()));
     // Before process logging, the instance lock, or any GUI or permission
     // setup: an agent may start this over SSH while the app is running.
     if let Some(Command::Mcp { meetings_dir }) = &cli.command {
@@ -743,12 +744,12 @@ fn main() -> Result<()> {
             command:
                 MeetingCommand::Summarize {
                     target,
-                    chunk_chars,
+                    excerpt_chars,
                 },
         } => {
             let path = PathBuf::from(&target);
             if path.is_file() {
-                print!("{}", meeting::summarize_file(&path, chunk_chars)?);
+                print!("{}", meeting::summarize_file(&path, excerpt_chars)?);
             } else {
                 app_settings::AppSettings::load()?;
                 let manifest = meeting::summarize(&target)?;
@@ -830,6 +831,20 @@ fn run_mcp(meetings_dir: Option<PathBuf>) -> Result<()> {
     meeting_mcp::run(root)
 }
 
+/// A copy installed as `hex-meetings-mcp` only serves meetings: its
+/// arguments are those of `hex mcp`, and it never falls back to listening.
+#[cfg(target_os = "macos")]
+fn mcp_alias_arguments(mut arguments: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let alias = arguments
+        .first()
+        .and_then(|program| std::path::Path::new(program).file_stem())
+        .is_some_and(|stem| stem == "hex-meetings-mcp");
+    if alias && arguments.get(1).is_none_or(|argument| argument != "mcp") {
+        arguments.insert(1, "mcp".into());
+    }
+    arguments
+}
+
 #[cfg(target_os = "macos")]
 fn is_bundled_app_executable(name: Option<&std::ffi::OsStr>) -> bool {
     name.is_some_and(|name| name == "voice-control-watch" || name == "hex")
@@ -837,8 +852,31 @@ fn is_bundled_app_executable(name: Option<&std::ffi::OsStr>) -> bool {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{Cli, Command, is_bundled_app_executable};
+    use super::{Cli, Command, is_bundled_app_executable, mcp_alias_arguments};
     use clap::Parser;
+
+    #[test]
+    fn the_meetings_mcp_alias_always_serves_meetings() {
+        let parse = |arguments: &[&str]| {
+            Cli::parse_from(mcp_alias_arguments(
+                arguments.iter().map(Into::into).collect(),
+            ))
+            .command
+        };
+        assert!(matches!(
+            parse(&["/Users/kit/.local/bin/hex-meetings-mcp"]),
+            Some(Command::Mcp { meetings_dir: None })
+        ));
+        assert!(matches!(
+            parse(&["hex-meetings-mcp", "--meetings-dir", "/tmp/mirror"]),
+            Some(Command::Mcp { meetings_dir: Some(directory) }) if directory.ends_with("mirror")
+        ));
+        assert!(matches!(
+            parse(&["hex-meetings-mcp", "mcp"]),
+            Some(Command::Mcp { .. })
+        ));
+        assert!(parse(&["hex"]).is_none());
+    }
 
     #[test]
     fn voice_action_preview_requires_explicit_opt_in() {
