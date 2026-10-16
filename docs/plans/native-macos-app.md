@@ -660,3 +660,67 @@ Verification Pyramid
    - *Recommendation:* Keep all Swift feature, bridge, and UI code in `macos/HexMacPackage/Package.swift` (where source files are discovered automatically by directory without project file edits) and use a tiny, stable `macos/Hex.xcodeproj` (generated from `macos/project.yml` via `xcodegen`) solely for the `@main` app bundle wrapper, `Assets.xcassets`, `AppIcon.icon`, entitlements, and `Sparkle.framework` embedding.
 5. **Decision: Merging `origin/feat/meetings-ux` Before vs During M0**
    - *Recommendation:* Merge `feat/meetings-ux` into `main` first (or rebase `M0` directly on `feat/meetings-ux`), because `feat/meetings-ux` already cleanly separates the Rust meeting backend (`meeting_transcript.rs`, `meeting_echo.rs`, `meeting_notes.rs`, `pause_segmenter.rs`, `apple_intelligence.rs`) from the UI presentation.
+
+---
+
+## 9. Behavior-ID Parity Checklist (`docs/features/*.md`)
+
+Every user-facing behavior ID across `docs/features/README.md`, `dictation.md`, `commands.md`, `voice-action.md`, `meetings.md`, and `recovery.md` is tracked below against the native macOS implementation (`macos/HexMacPackage` + `src/ffi.rs`).
+
+### Setup, Models, Output, Settings & Maintenance (`docs/features/README.md`)
+
+- `setup.download-recovery` — **Done**: Model transfer host guidance & retry surfaced via `HexTranscriptionModelPickerSheet` and `HexCommandsPane` (`src/ffi.rs`, `HexGeneralSettingsPane.swift`).
+- `setup` — **Done**: Startup gate (`HexOnboardingView` + `HexGeneralSettingsPane` top banners) checks Microphone, Input Monitoring, Accessibility, and local model installation before starting dictation (`src/ffi.rs`, `HexAppDelegate.swift`).
+- `setup.language-conditioning` — **Done**: Language selector + Parakeet v3 auto-detect notice and Whisper language-hint support in `HexTranscriptionModelPickerSheet` (`HexGeneralSettingsPane.swift`).
+- `setup.quick-model-switch` — **Done**: Installed-only `Transcription Model` submenu in `StatusBarController` with remembered language/hints, `Cancel Model Switch`, and `Manage Models…` (`StatusBarController.swift`, `src/ffi.rs`).
+- `setup.delete-model` — **Done**: Model deletion in `HexTranscriptionModelPickerSheet` spares active/preparing models and acquires the download lock (`src/ffi.rs`, `HexGeneralSettingsPane.swift`).
+- `dictation` — **Done**: Hold-to-dictate, double-tap lock, `double_tap_only`, and Escape cancellation via `libhex` + `HexGeneralSettingsPane` (`src/ffi.rs`, `HexGeneralSettingsPane.swift`).
+- `output` — **Done**: Submission-order paste, spoken Send, `Paste Last Dictation` (`⌥⇧V` + menu item), and full `HexHistoryPane` (search, copy text/raw transcript, retention picker, entry delete, two-step Clear History) (`HexHistoryCommandsMeetingsPanes.swift`).
+- `settings` — **Done**: Native `HexGeneralSettingsPane` with `HexShortcutRecorderControl` (plus Left/Either/Right side picker), Microphone picker + refresh, Keep Ready vs Release When Idle confirmation alert, While Recording behavior, Transcribe During Pauses, and Feedback Volume slider (`HexGeneralSettingsPane.swift`, `HexSettingsStore.swift`).
+- `recording.environment` — **Done**: Rust `recording_environment` RAII sleep assertion, mute, and media pause owned by `libhex` worker.
+- `modes` — **Done**: `HexModesPane` master-detail editor for Global and custom modes: app bundle & Brave domain activation rules, phrase-boundary corrections, OpenCode AI rewrite (model, thinking variant, prompt), and ordered `@hex/commands` transformations (`HexModesAndVoiceActionPanes.swift`).
+- `recovery` / `maintenance` — **Done**: Menu bar reachable when dockless; orderly shutdown in `HexAppDelegate.applicationWillTerminate`.
+- `maintain.startup` / `maintain.dock-policy` — **Done**: `HexAppDelegate.applyDockPolicy` promotes `.regular` while Settings is visible and restores `.accessory` on close when `show_dock_icon` is off (`HexAppDelegate.swift`).
+- `maintain.login-item` — **Done**: `LaunchAtLoginController` (`SMAppService.mainApp`) handles `.enabled`, `.notRegistered`/`.notFound`, and `.requiresApproval` with deep link to System Settings > Login Items (`HexSettingsStore.swift`, `HexGeneralSettingsPane.swift`).
+- `maintain.updates` / `maintain.managed-updates` — **Done**: `SparkleController` + `DisableUpdates` managed-organization policy in `StatusBarController` and `HexGeneralSettingsPane` (`SparkleController.swift`, `StatusBarController.swift`).
+- `maintain.linux-service` / `dictate.feedback.linux` — **Done (N/A on macOS)**: Preserved untouched in Linux targets.
+
+### Dictation (`docs/features/dictation.md`)
+
+- `dictate.hold` / `dictate.short-tap` — **Done**: 300 ms hold threshold and short-tap discard in `libhex` (`suppression.rs`, `recognition.rs`).
+- `dictate.lock` / `dictate.double-tap-only` — **Done**: Toggles and key-binding gate in `HexGeneralSettingsPane` (`HexGeneralSettingsPane.swift`, `src/ffi.rs`).
+- `dictate.boundaries` / `dictate.release-tail` / `dictate.cold-microphone` — **Done**: Authoritative timeline and warm/cold microphone policy in `libhex` (`dictation_audio.rs`).
+- `dictate.model-windows` / `dictate.incremental` / `dictate.model-memory` / `dictate.inference-threads` — **Done**: `Transcribe during pauses` toggle in `HexGeneralSettingsPane` backed by `libhex` (`parakeet.rs`).
+- `dictate.silence-gate` / `dictate.overlap` / `dictate.cancel` — **Done**: Silence gate, queued overlap, and Escape cancellation in `libhex`.
+- `dictate.feedback` — **Done**: Click-through 120 Hz Metal `DictationHUDPanelController` (`src/dictation_indicator.metal`) + immediate volume preview tones (`DictationHUDPanelController.swift`, `src/ffi.rs`).
+
+### Voice Commands (`docs/features/commands.md`)
+
+- `commands` / `commands.opt-in` — **Done**: `HexCommandsPane` opt-in toggle, mutual-exclusion confirmation with `Release microphone while idle`, background Moonshine preparation status, Retry, and Turn Off actions (`HexHistoryCommandsMeetingsPanes.swift`, `HexSettingsStore.swift`).
+- `commands.awake-sleep` / `dictate.voice-controls` — **Done**: Handled by `libhex` recognition worker and reflected in `DictationHUDPanelController` telemetry (`is_command_mode_awake`).
+- `commands.catalog` / `commands.context` — **Done**: Searchable command catalog and detail inspector with live foreground context label in `HexCommandsPane` (`HexHistoryCommandsMeetingsPanes.swift`).
+- `commands.personal-config` — **Done**: `Create Custom Config`, `Open hex.config.ts`, `Copy Agent Prompt`, and reload error banner in `HexCommandsPane` (`src/ffi.rs`, `HexHistoryCommandsMeetingsPanes.swift`).
+
+### Voice Action (`docs/features/voice-action.md`)
+
+- `voice-action` / `voice-action.opt-in` — **Done**: `HexVoiceActionPane` independent opt-in toggle (reachable when OpenCode is unavailable), conflict validation, and saved state preservation (`HexModesAndVoiceActionPanes.swift`, `src/ffi.rs`).
+- `voice-action.shortcut` / `voice-action.selection` — **Done**: `HexShortcutRecorderControl` for the `edit` target + Option-to-Option+Command promotion and Accessibility selection capture in `libhex`.
+- `voice-action.processing` / `voice-action.output` / `voice-action.cancel` — **Done**: OpenCode model & thinking-variant pickers, catalog refresh, setup docs link, and HUD `voiceAction` phase in `HexVoiceActionPane` and `DictationHUDPanelController`.
+
+### Meetings (`docs/features/meetings.md`)
+
+- `meetings.opt-in` — **Done**: `Meetings (Beta)` section in `HexGeneralSettingsPane` (enable toggle, Screen & System Audio permission check, transcript folder picker/reveal/reset, Apple Intelligence summary toggle) (`HexGeneralSettingsPane.swift`).
+- `meetings.detect` / `meetings.offer` / `meetings.record` / `meetings.call-ended` — **Done**: Focus-free `MeetingCapsulePanelController` for detected-call offers, active recording status, call-ended prompt, and ready summary (`MeetingCapsulePanelController.swift`, `StatusBarController.swift`).
+- `meetings.rolling` / `meetings.echo` / `meetings.output` — **Done**: Dual-stream capture, echo suppression, coalesced speaker turns (`You` / `Them`), and Markdown export in `libhex` (`src/ffi.rs`).
+- `meetings.rename` / `meetings.delete` / `meetings.title.provisional` / `meetings.notes` — **Done**: Full `HexMeetingsPane` workspace with search, start/stop recording, inline rename, two-step delete (disabled while busy), Apple Intelligence notes card (Summarize / Regenerate / Copy Notes), Copy Transcript, and Reveal Markdown (`HexHistoryCommandsMeetingsPanes.swift`).
+- `meetings.mcp` / `meetings.mcp.mirror` — **Done**: Preserved via CLI passthrough (`hex mcp`) in `macos/HexApp/main.swift` (`src/lib.rs`).
+
+### Recovery (`docs/features/recovery.md`)
+
+- `recover.cancel` / `recover.shortcut` / `recover.tap-interruption` / `recover.microphone` / `recover.cold-open` / `recover.late-notification` / `recover.command-pressure` / `recover.optional-processing` — **Done**: Enforced by `libhex` workers and surfaced in `HexGeneralSettingsPane`, `HexCommandsPane`, `HexVoiceActionPane`, and `HexActivityPane`.
+- `recover.keyboard-layout` — **Done**: `HexAppDelegate.applicationDidFinishLaunching` calls `HexEngineRuntime.initializeKeyboardLayoutOnMainThread()` before `hex_engine_new` (`HexAppDelegate.swift`, `HexEngineClientTests.swift`).
+
+### Remaining Cutover Work (Milestone M4)
+
+- **Partial — Legacy GPUI Preview Flag Parity (`scripts/capture-preview.sh`):** The native app supports `--preview-dictation`, `HexHudLabPane`, and `hex dev` (`HEX_EVENT_DEV_COMMAND_REQUESTED`), while the legacy CLI `preview <target>` flags still route to `src/app_window.rs` until M4 removes GPUI on macOS.
+- **Pending M4 — Delete Legacy macOS GPUI Modules:** Removing `src/app_window.rs`, `src/status_item.rs`, `src/dictation_indicator.rs`, `src/sparkle.rs`, and gating `gpui` to `cfg(target_os = "linux")` in `Cargo.toml` is scheduled for Milestone M4 after review.

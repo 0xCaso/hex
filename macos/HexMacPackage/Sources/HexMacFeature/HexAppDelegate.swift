@@ -12,6 +12,7 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
 
     private let previewDictationHUD: Bool
     private let developerFeaturesEnabled: Bool
+    private var isSettingsWindowVisible: Bool = false
 
     public init(
         previewDictationHUD: Bool = CommandLine.arguments.contains("--preview-dictation"),
@@ -39,15 +40,30 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
         let statusBar = StatusBarController(runtime: engine)
         let hudController = DictationHUDPanelController(runtime: engine)
         let meetingController = MeetingCapsulePanelController(runtime: engine)
-        let windowController = HexStatusWindowController(runtime: engine)
+        let windowController = HexStatusWindowController(
+            runtime: engine,
+            onCheckForUpdates: { [weak sparkle] in
+                sparkle?.checkForUpdates()
+            }
+        )
 
         self.statusBarController = statusBar
         self.dictationHUDController = hudController
         self.meetingCapsuleController = meetingController
         self.statusWindowController = windowController
 
-        statusBar.onOpenSettings = { [weak self] _ in
-            self?.statusWindowController?.showAndFocus()
+        windowController.onWindowVisibilityChanged = { [weak self] visible in
+            guard let self else { return }
+            self.isSettingsWindowVisible = visible
+            let showDock = self.runtime?.snapshot?.showDockIcon ?? true
+            self.applyDockPolicy(showDockIcon: showDock)
+            if !visible && !showDock {
+                NSApp.hide(nil)
+            }
+        }
+
+        statusBar.onOpenSettings = { [weak self] destination in
+            self?.statusWindowController?.showAndFocus(destination: destination)
         }
         statusBar.onCheckForUpdates = { [weak self] in
             self?.sparkleController?.checkForUpdates()
@@ -60,6 +76,7 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.applyDockPolicy(showDockIcon: snapshot.showDockIcon)
             self.statusBarController?.update(with: snapshot.statusMenu)
+            self.statusWindowController?.handleSnapshotUpdate(snapshot)
         }
         engine.onHudTelemetryUpdated = { [weak self] telemetry in
             self?.dictationHUDController?.handleTelemetryUpdate(telemetry)
@@ -69,6 +86,13 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
         }
         engine.onCheckForUpdatesRequested = { [weak self] in
             self?.sparkleController?.checkForUpdates()
+        }
+        engine.onDeveloperCommandRequested = { [weak self] payload in
+            if let pane = try? JSONDecoder().decode(String.self, from: payload) {
+                self?.statusWindowController?.showAndFocus(destination: pane)
+            } else {
+                self?.statusWindowController?.showAndFocus()
+            }
         }
         engine.onQuitRequested = {
             NSApp.terminate(nil)
@@ -80,7 +104,7 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
             hudController.handleTelemetryUpdate(initialSnapshot.hudTelemetry)
             meetingController.update(with: initialSnapshot.meetingPanel)
             if !initialSnapshot.setupReady && !previewDictationHUD {
-                windowController.showAndFocus()
+                windowController.showAndFocus(destination: "onboarding")
             }
         }
     }
@@ -99,7 +123,8 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyDockPolicy(showDockIcon: Bool) {
-        let targetPolicy: NSApplication.ActivationPolicy = showDockIcon ? .regular : .accessory
+        let shouldShowInDock = showDockIcon || isSettingsWindowVisible
+        let targetPolicy: NSApplication.ActivationPolicy = shouldShowInDock ? .regular : .accessory
         if NSApp.activationPolicy() != targetPolicy {
             NSApp.setActivationPolicy(targetPolicy)
         }

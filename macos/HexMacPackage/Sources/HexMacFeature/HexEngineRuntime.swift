@@ -181,10 +181,16 @@ public final class HexEngineRuntime {
         }
         defer { hex_string_free(errorSlice) }
         if !succeeded {
-            if let errorData = Self.data(from: errorSlice),
-               let message = String(data: errorData, encoding: .utf8)
-            {
-                self.lastError = message
+            if let errorData = Self.data(from: errorSlice) {
+                if let obj = try? JSONSerialization.jsonObject(with: errorData) as? [String: Any],
+                   let msg = obj["error"] as? String
+                {
+                    self.lastError = msg
+                } else if let message = String(data: errorData, encoding: .utf8) {
+                    self.lastError = message
+                } else {
+                    self.lastError = "Engine command failed"
+                }
             } else {
                 self.lastError = "Engine command failed"
             }
@@ -192,6 +198,16 @@ public final class HexEngineRuntime {
             self.lastError = nil
         }
         return succeeded
+    }
+
+    public func fetchHistoryEntries(query: String = "", limit: UInt32 = 200) -> [HexHistoryEntry] {
+        guard let data = copyHistoryPageJSON(query: query, limit: limit) else { return [] }
+        return (try? decoder.decode([HexHistoryEntry].self, from: data)) ?? []
+    }
+
+    public func fetchMeetingDetail(meetingId: String) -> HexMeetingDetailSnapshot? {
+        guard let data = copyMeetingDetailJSON(meetingId: meetingId) else { return nil }
+        return try? decoder.decode(HexMeetingDetailSnapshot.self, from: data)
     }
 
     public func copyHistoryPageJSON(query: String = "", limit: UInt32 = 100) -> Data? {
@@ -231,7 +247,8 @@ public final class HexEngineRuntime {
         receivedEvents.append(event)
 
         switch tag {
-        case .readinessChanged, .settingsChanged, .modelPrepUpdated, .meetingStateChanged:
+        case .readinessChanged, .settingsChanged, .modelPrepUpdated, .meetingStateChanged,
+             .opencodeCatalogUpdated, .personalCommandsUpdated, .historyUpdated, .activityAppended:
             if let decoded = try? decoder.decode(HexBootstrapSnapshot.self, from: data) {
                 self.snapshot = decoded
                 self.hudTelemetry = decoded.hudTelemetry
@@ -284,6 +301,12 @@ public final class HexEngineRuntime {
             return true
         }
         if snapshot?.statusMenu.preparingModelTitle != nil {
+            return true
+        }
+        if snapshot?.opencodeCatalog.state == "loading" {
+            return true
+        }
+        if snapshot?.transcriptionCatalog.models.contains(where: \.preparing) == true {
             return true
         }
         return false

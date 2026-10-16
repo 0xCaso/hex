@@ -57,10 +57,14 @@ public enum HexTuning {
     }
 
     public enum StatusWindow {
-        public static let defaultWidth: CGFloat = 720.0
-        public static let defaultHeight: CGFloat = 520.0
-        public static let minWidth: CGFloat = 640.0
-        public static let minHeight: CGFloat = 440.0
+        public static let defaultWidth: CGFloat = 880.0
+        public static let defaultHeight: CGFloat = 620.0
+        public static let minWidth: CGFloat = 740.0
+        public static let minHeight: CGFloat = 480.0
+        public static let sidebarMinWidth: CGFloat = 190.0
+        public static let sidebarIdealWidth: CGFloat = 210.0
+        public static let sidebarMaxWidth: CGFloat = 240.0
+        public static let listColumnWidth: CGFloat = 240.0
         public static let contentPadding: CGFloat = 20.0
         public static let cardCornerRadius: CGFloat = 10.0
     }

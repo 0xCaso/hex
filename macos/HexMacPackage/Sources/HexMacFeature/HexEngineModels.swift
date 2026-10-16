@@ -108,15 +108,676 @@ public struct HexHudTelemetry: Codable, Sendable, Equatable {
 
 public struct HexPermissionSnapshot: Codable, Sendable, Equatable {
     public var microphoneGranted: Bool
+    public var microphoneState: String
     public var accessibilityGranted: Bool
     public var inputMonitoringGranted: Bool
     public var modelInstalled: Bool
+    public var screenRecordingGranted: Bool
+
+    public init(
+        microphoneGranted: Bool = false,
+        microphoneState: String = "needs_request",
+        accessibilityGranted: Bool = false,
+        inputMonitoringGranted: Bool = false,
+        modelInstalled: Bool = false,
+        screenRecordingGranted: Bool = false
+    ) {
+        self.microphoneGranted = microphoneGranted
+        self.microphoneState = microphoneState
+        self.accessibilityGranted = accessibilityGranted
+        self.inputMonitoringGranted = inputMonitoringGranted
+        self.modelInstalled = modelInstalled
+        self.screenRecordingGranted = screenRecordingGranted
+    }
 
     enum CodingKeys: String, CodingKey {
         case microphoneGranted = "microphone_granted"
+        case microphoneState = "microphone_state"
         case accessibilityGranted = "accessibility_granted"
         case inputMonitoringGranted = "input_monitoring_granted"
         case modelInstalled = "model_installed"
+        case screenRecordingGranted = "screen_recording_granted"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.microphoneGranted = try c.decodeIfPresent(Bool.self, forKey: .microphoneGranted) ?? false
+        self.microphoneState = try c.decodeIfPresent(String.self, forKey: .microphoneState)
+            ?? (self.microphoneGranted ? "ready" : "needs_request")
+        self.accessibilityGranted = try c.decodeIfPresent(Bool.self, forKey: .accessibilityGranted) ?? false
+        self.inputMonitoringGranted = try c.decodeIfPresent(Bool.self, forKey: .inputMonitoringGranted) ?? false
+        self.modelInstalled = try c.decodeIfPresent(Bool.self, forKey: .modelInstalled) ?? false
+        self.screenRecordingGranted = try c.decodeIfPresent(Bool.self, forKey: .screenRecordingGranted) ?? false
+    }
+}
+
+public struct HexLanguageOption: Codable, Sendable, Equatable, Identifiable {
+    public var code: String
+    public var name: String
+    public var id: String { code }
+
+    public init(code: String = "en", name: String = "English") {
+        self.code = code
+        self.name = name
+    }
+}
+
+public struct HexTranscriptionModelRow: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    public var summary: String
+    public var realtime: String
+    public var sizeLabel: String
+    public var quality: String
+    public var qualityContext: String
+    public var coverage: String
+    public var languages: [String]
+    public var supportsRecognitionHints: Bool
+    public var installed: Bool
+    public var active: Bool
+    public var recommendedForLanguage: Bool
+    public var recommendationLabel: String?
+    public var canDelete: Bool
+    public var preparing: Bool
+    public var downloadedBytes: UInt64
+    public var totalBytes: UInt64?
+    public var progressFraction: Float?
+    public var statusLabel: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, summary, realtime, quality, coverage, languages, installed, active, preparing
+        case sizeLabel = "size_label"
+        case qualityContext = "quality_context"
+        case supportsRecognitionHints = "supports_recognition_hints"
+        case recommendedForLanguage = "recommended_for_language"
+        case recommendationLabel = "recommendation_label"
+        case canDelete = "can_delete"
+        case downloadedBytes = "downloaded_bytes"
+        case totalBytes = "total_bytes"
+        case progressFraction = "progress_fraction"
+        case statusLabel = "status_label"
+    }
+}
+
+public struct HexTranscriptionCatalogSnapshot: Codable, Sendable, Equatable {
+    public var selectedLanguage: String
+    public var languages: [HexLanguageOption]
+    public var models: [HexTranscriptionModelRow]
+    public var preparationError: String?
+    public var deletionError: String?
+
+    public init(
+        selectedLanguage: String = "en",
+        languages: [HexLanguageOption] = [],
+        models: [HexTranscriptionModelRow] = [],
+        preparationError: String? = nil,
+        deletionError: String? = nil
+    ) {
+        self.selectedLanguage = selectedLanguage
+        self.languages = languages
+        self.models = models
+        self.preparationError = preparationError
+        self.deletionError = deletionError
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case selectedLanguage = "selected_language"
+        case languages, models
+        case preparationError = "preparation_error"
+        case deletionError = "deletion_error"
+    }
+}
+
+public struct HexOpenCodeModelChoice: Codable, Sendable, Equatable, Identifiable {
+    public var key: String
+    public var name: String
+    public var provider: String
+    public var variants: [String]
+    public var recommendedVariant: String?
+
+    public var id: String { key }
+
+    enum CodingKeys: String, CodingKey {
+        case key, name, provider, variants
+        case recommendedVariant = "recommended_variant"
+    }
+}
+
+public struct HexOpenCodeCatalogSnapshot: Codable, Sendable, Equatable {
+    public var state: String
+    public var error: String?
+    public var defaultKey: String?
+    public var defaultName: String?
+    public var defaultVariant: String?
+    public var models: [HexOpenCodeModelChoice]
+
+    public init(
+        state: String = "loading",
+        error: String? = nil,
+        defaultKey: String? = nil,
+        defaultName: String? = nil,
+        defaultVariant: String? = nil,
+        models: [HexOpenCodeModelChoice] = []
+    ) {
+        self.state = state
+        self.error = error
+        self.defaultKey = defaultKey
+        self.defaultName = defaultName
+        self.defaultVariant = defaultVariant
+        self.models = models
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state, error, models
+        case defaultKey = "default_key"
+        case defaultName = "default_name"
+        case defaultVariant = "default_variant"
+    }
+}
+
+public struct HexCommandCatalogItem: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var group: String
+    public var phrase: String
+    public var aliases: [String]
+    public var description: String
+    public var scope: String
+}
+
+public struct HexTransformationCatalogItem: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    public var description: String
+}
+
+public struct HexCommandsSnapshot: Codable, Sendable, Equatable {
+    public var commandModelStatus: String
+    public var workspacePath: String
+    public var configFilePath: String
+    public var workspaceExists: Bool
+    public var lastReloadError: String?
+    public var currentContextLabel: String
+    public var catalog: [HexCommandCatalogItem]
+    public var transformations: [HexTransformationCatalogItem]
+
+    public init(
+        commandModelStatus: String = "disabled",
+        workspacePath: String = "",
+        configFilePath: String = "",
+        workspaceExists: Bool = false,
+        lastReloadError: String? = nil,
+        currentContextLabel: String = "Global",
+        catalog: [HexCommandCatalogItem] = [],
+        transformations: [HexTransformationCatalogItem] = []
+    ) {
+        self.commandModelStatus = commandModelStatus
+        self.workspacePath = workspacePath
+        self.configFilePath = configFilePath
+        self.workspaceExists = workspaceExists
+        self.lastReloadError = lastReloadError
+        self.currentContextLabel = currentContextLabel
+        self.catalog = catalog
+        self.transformations = transformations
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case commandModelStatus = "command_model_status"
+        case workspacePath = "workspace_path"
+        case configFilePath = "config_file_path"
+        case workspaceExists = "workspace_exists"
+        case lastReloadError = "last_reload_error"
+        case currentContextLabel = "current_context_label"
+        case catalog, transformations
+    }
+}
+
+public struct HexMeetingRowSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var title: String
+    public var displayTitle: String
+    public var status: String
+    public var createdAtMs: UInt64
+    public var durationMs: UInt64
+    public var durationLabel: String
+    public var summarizing: Bool
+    public var notesTitle: String?
+    public var notesSummary: String?
+    public var notesMarkdown: String?
+    public var exportPath: String?
+    public var exportError: String?
+    public var error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, status, summarizing, error
+        case displayTitle = "display_title"
+        case createdAtMs = "created_at_ms"
+        case durationMs = "duration_ms"
+        case durationLabel = "duration_label"
+        case notesTitle = "notes_title"
+        case notesSummary = "notes_summary"
+        case notesMarkdown = "notes_markdown"
+        case exportPath = "export_path"
+        case exportError = "export_error"
+    }
+}
+
+public struct HexMeetingTurnSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public var source: String
+    public var clock: String
+    public var startMs: UInt64
+    public var endMs: UInt64
+    public var pauseBeforeMs: UInt64?
+    public var text: String
+
+    public var id: String { "\(source)-\(startMs)-\(endMs)" }
+
+    enum CodingKeys: String, CodingKey {
+        case source, clock, text
+        case startMs = "start_ms"
+        case endMs = "end_ms"
+        case pauseBeforeMs = "pause_before_ms"
+    }
+}
+
+public struct HexMeetingDetailSnapshot: Codable, Sendable, Equatable {
+    public var manifest: HexMeetingRowSnapshot
+    public var turns: [HexMeetingTurnSnapshot]
+    public var transcriptMarkdown: String
+    public var transcriptError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case manifest, turns
+        case transcriptMarkdown = "transcript_markdown"
+        case transcriptError = "transcript_error"
+    }
+}
+
+public struct HexActivityEventSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public var kind: String
+    public var timestampMs: UInt64
+    public var summary: String
+    public var rawJson: String
+
+    public var id: String { "\(timestampMs)-\(kind)-\(summary.prefix(24))" }
+
+    enum CodingKeys: String, CodingKey {
+        case kind, summary
+        case timestampMs = "timestamp_ms"
+        case rawJson = "raw_json"
+    }
+}
+
+public struct HexActivitySnapshot: Codable, Sendable, Equatable {
+    public var listenerState: String?
+    public var device: String?
+    public var error: String?
+    public var events: [HexActivityEventSnapshot]
+
+    public init(
+        listenerState: String? = nil,
+        device: String? = nil,
+        error: String? = nil,
+        events: [HexActivityEventSnapshot] = []
+    ) {
+        self.listenerState = listenerState
+        self.device = device
+        self.error = error
+        self.events = events
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case listenerState = "listener_state"
+        case device, error, events
+    }
+}
+
+public struct HexInstalledApplicationSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public var name: String
+    public var bundleId: String?
+    public var path: String
+
+    public var id: String { path }
+
+    enum CodingKeys: String, CodingKey {
+        case name, path
+        case bundleId = "bundle_id"
+    }
+}
+
+public struct HexHistoryProcessing: Codable, Sendable, Equatable {
+    public var profile: String
+    public var latencyMs: UInt64
+    public var fallback: String?
+
+    enum CodingKeys: String, CodingKey {
+        case profile
+        case latencyMs = "latency_ms"
+        case fallback
+    }
+}
+
+public struct HexHistoryEntry: Codable, Sendable, Equatable, Identifiable {
+    public var id: UInt64
+    public var timestampMs: UInt64
+    public var kind: String
+    public var rawText: String
+    public var finalText: String
+    public var application: String?
+    public var processing: HexHistoryProcessing?
+    public var audioMs: UInt64
+    public var inferenceMs: UInt64
+    public var totalMs: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, application, processing
+        case timestampMs = "timestamp_ms"
+        case rawText = "raw_text"
+        case finalText = "final_text"
+        case audioMs = "audio_ms"
+        case inferenceMs = "inference_ms"
+        case totalMs = "total_ms"
+    }
+}
+
+// MARK: - Persisted AppSettings Mirror (`settings.json` / `SaveSettings`)
+
+public struct HexHotkeyKey: Codable, Sendable, Equatable {
+    public var code: UInt16
+    public var label: String
+
+    public init(code: UInt16, label: String) {
+        self.code = code
+        self.label = label
+    }
+}
+
+public struct HexHotkeyModifiers: Codable, Sendable, Equatable {
+    public var control: String?
+    public var option: String?
+    public var shift: String?
+    public var command: String?
+    public var function: Bool
+
+    public init(
+        control: String? = nil,
+        option: String? = "either",
+        shift: String? = nil,
+        command: String? = nil,
+        function: Bool = false
+    ) {
+        self.control = control
+        self.option = option
+        self.shift = shift
+        self.command = command
+        self.function = function
+    }
+}
+
+public struct HexHotkeyBinding: Codable, Sendable, Equatable {
+    public var modifiers: HexHotkeyModifiers
+    public var key: HexHotkeyKey?
+
+    public init(modifiers: HexHotkeyModifiers = HexHotkeyModifiers(), key: HexHotkeyKey? = nil) {
+        self.modifiers = modifiers
+        self.key = key
+    }
+
+    public static var pasteLastDefault: HexHotkeyBinding {
+        HexHotkeyBinding(
+            modifiers: HexHotkeyModifiers(option: "either", shift: "either"),
+            key: HexHotkeyKey(code: 9, label: "V")
+        )
+    }
+
+    public static var editDefault: HexHotkeyBinding {
+        HexHotkeyBinding(
+            modifiers: HexHotkeyModifiers(option: "either", command: "either"),
+            key: nil
+        )
+    }
+}
+
+public struct HexTranscriptionSelection: Codable, Sendable, Equatable {
+    public var model: String
+    public var language: String
+    public var recognitionHints: String
+
+    public init(
+        model: String = "parakeet-tdt-0.6b-v3",
+        language: String = "en",
+        recognitionHints: String = ""
+    ) {
+        self.model = model
+        self.language = language
+        self.recognitionHints = recognitionHints
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case model, language
+        case recognitionHints = "recognition_hints"
+    }
+}
+
+public struct HexTextReplacement: Codable, Sendable, Equatable {
+    public var matchedPhrase: String
+    public var output: String
+
+    public init(matchedPhrase: String = "", output: String = "") {
+        self.matchedPhrase = matchedPhrase
+        self.output = output
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case matchedPhrase = "matched_phrase"
+        case output
+    }
+}
+
+public struct HexDictationPostProcessing: Codable, Sendable, Equatable {
+    public var enabled: Bool
+    public var prompt: String
+    public var model: String?
+    public var variant: String?
+    public var deadlineSeconds: UInt64
+
+    public init(
+        enabled: Bool = false,
+        prompt: String = "Rewrite the transcript into clear, natural text while preserving the speaker's intended meaning.",
+        model: String? = nil,
+        variant: String? = nil,
+        deadlineSeconds: UInt64 = 30
+    ) {
+        self.enabled = enabled
+        self.prompt = prompt
+        self.model = model
+        self.variant = variant
+        self.deadlineSeconds = deadlineSeconds
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, prompt, model, variant
+        case deadlineSeconds = "deadline_seconds"
+    }
+}
+
+public struct HexDictationMode: Codable, Sendable, Equatable {
+    public var name: String
+    public var applications: [String]
+    public var browserHosts: [String]
+    public var replacements: [HexTextReplacement]
+    public var transformations: [String]
+    public var postProcessing: HexDictationPostProcessing
+
+    public init(
+        name: String = "Global",
+        applications: [String] = [],
+        browserHosts: [String] = [],
+        replacements: [HexTextReplacement] = [],
+        transformations: [String] = [],
+        postProcessing: HexDictationPostProcessing = HexDictationPostProcessing()
+    ) {
+        self.name = name
+        self.applications = applications
+        self.browserHosts = browserHosts
+        self.replacements = replacements
+        self.transformations = transformations
+        self.postProcessing = postProcessing
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, applications, replacements, transformations
+        case browserHosts = "browser_hosts"
+        case postProcessing = "post_processing"
+    }
+}
+
+public struct HexDictationProcessingSettings: Codable, Sendable, Equatable {
+    public var defaultMode: HexDictationMode
+    public var modes: [HexDictationMode]
+
+    public init(
+        defaultMode: HexDictationMode = HexDictationMode(name: "Global"),
+        modes: [HexDictationMode] = []
+    ) {
+        self.defaultMode = defaultMode
+        self.modes = modes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case defaultMode = "default_mode"
+        case modes
+    }
+}
+
+public struct HexVoiceActionSettings: Codable, Sendable, Equatable {
+    public var enabled: Bool
+    public var model: String?
+    public var variant: String?
+    public var deadlineSeconds: UInt64
+
+    public init(
+        enabled: Bool = false,
+        model: String? = nil,
+        variant: String? = nil,
+        deadlineSeconds: UInt64 = 60
+    ) {
+        self.enabled = enabled
+        self.model = model
+        self.variant = variant
+        self.deadlineSeconds = deadlineSeconds
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, model, variant
+        case deadlineSeconds = "deadline_seconds"
+    }
+}
+
+public struct HexMeetingSettings: Codable, Sendable, Equatable {
+    public var enabled: Bool
+    public var outputFolder: String?
+    public var summarizeWithAppleIntelligence: Bool
+
+    public init(
+        enabled: Bool = false,
+        outputFolder: String? = nil,
+        summarizeWithAppleIntelligence: Bool = true
+    ) {
+        self.enabled = enabled
+        self.outputFolder = outputFolder
+        self.summarizeWithAppleIntelligence = summarizeWithAppleIntelligence
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case outputFolder = "output_folder"
+        case summarizeWithAppleIntelligence = "summarize_with_apple_intelligence"
+    }
+}
+
+public struct HexAppSettings: Codable, Sendable, Equatable {
+    public var commandsEnabled: Bool
+    public var releaseMicrophoneWhileIdle: Bool
+    public var soundEffects: Bool
+    public var soundEffectVolume: Float
+    public var microphone: String?
+    public var recordingAudioBehavior: String
+    public var doubleTapLock: Bool
+    public var doubleTapOnly: Bool
+    public var incrementalTranscription: Bool
+    public var dictationHotkey: HexHotkeyBinding
+    public var editHotkey: HexHotkeyBinding
+    public var pasteLastHotkey: HexHotkeyBinding?
+    public var showDockIcon: Bool
+    public var transcription: HexTranscriptionSelection
+    public var transcriptionRecents: [HexTranscriptionSelection]
+    public var dictationProcessing: HexDictationProcessingSettings
+    public var voiceAction: HexVoiceActionSettings
+    public var historyRetention: String
+    public var meetings: HexMeetingSettings
+
+    public init(
+        commandsEnabled: Bool = false,
+        releaseMicrophoneWhileIdle: Bool = false,
+        soundEffects: Bool = true,
+        soundEffectVolume: Float = 0.5,
+        microphone: String? = nil,
+        recordingAudioBehavior: String = "do_nothing",
+        doubleTapLock: Bool = true,
+        doubleTapOnly: Bool = false,
+        incrementalTranscription: Bool = true,
+        dictationHotkey: HexHotkeyBinding = HexHotkeyBinding(),
+        editHotkey: HexHotkeyBinding = .editDefault,
+        pasteLastHotkey: HexHotkeyBinding? = .pasteLastDefault,
+        showDockIcon: Bool = true,
+        transcription: HexTranscriptionSelection = HexTranscriptionSelection(),
+        transcriptionRecents: [HexTranscriptionSelection] = [],
+        dictationProcessing: HexDictationProcessingSettings = HexDictationProcessingSettings(),
+        voiceAction: HexVoiceActionSettings = HexVoiceActionSettings(),
+        historyRetention: String = "week",
+        meetings: HexMeetingSettings = HexMeetingSettings()
+    ) {
+        self.commandsEnabled = commandsEnabled
+        self.releaseMicrophoneWhileIdle = releaseMicrophoneWhileIdle
+        self.soundEffects = soundEffects
+        self.soundEffectVolume = soundEffectVolume
+        self.microphone = microphone
+        self.recordingAudioBehavior = recordingAudioBehavior
+        self.doubleTapLock = doubleTapLock
+        self.doubleTapOnly = doubleTapOnly
+        self.incrementalTranscription = incrementalTranscription
+        self.dictationHotkey = dictationHotkey
+        self.editHotkey = editHotkey
+        self.pasteLastHotkey = pasteLastHotkey
+        self.showDockIcon = showDockIcon
+        self.transcription = transcription
+        self.transcriptionRecents = transcriptionRecents
+        self.dictationProcessing = dictationProcessing
+        self.voiceAction = voiceAction
+        self.historyRetention = historyRetention
+        self.meetings = meetings
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case commandsEnabled = "commands_enabled"
+        case releaseMicrophoneWhileIdle = "release_microphone_while_idle"
+        case soundEffects = "sound_effects"
+        case soundEffectVolume = "sound_effect_volume"
+        case microphone
+        case recordingAudioBehavior = "recording_audio_behavior"
+        case doubleTapLock = "double_tap_lock"
+        case doubleTapOnly = "double_tap_only"
+        case incrementalTranscription = "incremental_transcription"
+        case dictationHotkey = "dictation_hotkey"
+        case editHotkey = "edit_hotkey"
+        case pasteLastHotkey = "paste_last_hotkey"
+        case showDockIcon = "show_dock_icon"
+        case transcription
+        case transcriptionRecents = "transcription_recents"
+        case dictationProcessing = "dictation_processing"
+        case voiceAction = "voice_action"
+        case historyRetention = "history_retention"
+        case meetings
     }
 }
 
@@ -299,6 +960,23 @@ public struct HexBootstrapSnapshot: Codable, Sendable, Equatable {
     public var releaseMicrophoneWhileIdle: Bool
     public var showDockIcon: Bool
     public var soundVolume: Float
+    public var settings: HexAppSettings
+    public var dictationHotkeyKeycaps: [String]
+    public var dictationHotkeySide: String?
+    public var editHotkeyKeycaps: [String]
+    public var editHotkeySide: String?
+    public var pasteLastHotkeyKeycaps: [String]
+    public var pasteLastHotkeySide: String?
+    public var availableMicrophones: [String]
+    public var resolvedMeetingOutputFolder: String
+    public var appleIntelligenceAvailable: Bool
+    public var appleIntelligenceStatus: String
+    public var transcriptionCatalog: HexTranscriptionCatalogSnapshot
+    public var opencodeCatalog: HexOpenCodeCatalogSnapshot
+    public var commandsSnapshot: HexCommandsSnapshot
+    public var meetings: [HexMeetingRowSnapshot]
+    public var activity: HexActivitySnapshot
+    public var installedApplications: [HexInstalledApplicationSnapshot]
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -318,72 +996,194 @@ public struct HexBootstrapSnapshot: Codable, Sendable, Equatable {
         case releaseMicrophoneWhileIdle = "release_microphone_while_idle"
         case showDockIcon = "show_dock_icon"
         case soundVolume = "sound_volume"
+        case settings
+        case dictationHotkeyKeycaps = "dictation_hotkey_keycaps"
+        case dictationHotkeySide = "dictation_hotkey_side"
+        case editHotkeyKeycaps = "edit_hotkey_keycaps"
+        case editHotkeySide = "edit_hotkey_side"
+        case pasteLastHotkeyKeycaps = "paste_last_hotkey_keycaps"
+        case pasteLastHotkeySide = "paste_last_hotkey_side"
+        case availableMicrophones = "available_microphones"
+        case resolvedMeetingOutputFolder = "resolved_meeting_output_folder"
+        case appleIntelligenceAvailable = "apple_intelligence_available"
+        case appleIntelligenceStatus = "apple_intelligence_status"
+        case transcriptionCatalog = "transcription_catalog"
+        case opencodeCatalog = "opencode_catalog"
+        case commandsSnapshot = "commands_snapshot"
+        case meetings
+        case activity
+        case installedApplications = "installed_applications"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try c.decode(String.self, forKey: .version)
+        self.developerFeaturesEnabled = try c.decodeIfPresent(Bool.self, forKey: .developerFeaturesEnabled) ?? false
+        self.pid = try c.decodeIfPresent(UInt32.self, forKey: .pid) ?? 0
+        self.setupReady = try c.decodeIfPresent(Bool.self, forKey: .setupReady) ?? false
+        self.onboardingCompleted = try c.decodeIfPresent(Bool.self, forKey: .onboardingCompleted) ?? false
+        self.permissions = try c.decodeIfPresent(HexPermissionSnapshot.self, forKey: .permissions) ?? HexPermissionSnapshot()
+        self.statusMenu = try c.decode(HexStatusMenuSnapshot.self, forKey: .statusMenu)
+        self.hudTelemetry = try c.decodeIfPresent(HexHudTelemetry.self, forKey: .hudTelemetry) ?? HexHudTelemetry()
+        self.meetingPanel = try c.decodeIfPresent(HexMeetingPanelSnapshot.self, forKey: .meetingPanel) ?? .hidden
+        self.activeModelId = try c.decodeIfPresent(String.self, forKey: .activeModelId) ?? "parakeet-tdt-0.6b-v3"
+        self.activeLanguage = try c.decodeIfPresent(String.self, forKey: .activeLanguage) ?? "en"
+        self.commandsEnabled = try c.decodeIfPresent(Bool.self, forKey: .commandsEnabled) ?? false
+        self.voiceActionEnabled = try c.decodeIfPresent(Bool.self, forKey: .voiceActionEnabled) ?? false
+        self.meetingsEnabled = try c.decodeIfPresent(Bool.self, forKey: .meetingsEnabled) ?? false
+        self.releaseMicrophoneWhileIdle = try c.decodeIfPresent(Bool.self, forKey: .releaseMicrophoneWhileIdle) ?? false
+        self.showDockIcon = try c.decodeIfPresent(Bool.self, forKey: .showDockIcon) ?? true
+        self.soundVolume = try c.decodeIfPresent(Float.self, forKey: .soundVolume) ?? 0.5
+        self.settings = try c.decodeIfPresent(HexAppSettings.self, forKey: .settings) ?? HexAppSettings()
+        self.dictationHotkeyKeycaps = try c.decodeIfPresent([String].self, forKey: .dictationHotkeyKeycaps) ?? ["⌥"]
+        self.dictationHotkeySide = try c.decodeIfPresent(String.self, forKey: .dictationHotkeySide)
+        self.editHotkeyKeycaps = try c.decodeIfPresent([String].self, forKey: .editHotkeyKeycaps) ?? ["⌥", "⌘"]
+        self.editHotkeySide = try c.decodeIfPresent(String.self, forKey: .editHotkeySide)
+        self.pasteLastHotkeyKeycaps = try c.decodeIfPresent([String].self, forKey: .pasteLastHotkeyKeycaps) ?? ["⌥", "⇧", "V"]
+        self.pasteLastHotkeySide = try c.decodeIfPresent(String.self, forKey: .pasteLastHotkeySide)
+        self.availableMicrophones = try c.decodeIfPresent([String].self, forKey: .availableMicrophones) ?? []
+        self.resolvedMeetingOutputFolder = try c.decodeIfPresent(String.self, forKey: .resolvedMeetingOutputFolder) ?? ""
+        self.appleIntelligenceAvailable = try c.decodeIfPresent(Bool.self, forKey: .appleIntelligenceAvailable) ?? false
+        self.appleIntelligenceStatus = try c.decodeIfPresent(String.self, forKey: .appleIntelligenceStatus) ?? ""
+        self.transcriptionCatalog = try c.decodeIfPresent(HexTranscriptionCatalogSnapshot.self, forKey: .transcriptionCatalog) ?? HexTranscriptionCatalogSnapshot()
+        self.opencodeCatalog = try c.decodeIfPresent(HexOpenCodeCatalogSnapshot.self, forKey: .opencodeCatalog) ?? HexOpenCodeCatalogSnapshot()
+        self.commandsSnapshot = try c.decodeIfPresent(HexCommandsSnapshot.self, forKey: .commandsSnapshot) ?? HexCommandsSnapshot()
+        self.meetings = try c.decodeIfPresent([HexMeetingRowSnapshot].self, forKey: .meetings) ?? []
+        self.activity = try c.decodeIfPresent(HexActivitySnapshot.self, forKey: .activity) ?? HexActivitySnapshot()
+        self.installedApplications = try c.decodeIfPresent([HexInstalledApplicationSnapshot].self, forKey: .installedApplications) ?? []
     }
 }
 
 public enum HexEngineCommand: Encodable, Sendable, Equatable {
+    case refreshSnapshot
     case refreshStatus
     case requestPermission(kind: String)
+    case openPermissionSettings(kind: String)
+    case recordOnboardingCompletion
     case pasteLastDictation
+    case pasteMeetingTurns
     case selectInstalledModel(modelId: String)
+    case chooseTranscriptionModel(modelId: String, language: String, recognitionHints: String?)
     case prepareTranscriptionModel(modelId: String, language: String?, recognitionHints: String?, allowDownload: Bool)
+    case setTranscriptionLanguage(language: String)
+    case setRecognitionHints(hints: String)
+    case deleteTranscriptionModel(modelId: String)
     case cancelModelPreparation
-    case startMeeting(title: String?)
+    case startMeeting(title: String? = nil)
     case stopMeeting
     case acceptMeetingOffer
     case dismissMeetingOffer
     case dismissCallEndedPrompt
     case revealMeetingTranscript(path: String)
+    case renameMeeting(id: String, title: String)
+    case deleteMeeting(id: String)
+    case summarizeMeeting(id: String)
+    case refreshMeetings
     case setSoundVolume(volume: Float)
     case setShowDockIcon(visible: Bool)
     case setMeetingsEnabled(enabled: Bool)
+    case setMeetingNotesEnabled(enabled: Bool)
+    case setMeetingOutputFolder(path: String?)
+    case saveSettings(settings: HexAppSettings)
+    case setHotkeyCaptureActive(active: Bool)
+    case setHotkeyBinding(target: String, binding: HexHotkeyBinding?)
+    case captureHotkey(target: String, key: String?, keyCode: UInt16?, modifierFlags: UInt64)
+    case setHotkeySide(target: String, side: String)
+    case setDoubleTapLock(enabled: Bool)
+    case setDoubleTapOnly(enabled: Bool)
+    case setIncrementalTranscription(enabled: Bool)
+    case setRecordingAudioBehavior(behavior: String)
+    case setMicrophone(device: String?)
+    case refreshMicrophones
+    case setReleaseMicrophoneWhileIdle(enabled: Bool, confirmDisableCommands: Bool = false)
+    case setCommandsEnabled(enabled: Bool, confirmKeepMicrophoneReady: Bool = false)
+    case retryCommandsModel
+    case provisionPersonalCommandsWorkspace
+    case openPersonalCommandsConfig
+    case copyPersonalCommandsAgentPrompt
+    case setVoiceActionEnabled(enabled: Bool)
+    case setVoiceActionModel(model: String?, variant: String?, deadlineSeconds: UInt64?)
+    case reloadOpenCodeCatalog
+    case openOpenCodeSetupDocs
+    case discoverInstalledApplications
+    case setHistoryRetention(retention: String)
+    case deleteHistoryEntry(id: UInt64)
+    case clearHistory
+    case refreshActivity
+    case configureHudTuning(
+        style: Float,
+        lineCount: Float,
+        curvature: Float,
+        speed: Float,
+        sharpness: Float,
+        glow: Float,
+        depth: Float,
+        lightAngle: Float,
+        outline: Float
+    )
     case simulateHudState(state: String, rms: Float?, peak: Float?)
     case simulateMeetingPanel(panel: HexMeetingPanelSnapshot)
     case requestCheckForUpdates
     case requestQuit
 
     private enum CodingKeys: String, CodingKey {
-        case type
-        case kind
+        case type, kind, language, hints, title, path, id, volume, visible, enabled, settings
+        case active, target, binding, key, side, behavior, device, model, variant, retention
+        case style, curvature, speed, sharpness, glow, depth, outline, state, rms, peak, panel
         case modelId = "model_id"
-        case language
         case recognitionHints = "recognition_hints"
-        case allowDownload = "allow_download"
-        case title
-        case path
-        case volume
-        case visible
-        case enabled
-        case state
-        case rms
-        case peak
-        case panel
+        case keyCode = "key_code"
+        case modifierFlags = "modifier_flags"
+        case confirmDisableCommands = "confirm_disable_commands"
+        case confirmKeepMicrophoneReady = "confirm_keep_microphone_ready"
+        case deadlineSeconds = "deadline_seconds"
+        case lineCount = "line_count"
+        case lightAngle = "light_angle"
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .refreshStatus:
-            try container.encode("refresh_status", forKey: .type)
+        case .refreshSnapshot, .refreshStatus:
+            try container.encode("refresh_snapshot", forKey: .type)
         case let .requestPermission(kind):
             try container.encode("request_permission", forKey: .type)
             try container.encode(kind, forKey: .kind)
+        case let .openPermissionSettings(kind):
+            try container.encode("open_permission_settings", forKey: .type)
+            try container.encode(kind, forKey: .kind)
+        case .recordOnboardingCompletion:
+            try container.encode("record_onboarding_completion", forKey: .type)
         case .pasteLastDictation:
             try container.encode("paste_last_dictation", forKey: .type)
+        case .pasteMeetingTurns:
+            try container.encode("paste_meeting_turns", forKey: .type)
         case let .selectInstalledModel(modelId):
             try container.encode("select_installed_model", forKey: .type)
             try container.encode(modelId, forKey: .modelId)
-        case let .prepareTranscriptionModel(modelId, language, recognitionHints, allowDownload):
-            try container.encode("prepare_transcription_model", forKey: .type)
+        case let .chooseTranscriptionModel(modelId, language, recognitionHints):
+            try container.encode("choose_transcription_model", forKey: .type)
             try container.encode(modelId, forKey: .modelId)
-            try container.encodeIfPresent(language, forKey: .language)
+            try container.encode(language, forKey: .language)
             try container.encodeIfPresent(recognitionHints, forKey: .recognitionHints)
-            try container.encode(allowDownload, forKey: .allowDownload)
+        case let .prepareTranscriptionModel(modelId, language, recognitionHints, _):
+            try container.encode("choose_transcription_model", forKey: .type)
+            try container.encode(modelId, forKey: .modelId)
+            try container.encode(language ?? "en", forKey: .language)
+            try container.encodeIfPresent(recognitionHints, forKey: .recognitionHints)
+        case let .setTranscriptionLanguage(language):
+            try container.encode("set_transcription_language", forKey: .type)
+            try container.encode(language, forKey: .language)
+        case let .setRecognitionHints(hints):
+            try container.encode("set_recognition_hints", forKey: .type)
+            try container.encode(hints, forKey: .hints)
+        case let .deleteTranscriptionModel(modelId):
+            try container.encode("delete_transcription_model", forKey: .type)
+            try container.encode(modelId, forKey: .modelId)
         case .cancelModelPreparation:
             try container.encode("cancel_model_preparation", forKey: .type)
-        case let .startMeeting(title):
+        case .startMeeting:
             try container.encode("start_meeting", forKey: .type)
-            try container.encodeIfPresent(title, forKey: .title)
         case .stopMeeting:
             try container.encode("stop_meeting", forKey: .type)
         case .acceptMeetingOffer:
@@ -395,6 +1195,18 @@ public enum HexEngineCommand: Encodable, Sendable, Equatable {
         case let .revealMeetingTranscript(path):
             try container.encode("reveal_meeting_transcript", forKey: .type)
             try container.encode(path, forKey: .path)
+        case let .renameMeeting(id, title):
+            try container.encode("rename_meeting", forKey: .type)
+            try container.encode(id, forKey: .id)
+            try container.encode(title, forKey: .title)
+        case let .deleteMeeting(id):
+            try container.encode("delete_meeting", forKey: .type)
+            try container.encode(id, forKey: .id)
+        case let .summarizeMeeting(id):
+            try container.encode("summarize_meeting", forKey: .type)
+            try container.encode(id, forKey: .id)
+        case .refreshMeetings:
+            try container.encode("refresh_meetings", forKey: .type)
         case let .setSoundVolume(volume):
             try container.encode("set_sound_volume", forKey: .type)
             try container.encode(volume, forKey: .volume)
@@ -404,6 +1216,100 @@ public enum HexEngineCommand: Encodable, Sendable, Equatable {
         case let .setMeetingsEnabled(enabled):
             try container.encode("set_meetings_enabled", forKey: .type)
             try container.encode(enabled, forKey: .enabled)
+        case let .setMeetingNotesEnabled(enabled):
+            try container.encode("set_meeting_notes_enabled", forKey: .type)
+            try container.encode(enabled, forKey: .enabled)
+        case let .setMeetingOutputFolder(path):
+            try container.encode("set_meeting_output_folder", forKey: .type)
+            try container.encodeIfPresent(path, forKey: .path)
+        case let .saveSettings(settings):
+            try container.encode("save_settings", forKey: .type)
+            try container.encode(settings, forKey: .settings)
+        case let .setHotkeyCaptureActive(active):
+            try container.encode("set_hotkey_capture_active", forKey: .type)
+            try container.encode(active, forKey: .active)
+        case let .setHotkeyBinding(target, binding):
+            try container.encode("set_hotkey_binding", forKey: .type)
+            try container.encode(target, forKey: .target)
+            try container.encodeIfPresent(binding, forKey: .binding)
+        case let .captureHotkey(target, key, keyCode, modifierFlags):
+            try container.encode("capture_hotkey", forKey: .type)
+            try container.encode(target, forKey: .target)
+            try container.encodeIfPresent(key, forKey: .key)
+            try container.encodeIfPresent(keyCode, forKey: .keyCode)
+            try container.encode(modifierFlags, forKey: .modifierFlags)
+        case let .setHotkeySide(target, side):
+            try container.encode("set_hotkey_side", forKey: .type)
+            try container.encode(target, forKey: .target)
+            try container.encode(side, forKey: .side)
+        case let .setDoubleTapLock(enabled):
+            try container.encode("set_double_tap_lock", forKey: .type)
+            try container.encode(enabled, forKey: .enabled)
+        case let .setDoubleTapOnly(enabled):
+            try container.encode("set_double_tap_only", forKey: .type)
+            try container.encode(enabled, forKey: .enabled)
+        case let .setIncrementalTranscription(enabled):
+            try container.encode("set_incremental_transcription", forKey: .type)
+            try container.encode(enabled, forKey: .enabled)
+        case let .setRecordingAudioBehavior(behavior):
+            try container.encode("set_recording_audio_behavior", forKey: .type)
+            try container.encode(behavior, forKey: .behavior)
+        case let .setMicrophone(device):
+            try container.encode("set_microphone", forKey: .type)
+            try container.encodeIfPresent(device, forKey: .device)
+        case .refreshMicrophones:
+            try container.encode("refresh_microphones", forKey: .type)
+        case let .setReleaseMicrophoneWhileIdle(enabled, confirmDisableCommands):
+            try container.encode("set_release_microphone_while_idle", forKey: .type)
+            try container.encode(enabled, forKey: .enabled)
+            try container.encode(confirmDisableCommands, forKey: .confirmDisableCommands)
+        case let .setCommandsEnabled(enabled, confirmKeepMicrophoneReady):
+            try container.encode("set_commands_enabled", forKey: .type)
+            try container.encode(enabled, forKey: .enabled)
+            try container.encode(confirmKeepMicrophoneReady, forKey: .confirmKeepMicrophoneReady)
+        case .retryCommandsModel:
+            try container.encode("retry_commands_model", forKey: .type)
+        case .provisionPersonalCommandsWorkspace:
+            try container.encode("provision_personal_commands_workspace", forKey: .type)
+        case .openPersonalCommandsConfig:
+            try container.encode("open_personal_commands_config", forKey: .type)
+        case .copyPersonalCommandsAgentPrompt:
+            try container.encode("copy_personal_commands_agent_prompt", forKey: .type)
+        case let .setVoiceActionEnabled(enabled):
+            try container.encode("set_voice_action_enabled", forKey: .type)
+            try container.encode(enabled, forKey: .enabled)
+        case let .setVoiceActionModel(model, variant, deadlineSeconds):
+            try container.encode("set_voice_action_model", forKey: .type)
+            try container.encodeIfPresent(model, forKey: .model)
+            try container.encodeIfPresent(variant, forKey: .variant)
+            try container.encodeIfPresent(deadlineSeconds, forKey: .deadlineSeconds)
+        case .reloadOpenCodeCatalog:
+            try container.encode("reload_open_code_catalog", forKey: .type)
+        case .openOpenCodeSetupDocs:
+            try container.encode("open_open_code_setup_docs", forKey: .type)
+        case .discoverInstalledApplications:
+            try container.encode("discover_installed_applications", forKey: .type)
+        case let .setHistoryRetention(retention):
+            try container.encode("set_history_retention", forKey: .type)
+            try container.encode(retention, forKey: .retention)
+        case let .deleteHistoryEntry(id):
+            try container.encode("delete_history_entry", forKey: .type)
+            try container.encode(id, forKey: .id)
+        case .clearHistory:
+            try container.encode("clear_history", forKey: .type)
+        case .refreshActivity:
+            try container.encode("refresh_activity", forKey: .type)
+        case let .configureHudTuning(style, lineCount, curvature, speed, sharpness, glow, depth, lightAngle, outline):
+            try container.encode("configure_hud_tuning", forKey: .type)
+            try container.encode(style, forKey: .style)
+            try container.encode(lineCount, forKey: .lineCount)
+            try container.encode(curvature, forKey: .curvature)
+            try container.encode(speed, forKey: .speed)
+            try container.encode(sharpness, forKey: .sharpness)
+            try container.encode(glow, forKey: .glow)
+            try container.encode(depth, forKey: .depth)
+            try container.encode(lightAngle, forKey: .lightAngle)
+            try container.encode(outline, forKey: .outline)
         case let .simulateHudState(state, rms, peak):
             try container.encode("simulate_hud_state", forKey: .type)
             try container.encode(state, forKey: .state)

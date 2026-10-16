@@ -1,113 +1,108 @@
 import AppKit
 import SwiftUI
 
-struct HexM0StatusView: View {
-    var runtime: HexEngineRuntime
+struct HexSidebarNavigationView: View {
+    var store: HexSettingsStore
 
     var body: some View {
-        Form {
-            if let snapshot = runtime.snapshot {
-                Section("Engine & Readiness") {
-                    LabeledContent("Version", value: "Hex \(snapshot.version) (PID \(snapshot.pid))")
-                    LabeledContent("Startup Gate", value: snapshot.setupReady ? "Ready" : "Needs Setup")
-                    LabeledContent("Active Model", value: "\(snapshot.activeModelId) (\(snapshot.activeLanguage))")
-                }
+        let sections = HexWindowSection.visibleSections(for: store.runtime.snapshot)
 
-                Section("Permissions") {
-                    permissionRow("Microphone", granted: snapshot.permissions.microphoneGranted, kind: "microphone")
-                    permissionRow("Input Monitoring", granted: snapshot.permissions.inputMonitoringGranted, kind: "input_monitoring")
-                    permissionRow("Accessibility", granted: snapshot.permissions.accessibilityGranted, kind: "accessibility")
-                    LabeledContent("Local Model Installed", value: snapshot.permissions.modelInstalled ? "Installed" : "Missing")
-                }
-
-                Section("Preferences") {
-                    Toggle(
-                        "Show Hex in Dock",
-                        isOn: Binding(
-                            get: { snapshot.showDockIcon },
-                            set: { runtime.dispatch(.setShowDockIcon(visible: $0)) }
-                        )
-                    )
-                    Toggle(
-                        "Enable Meetings",
-                        isOn: Binding(
-                            get: { snapshot.meetingsEnabled },
-                            set: { runtime.dispatch(.setMeetingsEnabled(enabled: $0)) }
-                        )
-                    )
-                }
-
-                Section("M1 Native Panel Verification") {
-                    HStack(spacing: 8) {
-                        Button("HUD: Listening") {
-                            runtime.dispatch(.simulateHudState(state: "listening", rms: 0.08, peak: 0.45))
-                        }
-                        Button("HUD: Voice Action") {
-                            runtime.dispatch(.simulateHudState(state: "voice_action", rms: 0.09, peak: 0.52))
-                        }
-                        Button("HUD: Transcribing") {
-                            runtime.dispatch(.simulateHudState(state: "transcribing", rms: nil, peak: nil))
-                        }
-                        Button("HUD: Completed") {
-                            runtime.dispatch(.simulateHudState(state: "completed", rms: nil, peak: nil))
-                        }
-                        Button("HUD: Hide") {
-                            runtime.dispatch(.simulateHudState(state: "hidden", rms: nil, peak: nil))
-                        }
-                    }
-                    HStack(spacing: 8) {
-                        Button("Meeting Offer") {
-                            runtime.dispatch(.simulateMeetingPanel(panel: .offer(title: "Design Sync", sourceLabel: "Zoom")))
-                        }
-                        Button("Meeting Recording") {
-                            runtime.dispatch(.simulateMeetingPanel(panel: .recording(title: "Design Sync", appLabel: "Zoom", elapsedText: "04:12")))
-                        }
-                        Button("Call Ended") {
-                            runtime.dispatch(.simulateMeetingPanel(panel: .callEnded(appLabel: "Zoom", title: "Design Sync", subtitle: "Call ended · 28:40")))
-                        }
-                        Button("Hide Capsule") {
-                            runtime.dispatch(.simulateMeetingPanel(panel: .hidden))
-                        }
-                    }
-                }
-            } else {
-                Section {
-                    ProgressView("Connecting to libhex runtime…")
-                }
-            }
+        List(
+            sections,
+            selection: Binding(
+                get: { store.selectedSection },
+                set: { store.selectSection($0) }
+            )
+        ) { section in
+            Label(section.title, systemImage: section.symbolName)
+                .tag(section)
         }
-        .formStyle(.grouped)
-        .frame(
-            minWidth: HexTuning.StatusWindow.minWidth,
-            minHeight: HexTuning.StatusWindow.minHeight
-        )
-    }
-
-    @ViewBuilder
-    private func permissionRow(_ title: String, granted: Bool, kind: String) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            if granted {
-                Label("Granted", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Button("Grant…") {
-                    runtime.dispatch(.requestPermission(kind: kind))
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) {
+            if let snapshot = store.runtime.snapshot {
+                HStack {
+                    Circle()
+                        .fill(snapshot.setupReady ? Color.green : Color.orange)
+                        .frame(width: 7, height: 7)
+                    Text(snapshot.setupReady ? "Dictation Ready" : "Setup Required")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("v\(snapshot.version)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 }
-                .controlSize(.small)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
             }
         }
     }
 }
 
-@MainActor
-public final class HexStatusWindowController: NSWindowController {
-    private let runtime: HexEngineRuntime
+struct HexDetailContentHostView: View {
+    var store: HexSettingsStore
+    var onCheckForUpdates: (() -> Void)?
 
-    public init(runtime: HexEngineRuntime) {
+    var body: some View {
+        Group {
+            switch store.selectedSection {
+            case .onboarding:
+                HexOnboardingView(store: store)
+            case .settings:
+                HexGeneralSettingsPane(store: store, onCheckForUpdates: onCheckForUpdates)
+            case .modes:
+                HexModesPane(store: store)
+            case .voiceAction:
+                HexVoiceActionPane(store: store)
+            case .history:
+                HexHistoryPane(store: store)
+            case .commands:
+                HexCommandsPane(store: store)
+            case .meetings:
+                HexMeetingsPane(store: store)
+            case .activity:
+                HexActivityPane(store: store)
+            case .hudLab:
+                HexHudLabPane(store: store)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+@MainActor
+public final class HexStatusWindowController: NSWindowController, NSWindowDelegate {
+    public let runtime: HexEngineRuntime
+    public let store: HexSettingsStore
+    public var onWindowVisibilityChanged: ((Bool) -> Void)?
+    public var onCheckForUpdates: (() -> Void)?
+
+    private let splitViewController: NSSplitViewController
+
+    public init(runtime: HexEngineRuntime, onCheckForUpdates: (() -> Void)? = nil) {
         self.runtime = runtime
-        let hostingController = NSHostingController(rootView: HexM0StatusView(runtime: runtime))
+        self.store = HexSettingsStore(runtime: runtime)
+        self.onCheckForUpdates = onCheckForUpdates
+        self.splitViewController = NSSplitViewController()
+
+        let sidebarVC = NSHostingController(rootView: HexSidebarNavigationView(store: store))
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarVC)
+        sidebarItem.minimumThickness = HexTuning.StatusWindow.sidebarMinWidth
+        sidebarItem.maximumThickness = HexTuning.StatusWindow.sidebarMaxWidth
+        sidebarItem.canCollapse = false
+
+        let detailVC = NSHostingController(
+            rootView: HexDetailContentHostView(
+                store: store,
+                onCheckForUpdates: onCheckForUpdates
+            )
+        )
+        let detailItem = NSSplitViewItem(viewController: detailVC)
+        detailItem.minimumThickness = HexTuning.StatusWindow.minWidth - HexTuning.StatusWindow.sidebarMaxWidth
+
+        splitViewController.addSplitViewItem(sidebarItem)
+        splitViewController.addSplitViewItem(detailItem)
+
         let window = NSWindow(
             contentRect: NSRect(
                 x: 0,
@@ -119,14 +114,19 @@ public final class HexStatusWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Hex"
+        window.title = "HEX"
         window.toolbarStyle = .unified
-        window.contentViewController = hostingController
+        window.minSize = NSSize(
+            width: HexTuning.StatusWindow.minWidth,
+            height: HexTuning.StatusWindow.minHeight
+        )
+        window.contentViewController = splitViewController
         window.setFrameAutosaveName("HexMainStatusWindow")
         window.isReleasedWhenClosed = false
         window.center()
 
         super.init(window: window)
+        window.delegate = self
     }
 
     @available(*, unavailable)
@@ -134,9 +134,23 @@ public final class HexStatusWindowController: NSWindowController {
         fatalError("init(coder:) has not been implemented")
     }
 
-    public func showAndFocus() {
+    public func handleSnapshotUpdate(_ snapshot: HexBootstrapSnapshot) {
+        store.handleSnapshotUpdate(snapshot)
+        window?.title = store.selectedSection.title
+    }
+
+    public func showAndFocus(destination: String? = nil) {
+        store.refreshLaunchAtLogin()
+        store.openDeepLink(destination)
+        window?.title = store.selectedSection.title
+        onWindowVisibilityChanged?(true)
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    public func windowWillClose(_ notification: Notification) {
+        store.cancelRecordingShortcut()
+        onWindowVisibilityChanged?(false)
     }
 }

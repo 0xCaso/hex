@@ -20,18 +20,29 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::app_settings::AppSettings;
-use crate::dictation_indicator::{self, DictationIndicatorEvent, DictationIndicatorSender};
-use crate::history::{History, HistoryEntry};
-use crate::meeting::{self, MeetingRequest};
+use crate::app_settings::{
+    AppSettings, HotkeyBinding, HotkeyKey, ModifierSide, RecordingAudioBehavior,
+};
+use crate::commands::CommandScope;
+use crate::desktop_activity::DesktopActivity;
+use crate::dictation_indicator::{
+    self, DictationIndicatorEvent, DictationIndicatorSender, HudTuning,
+};
+use crate::dictation_processor::ModelCatalog;
+use crate::events::{EventReader, VoiceEvent};
+use crate::history::{History, HistoryEntry, HistoryRetention};
+use crate::meeting::{self, MeetingManifest, MeetingRequest, MeetingSource, MeetingStatus};
 use crate::meeting_detection::MeetingCandidate;
 use crate::meeting_watcher::{
     ControllerCommand, ControllerEvent, MeetingMenuState, OFFER_TIMEOUT, READY_TIMEOUT,
 };
 use crate::onboarding::{self, PermissionState};
-use crate::recognition::RecognitionControl;
+use crate::personal_commands::{StatusContext, StatusSnapshot};
+use crate::recognition::{CommandModelStatus, RecognitionControl};
 use crate::status_item::{meeting_menu, model_menu_entries};
-use crate::transcription_models::{TranscriptionModelId, is_installed};
+use crate::transcription_models::{
+    LANGUAGES, MODELS, ModelRuntime, TranscriptionModelId, TranscriptionSelection, is_installed,
+};
 use crate::transcription_preparation::{PreparationStatus, TranscriptionPreparation};
 
 #[repr(C)]
@@ -123,12 +134,175 @@ pub struct hex_runtime_config_s {
     pub preview_dictation_hud: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct HexPermissionSnapshot {
     pub microphone_granted: bool,
+    pub microphone_state: String,
     pub accessibility_granted: bool,
     pub input_monitoring_granted: bool,
     pub model_installed: bool,
+    pub screen_recording_granted: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexLanguageOption {
+    pub code: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct HexTranscriptionModelRow {
+    pub id: String,
+    pub name: String,
+    pub summary: String,
+    pub realtime: String,
+    pub size_label: String,
+    pub quality: String,
+    pub quality_context: String,
+    pub coverage: String,
+    pub languages: Vec<String>,
+    pub supports_recognition_hints: bool,
+    pub installed: bool,
+    pub active: bool,
+    pub recommended_for_language: bool,
+    pub recommendation_label: Option<String>,
+    pub can_delete: bool,
+    pub preparing: bool,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub progress_fraction: Option<f32>,
+    pub status_label: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct HexTranscriptionCatalogSnapshot {
+    pub selected_language: String,
+    pub languages: Vec<HexLanguageOption>,
+    pub models: Vec<HexTranscriptionModelRow>,
+    pub preparation_error: Option<String>,
+    pub deletion_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexOpenCodeModelChoice {
+    pub key: String,
+    pub name: String,
+    pub provider: String,
+    pub variants: Vec<String>,
+    pub recommended_variant: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexOpenCodeCatalogSnapshot {
+    pub state: String,
+    pub error: Option<String>,
+    pub default_key: Option<String>,
+    pub default_name: Option<String>,
+    pub default_variant: Option<String>,
+    pub models: Vec<HexOpenCodeModelChoice>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexCommandCatalogItem {
+    pub id: String,
+    pub group: String,
+    pub phrase: String,
+    pub aliases: Vec<String>,
+    pub description: String,
+    pub scope: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexTransformationCatalogItem {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexCommandsSnapshot {
+    pub command_model_status: String,
+    pub workspace_path: String,
+    pub config_file_path: String,
+    pub workspace_exists: bool,
+    pub last_reload_error: Option<String>,
+    pub current_context_label: String,
+    pub catalog: Vec<HexCommandCatalogItem>,
+    pub transformations: Vec<HexTransformationCatalogItem>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexMeetingRowSnapshot {
+    pub id: String,
+    pub title: String,
+    pub display_title: String,
+    pub status: String,
+    pub created_at_ms: u64,
+    pub duration_ms: u64,
+    pub duration_label: String,
+    pub summarizing: bool,
+    pub notes_title: Option<String>,
+    pub notes_summary: Option<String>,
+    pub notes_markdown: Option<String>,
+    pub export_path: Option<String>,
+    pub export_error: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexMeetingTurnSnapshot {
+    pub source: String,
+    pub clock: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub pause_before_ms: Option<u64>,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexMeetingDetailSnapshot {
+    pub manifest: HexMeetingRowSnapshot,
+    pub turns: Vec<HexMeetingTurnSnapshot>,
+    pub transcript_markdown: String,
+    pub transcript_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexActivityEventSnapshot {
+    pub kind: String,
+    pub timestamp_ms: u64,
+    pub summary: String,
+    pub raw_json: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexActivitySnapshot {
+    pub listener_state: Option<String>,
+    pub device: Option<String>,
+    pub error: Option<String>,
+    pub events: Vec<HexActivityEventSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HexInstalledApplicationSnapshot {
+    pub name: String,
+    pub bundle_id: Option<String>,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,7 +367,8 @@ pub enum HexMeetingPanelSnapshot {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HexBootstrapSnapshot {
     pub version: String,
     pub developer_features_enabled: bool,
@@ -212,17 +387,107 @@ pub struct HexBootstrapSnapshot {
     pub release_microphone_while_idle: bool,
     pub show_dock_icon: bool,
     pub sound_volume: f32,
+    pub settings: AppSettings,
+    pub dictation_hotkey_keycaps: Vec<String>,
+    pub dictation_hotkey_side: Option<String>,
+    pub edit_hotkey_keycaps: Vec<String>,
+    pub edit_hotkey_side: Option<String>,
+    pub paste_last_hotkey_keycaps: Vec<String>,
+    pub paste_last_hotkey_side: Option<String>,
+    pub available_microphones: Vec<String>,
+    pub resolved_meeting_output_folder: String,
+    pub apple_intelligence_available: bool,
+    pub apple_intelligence_status: String,
+    pub transcription_catalog: HexTranscriptionCatalogSnapshot,
+    pub opencode_catalog: HexOpenCodeCatalogSnapshot,
+    pub commands_snapshot: HexCommandsSnapshot,
+    pub meetings: Vec<HexMeetingRowSnapshot>,
+    pub activity: HexActivitySnapshot,
+    pub installed_applications: Vec<HexInstalledApplicationSnapshot>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+impl Default for HexBootstrapSnapshot {
+    fn default() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            developer_features_enabled: false,
+            pid: 0,
+            setup_ready: false,
+            onboarding_completed: false,
+            permissions: HexPermissionSnapshot::default(),
+            status_menu: HexStatusMenuSnapshot {
+                models: Vec::new(),
+                preparing_model_title: None,
+                model_switch_error: None,
+                meeting: HexMeetingMenuSnapshot {
+                    state: "idle".to_string(),
+                    visible: false,
+                    status_title: None,
+                    button_title: "Start Recording".to_string(),
+                    recording_icon: false,
+                    can_start: true,
+                    can_stop: false,
+                    started_elapsed_ms: 0,
+                    raw_title: None,
+                },
+                updates_managed: false,
+                managed_updates_label: String::new(),
+            },
+            hud_telemetry: hex_hud_telemetry_s::default(),
+            meeting_panel: HexMeetingPanelSnapshot::Hidden,
+            active_model_id: TranscriptionModelId::default().as_str().to_string(),
+            active_language: "en".to_string(),
+            commands_enabled: false,
+            voice_action_enabled: false,
+            meetings_enabled: false,
+            release_microphone_while_idle: false,
+            show_dock_icon: true,
+            sound_volume: 0.5,
+            settings: AppSettings::default(),
+            dictation_hotkey_keycaps: vec!["⌥".to_string()],
+            dictation_hotkey_side: Some("either".to_string()),
+            edit_hotkey_keycaps: vec!["⌥".to_string(), "⌘".to_string()],
+            edit_hotkey_side: Some("either".to_string()),
+            paste_last_hotkey_keycaps: vec!["⌥".to_string(), "⇧".to_string(), "V".to_string()],
+            paste_last_hotkey_side: None,
+            available_microphones: Vec::new(),
+            resolved_meeting_output_folder: String::new(),
+            apple_intelligence_available: false,
+            apple_intelligence_status: String::new(),
+            transcription_catalog: HexTranscriptionCatalogSnapshot::default(),
+            opencode_catalog: HexOpenCodeCatalogSnapshot::default(),
+            commands_snapshot: HexCommandsSnapshot::default(),
+            meetings: Vec::new(),
+            activity: HexActivitySnapshot::default(),
+            installed_applications: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HexEngineCommand {
     RefreshSnapshot,
     SelectInstalledModel {
         model_id: String,
     },
+    ChooseTranscriptionModel {
+        model_id: String,
+        language: String,
+        recognition_hints: Option<String>,
+    },
+    SetTranscriptionLanguage {
+        language: String,
+    },
+    SetRecognitionHints {
+        hints: String,
+    },
+    DeleteTranscriptionModel {
+        model_id: String,
+    },
     CancelModelPreparation,
     PasteLastDictation,
+    PasteMeetingTurns,
     StartMeeting,
     StopMeeting,
     AcceptMeetingOffer,
@@ -231,6 +496,17 @@ pub enum HexEngineCommand {
     RevealMeetingTranscript {
         path: String,
     },
+    RenameMeeting {
+        id: String,
+        title: String,
+    },
+    DeleteMeeting {
+        id: String,
+    },
+    SummarizeMeeting {
+        id: String,
+    },
+    RefreshMeetings,
     SetSoundVolume {
         volume: f32,
     },
@@ -239,6 +515,99 @@ pub enum HexEngineCommand {
     },
     SetMeetingsEnabled {
         enabled: bool,
+    },
+    SetMeetingNotesEnabled {
+        enabled: bool,
+    },
+    SetMeetingOutputFolder {
+        path: Option<String>,
+    },
+    SaveSettings {
+        settings: AppSettings,
+    },
+    RequestPermission {
+        kind: String,
+    },
+    OpenPermissionSettings {
+        kind: String,
+    },
+    RecordOnboardingCompletion,
+    SetHotkeyCaptureActive {
+        active: bool,
+    },
+    SetHotkeyBinding {
+        target: String,
+        binding: Option<HotkeyBinding>,
+    },
+    CaptureHotkey {
+        target: String,
+        key: Option<String>,
+        key_code: Option<u16>,
+        modifier_flags: u64,
+    },
+    SetHotkeySide {
+        target: String,
+        side: String,
+    },
+    SetDoubleTapLock {
+        enabled: bool,
+    },
+    SetDoubleTapOnly {
+        enabled: bool,
+    },
+    SetIncrementalTranscription {
+        enabled: bool,
+    },
+    SetRecordingAudioBehavior {
+        behavior: RecordingAudioBehavior,
+    },
+    SetMicrophone {
+        device: Option<String>,
+    },
+    RefreshMicrophones,
+    SetReleaseMicrophoneWhileIdle {
+        enabled: bool,
+        #[serde(default)]
+        confirm_disable_commands: bool,
+    },
+    SetCommandsEnabled {
+        enabled: bool,
+        #[serde(default)]
+        confirm_keep_microphone_ready: bool,
+    },
+    RetryCommandsModel,
+    ProvisionPersonalCommandsWorkspace,
+    OpenPersonalCommandsConfig,
+    CopyPersonalCommandsAgentPrompt,
+    SetVoiceActionEnabled {
+        enabled: bool,
+    },
+    SetVoiceActionModel {
+        model: Option<String>,
+        variant: Option<String>,
+        deadline_seconds: Option<u64>,
+    },
+    ReloadOpenCodeCatalog,
+    OpenOpenCodeSetupDocs,
+    DiscoverInstalledApplications,
+    SetHistoryRetention {
+        retention: HistoryRetention,
+    },
+    DeleteHistoryEntry {
+        id: u64,
+    },
+    ClearHistory,
+    RefreshActivity,
+    ConfigureHudTuning {
+        style: f32,
+        line_count: f32,
+        curvature: f32,
+        speed: f32,
+        sharpness: f32,
+        glow: f32,
+        depth: f32,
+        light_angle: f32,
+        outline: f32,
     },
     SimulateHudState {
         state: String,
@@ -453,8 +822,18 @@ impl CallbackSink {
     }
 }
 
+#[derive(Clone, Debug)]
+enum OpenCodeCatalogState {
+    Idle,
+    Loading,
+    Loaded(ModelCatalog),
+    Missing,
+    Failed(String),
+}
+
 struct EngineCore {
     developer_features_enabled: bool,
+    persist_settings: bool,
     settings: AppSettings,
     hud: HudTelemetryTracker,
     meeting_state: MeetingMenuState,
@@ -462,11 +841,23 @@ struct EngineCore {
     pending_offer: Option<(MeetingCandidate, Instant)>,
     ready_panel_deadline: Option<Instant>,
     transcription_preparation: TranscriptionPreparation,
+    transcription_deletion_error: Option<String>,
+    available_microphones: Vec<String>,
+    opencode_catalog: OpenCodeCatalogState,
+    opencode_catalog_receiver: Option<Receiver<OpenCodeCatalogState>>,
+    personal_commands_status: StatusSnapshot,
+    personal_workspace_error: Option<String>,
+    installed_applications: Vec<HexInstalledApplicationSnapshot>,
+    meetings_cache: Vec<MeetingManifest>,
+    event_reader: Option<EventReader>,
+    activity: DesktopActivity,
+    recent_events: Vec<VoiceEvent>,
+    current_context: (Option<String>, Option<String>),
     history: Option<History>,
     recognition_controls: Option<SyncSender<RecognitionControl>>,
     meeting_commands: Option<SyncSender<ControllerCommand>>,
     meeting_requests: Option<SyncSender<MeetingRequest>>,
-    _indicator_sender: DictationIndicatorSender,
+    indicator_sender: DictationIndicatorSender,
     mailbox: VecDeque<QueuedEvent>,
     next_generation: u64,
     callback_sink: Arc<CallbackSink>,
@@ -474,7 +865,244 @@ struct EngineCore {
 
 const MAX_MAILBOX_EVENTS: usize = 256;
 
+fn standalone_modifier_side(binding: &HotkeyBinding) -> Option<ModifierSide> {
+    if binding.key.is_some() {
+        return None;
+    }
+    let mut sides = [
+        binding.modifiers.control,
+        binding.modifiers.option,
+        binding.modifiers.shift,
+        binding.modifiers.command,
+    ]
+    .into_iter()
+    .flatten();
+    let first = sides.next()?;
+    sides.all(|side| side == first).then_some(first)
+}
+
+fn modifier_side_str(side: ModifierSide) -> &'static str {
+    match side {
+        ModifierSide::Left => "left",
+        ModifierSide::Either => "either",
+        ModifierSide::Right => "right",
+    }
+}
+
+fn parse_modifier_side(side: &str) -> Option<ModifierSide> {
+    match side {
+        "left" => Some(ModifierSide::Left),
+        "either" => Some(ModifierSide::Either),
+        "right" => Some(ModifierSide::Right),
+        _ => None,
+    }
+}
+
+fn set_standalone_modifier_side(binding: &mut HotkeyBinding, side: ModifierSide) {
+    if standalone_modifier_side(binding).is_none() {
+        return;
+    }
+    for current in [
+        &mut binding.modifiers.control,
+        &mut binding.modifiers.option,
+        &mut binding.modifiers.shift,
+        &mut binding.modifiers.command,
+    ] {
+        if current.is_some() {
+            *current = Some(side);
+        }
+    }
+}
+
+fn hotkey_binding_conflicts_for_target(
+    settings: &AppSettings,
+    target: &str,
+    binding: &HotkeyBinding,
+) -> bool {
+    let mut others = match target {
+        "dictation" => Vec::new(),
+        "edit" | "paste_last" => vec![settings.dictation_hotkey.clone()],
+        _ => Vec::new(),
+    };
+    if target != "edit" && settings.voice_action.enabled {
+        others.push(settings.edit_hotkey.clone());
+    }
+    if target != "paste_last"
+        && let Some(paste) = &settings.paste_last_hotkey
+    {
+        others.push(paste.clone());
+    }
+    if settings.meetings.available() {
+        others.push(HotkeyBinding::paste_meeting_default());
+    }
+    crate::app_settings::hotkey_conflicts(binding, others)
+}
+
+fn resolve_hotkey_key(key: &str, key_code: Option<u16>) -> Result<HotkeyKey, &'static str> {
+    let normalized = key.trim().to_lowercase();
+    let special = match normalized.as_str() {
+        "space" | " " => Some((49, "Space")),
+        "tab" => Some((48, "Tab")),
+        "enter" | "return" => Some((36, "Return")),
+        "backspace" | "delete_backward" => Some((51, "Delete")),
+        "up" | "arrowup" => Some((126, "Up")),
+        "down" | "arrowdown" => Some((125, "Down")),
+        "left" | "arrowleft" => Some((123, "Left")),
+        "right" | "arrowright" => Some((124, "Right")),
+        "pageup" => Some((116, "Page Up")),
+        "pagedown" => Some((121, "Page Down")),
+        "home" => Some((115, "Home")),
+        "end" => Some((119, "End")),
+        "delete" | "forwarddelete" => Some((117, "Forward Delete")),
+        "insert" | "help" => Some((114, "Help")),
+        "f1" => Some((122, "F1")),
+        "f2" => Some((120, "F2")),
+        "f3" => Some((99, "F3")),
+        "f4" => Some((118, "F4")),
+        "f5" => Some((96, "F5")),
+        "f6" => Some((97, "F6")),
+        "f7" => Some((98, "F7")),
+        "f8" => Some((100, "F8")),
+        "f9" => Some((101, "F9")),
+        "f10" => Some((109, "F10")),
+        "f11" => Some((103, "F11")),
+        "f12" => Some((111, "F12")),
+        "f13" => Some((105, "F13")),
+        "f14" => Some((107, "F14")),
+        "f15" => Some((113, "F15")),
+        "f16" => Some((106, "F16")),
+        "f17" => Some((64, "F17")),
+        "f18" => Some((79, "F18")),
+        "f19" => Some((80, "F19")),
+        "f20" => Some((90, "F20")),
+        _ => None,
+    };
+    if let Some((code, label)) = special {
+        return Ok(HotkeyKey {
+            code,
+            label: label.into(),
+        });
+    }
+    let mut chars = normalized.chars();
+    let Some(ch) = chars.next() else {
+        return Err("Unsupported key");
+    };
+    if chars.next().is_some() {
+        return Err("Unsupported key");
+    }
+    let code = match crate::keyboard::key_code_for(ch) {
+        Ok(c) => c,
+        Err(_) => key_code.ok_or("Unsupported key")?,
+    };
+    Ok(HotkeyKey {
+        code,
+        label: ch.to_uppercase().collect(),
+    })
+}
+
+fn is_function_key_label(label: &str) -> bool {
+    label
+        .strip_prefix('F')
+        .and_then(|number| number.parse::<u8>().ok())
+        .is_some_and(|number| (1..=20).contains(&number))
+}
+
+fn apple_intelligence_status_copy() -> (bool, String) {
+    use crate::apple_intelligence::Availability;
+    match crate::apple_intelligence::availability() {
+        Availability::Available => (true, "Available on this Mac".into()),
+        Availability::AppleIntelligenceNotEnabled => (
+            false,
+            "Enable Apple Intelligence in System Settings to summarize meetings.".into(),
+        ),
+        Availability::ModelNotReady => (false, "Apple Intelligence model is downloading…".into()),
+        Availability::DeviceNotEligible | Availability::UnsupportedSystem => (
+            false,
+            "Requires macOS 26 with Apple Intelligence on Apple Silicon.".into(),
+        ),
+        Availability::Unknown => (false, "Apple Intelligence is currently unavailable.".into()),
+    }
+}
+
+fn start_opencode_catalog_worker() -> Receiver<OpenCodeCatalogState> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let state = if !crate::dictation_processor::opencode_installed() {
+            OpenCodeCatalogState::Missing
+        } else {
+            match crate::dictation_processor::load_model_catalog() {
+                Ok(catalog) => OpenCodeCatalogState::Loaded(catalog),
+                Err(error) => OpenCodeCatalogState::Failed(error.to_string()),
+            }
+        };
+        let _ = tx.send(state);
+    });
+    rx
+}
+
+fn manifest_to_row_snapshot(manifest: &MeetingManifest) -> HexMeetingRowSnapshot {
+    let status = match manifest.status {
+        MeetingStatus::Starting => "starting",
+        MeetingStatus::Recording => "recording",
+        MeetingStatus::Transcribing => "transcribing",
+        MeetingStatus::Complete => "complete",
+        MeetingStatus::Interrupted => "interrupted",
+        MeetingStatus::Failed => "failed",
+    };
+    let duration_ms = manifest.duration_ms.unwrap_or_default();
+    let minutes = duration_ms / 60_000;
+    let duration_label = match minutes {
+        0 => "< 1 min".to_string(),
+        1..=59 => format!("{minutes} min"),
+        _ => format!("{} h {:02} min", minutes / 60, minutes % 60),
+    };
+    HexMeetingRowSnapshot {
+        id: manifest.id.clone(),
+        title: manifest.title.clone(),
+        display_title: meeting::display_title(manifest),
+        status: status.to_string(),
+        created_at_ms: manifest.created_at_ms,
+        duration_ms,
+        duration_label,
+        summarizing: meeting::notes_in_progress(&manifest.id),
+        notes_title: manifest
+            .notes
+            .as_ref()
+            .map(|n| n.title.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        notes_summary: manifest
+            .notes
+            .as_ref()
+            .map(|n| n.summary.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        notes_markdown: manifest.notes.as_ref().map(meeting::notes_markdown),
+        export_path: manifest
+            .export_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        export_error: manifest.export_error.clone(),
+        error: manifest.error.clone(),
+    }
+}
+
 impl EngineCore {
+    fn commit_settings(&mut self, mut candidate: AppSettings) -> Result<(), String> {
+        if candidate.commands_enabled && candidate.release_microphone_while_idle {
+            return Err("voice commands require the microphone to remain ready".into());
+        }
+        if !candidate.double_tap_lock || candidate.dictation_hotkey.key.is_none() {
+            candidate.double_tap_only = false;
+        }
+        candidate.dictation_processing.default_mode.name = "Global".into();
+        crate::transcription_models::validate(&candidate.transcription)
+            .map_err(|e| e.to_string())?;
+        if self.persist_settings {
+            candidate.save().map_err(|e| e.to_string())?;
+        }
+        self.settings = candidate;
+        Ok(())
+    }
+
     fn enqueue_event<T: Serialize>(&mut self, tag: hex_event_tag_e, payload: &T) {
         let Ok(bytes) = serde_json::to_vec(payload) else {
             return;
@@ -493,15 +1121,283 @@ impl EngineCore {
 
     fn permission_snapshot(&self) -> (bool, HexPermissionSnapshot) {
         let status = onboarding::status(&self.settings.transcription);
+        let mic_state = match status.microphone {
+            PermissionState::Ready => "ready",
+            PermissionState::NeedsRequest => "needs_request",
+            PermissionState::NeedsSettings => "needs_settings",
+        };
         (
             status.ready(),
             HexPermissionSnapshot {
                 microphone_granted: status.microphone == PermissionState::Ready,
+                microphone_state: mic_state.to_string(),
                 accessibility_granted: status.accessibility == PermissionState::Ready,
                 input_monitoring_granted: status.input_monitoring == PermissionState::Ready,
                 model_installed: status.transcription_model,
+                screen_recording_granted: meeting::screen_recording_permitted(),
             },
         )
+    }
+
+    fn transcription_catalog_snapshot(&self) -> HexTranscriptionCatalogSnapshot {
+        let selected_language = self.settings.transcription.language.clone();
+        let prep_status = self.transcription_preparation.status();
+        let recommendations = crate::transcription_models::choices_for_runtime(&selected_language);
+        let languages = LANGUAGES
+            .iter()
+            .map(|(code, name)| HexLanguageOption {
+                code: (*code).to_string(),
+                name: (*name).to_string(),
+            })
+            .collect();
+        let models = MODELS
+            .iter()
+            .filter(|def| def.available())
+            .map(|def| {
+                let installed = is_installed(def, &selected_language);
+                let active = installed
+                    && self.settings.transcription.model == def.id
+                    && self.settings.transcription.language == selected_language;
+                let rec = recommendations.iter().find(|c| c.model.id == def.id);
+                let preparing = prep_status.model == Some(def.id);
+                let total_bytes = def.download_bytes();
+                let progress_fraction = if preparing {
+                    total_bytes.map(|total| {
+                        (prep_status.downloaded_bytes as f32 / total as f32).clamp(0.0, 1.0)
+                    })
+                } else {
+                    None
+                };
+                let status_label = if preparing {
+                    if installed {
+                        "Loading model…".to_string()
+                    } else if let Some(frac) = progress_fraction {
+                        format!("Downloading {:.0}%", frac * 100.0)
+                    } else {
+                        "Preparing…".to_string()
+                    }
+                } else if active {
+                    "Active".to_string()
+                } else if installed {
+                    "Downloaded".to_string()
+                } else {
+                    "Not downloaded".to_string()
+                };
+                let can_delete = installed
+                    && matches!(def.runtime, ModelRuntime::Gguf(_))
+                    && self.settings.transcription.model != def.id
+                    && prep_status.model != Some(def.id);
+                HexTranscriptionModelRow {
+                    id: def.id.as_str().to_string(),
+                    name: def.name.to_string(),
+                    summary: format!(
+                        "{} · {} WER ({})",
+                        def.coverage, def.quality, def.quality_context
+                    ),
+                    realtime: def.realtime.to_string(),
+                    size_label: def.size_label(),
+                    quality: def.quality.to_string(),
+                    quality_context: def.quality_context.to_string(),
+                    coverage: def.coverage.to_string(),
+                    languages: def
+                        .presentation_languages()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    supports_recognition_hints: def.supports_recognition_hints,
+                    installed,
+                    active,
+                    recommended_for_language: rec.is_some(),
+                    recommendation_label: rec.map(|r| r.recommendation.label().to_string()),
+                    can_delete,
+                    preparing,
+                    downloaded_bytes: if preparing {
+                        prep_status.downloaded_bytes
+                    } else {
+                        0
+                    },
+                    total_bytes,
+                    progress_fraction,
+                    status_label,
+                }
+            })
+            .collect();
+        HexTranscriptionCatalogSnapshot {
+            selected_language,
+            languages,
+            models,
+            preparation_error: prep_status.error,
+            deletion_error: self.transcription_deletion_error.clone(),
+        }
+    }
+
+    fn opencode_catalog_snapshot(&self) -> HexOpenCodeCatalogSnapshot {
+        match &self.opencode_catalog {
+            OpenCodeCatalogState::Idle | OpenCodeCatalogState::Loading => {
+                HexOpenCodeCatalogSnapshot {
+                    state: "loading".to_string(),
+                    ..Default::default()
+                }
+            }
+            OpenCodeCatalogState::Missing => HexOpenCodeCatalogSnapshot {
+                state: "missing".to_string(),
+                error: Some(
+                    "Install OpenCode v2 (https://v2.opencode.ai/) to use AI rewriting and Voice Action."
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            OpenCodeCatalogState::Failed(err) => HexOpenCodeCatalogSnapshot {
+                state: "failed".to_string(),
+                error: Some(err.clone()),
+                ..Default::default()
+            },
+            OpenCodeCatalogState::Loaded(catalog) => HexOpenCodeCatalogSnapshot {
+                state: "loaded".to_string(),
+                error: None,
+                default_key: catalog.default_key.clone(),
+                default_name: catalog.default_name.clone(),
+                default_variant: catalog.default_variant.clone(),
+                models: catalog
+                    .models
+                    .iter()
+                    .map(|choice| HexOpenCodeModelChoice {
+                        key: choice.key.clone(),
+                        name: choice.name.clone(),
+                        provider: choice.provider.clone(),
+                        variants: choice.variants.clone(),
+                        recommended_variant: catalog
+                            .recommended_variant_for(&choice.key)
+                            .map(str::to_string),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    fn commands_snapshot(&self) -> HexCommandsSnapshot {
+        let model_status = match crate::recognition::command_model_status() {
+            CommandModelStatus::Disabled => "disabled",
+            CommandModelStatus::Loading => "loading",
+            CommandModelStatus::Ready => "ready",
+            CommandModelStatus::Failed => "failed",
+        };
+        let workspace = crate::app_paths::personal_commands_workspace()
+            .unwrap_or_else(|_| PathBuf::from("~/.config/hex"));
+        let config_file = workspace.join("hex.config.ts");
+        let workspace_exists = config_file.is_file();
+        let last_reload_error = self
+            .personal_workspace_error
+            .clone()
+            .or_else(|| self.personal_commands_status.last_reload_error.clone());
+        let current_context_label = match &self.current_context {
+            (Some(app), Some(host)) => format!("{app} / {host}"),
+            (Some(app), None) => app.clone(),
+            _ => "Global".to_string(),
+        };
+
+        let mut catalog: Vec<HexCommandCatalogItem> = crate::config::voice_control()
+            .catalog()
+            .into_iter()
+            .map(|info| {
+                let scope = match &info.scope {
+                    CommandScope::Sleeping | CommandScope::Global => "Global".to_string(),
+                    CommandScope::Application(app) => app.clone(),
+                    CommandScope::Browser(host) => host.clone(),
+                };
+                HexCommandCatalogItem {
+                    id: info.id,
+                    group: info.group.unwrap_or_else(|| scope.clone()),
+                    phrase: info.phrase,
+                    aliases: info.aliases,
+                    description: info.description,
+                    scope,
+                }
+            })
+            .collect();
+
+        for personal in &self.personal_commands_status.catalog {
+            if let Some((phrase, aliases)) = personal.phrases.split_first() {
+                let scope = match &personal.context {
+                    StatusContext::Global => "Global".to_string(),
+                    StatusContext::Application { application } => application.clone(),
+                    StatusContext::BrowserHost { browser_host } => browser_host.clone(),
+                };
+                catalog.push(HexCommandCatalogItem {
+                    id: personal.id.clone(),
+                    group: personal.group.clone(),
+                    phrase: phrase.clone(),
+                    aliases: aliases.to_vec(),
+                    description: personal.description.clone(),
+                    scope,
+                });
+            }
+        }
+
+        let transformations = self
+            .personal_commands_status
+            .transformations
+            .iter()
+            .map(|t| HexTransformationCatalogItem {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                description: t.description.clone().unwrap_or_default(),
+            })
+            .collect();
+
+        HexCommandsSnapshot {
+            command_model_status: model_status.to_string(),
+            workspace_path: workspace.display().to_string(),
+            config_file_path: config_file.display().to_string(),
+            workspace_exists,
+            last_reload_error,
+            current_context_label,
+            catalog,
+            transformations,
+        }
+    }
+
+    fn activity_snapshot(&self) -> HexActivitySnapshot {
+        let events = self
+            .recent_events
+            .iter()
+            .map(|ev| HexActivityEventSnapshot {
+                kind: ev.kind().to_string(),
+                timestamp_ms: ev.timestamp_ms(),
+                summary: format!("{ev:?}"),
+                raw_json: serde_json::to_string_pretty(ev).unwrap_or_default(),
+            })
+            .collect();
+        HexActivitySnapshot {
+            listener_state: self.activity.state_label().map(str::to_string),
+            device: self.activity.device.clone(),
+            error: self.activity.error.clone(),
+            events,
+        }
+    }
+
+    fn refresh_meetings_cache(&mut self) {
+        if let Ok(list) = meeting::list() {
+            self.meetings_cache = list;
+        }
+    }
+
+    fn refresh_activity_cache(&mut self) {
+        if let Some(reader) = &mut self.event_reader {
+            self.activity.refresh(reader);
+            self.recent_events = reader.recent(150);
+            for ev in self.recent_events.iter().rev() {
+                if let VoiceEvent::Context {
+                    application,
+                    browser_url,
+                    ..
+                } = ev
+                {
+                    self.current_context = (application.clone(), browser_url.clone());
+                    break;
+                }
+            }
+        }
     }
 
     fn status_menu_snapshot(&self) -> HexStatusMenuSnapshot {
@@ -557,6 +1453,40 @@ impl EngineCore {
 
     fn bootstrap_snapshot(&self) -> HexBootstrapSnapshot {
         let (setup_ready, permissions) = self.permission_snapshot();
+        let (ai_available, ai_status) = apple_intelligence_status_copy();
+        let dictation_hotkey_keycaps = self.settings.dictation_hotkey.keycaps();
+        let dictation_hotkey_side = standalone_modifier_side(&self.settings.dictation_hotkey)
+            .map(modifier_side_str)
+            .map(str::to_string);
+        let edit_hotkey_keycaps = self.settings.edit_hotkey.keycaps();
+        let edit_hotkey_side = standalone_modifier_side(&self.settings.edit_hotkey)
+            .map(modifier_side_str)
+            .map(str::to_string);
+        let paste_last_hotkey_keycaps = self
+            .settings
+            .paste_last_hotkey
+            .as_ref()
+            .map(HotkeyBinding::keycaps)
+            .unwrap_or_default();
+        let paste_last_hotkey_side = self
+            .settings
+            .paste_last_hotkey
+            .as_ref()
+            .and_then(standalone_modifier_side)
+            .map(modifier_side_str)
+            .map(str::to_string);
+        let resolved_meeting_output_folder = self
+            .settings
+            .meetings
+            .resolved_output_folder()
+            .display()
+            .to_string();
+        let meetings = self
+            .meetings_cache
+            .iter()
+            .map(manifest_to_row_snapshot)
+            .collect();
+
         HexBootstrapSnapshot {
             version: env!("CARGO_PKG_VERSION").to_string(),
             developer_features_enabled: self.developer_features_enabled,
@@ -579,20 +1509,54 @@ impl EngineCore {
             } else {
                 0.0
             },
+            settings: self.settings.clone(),
+            dictation_hotkey_keycaps,
+            dictation_hotkey_side,
+            edit_hotkey_keycaps,
+            edit_hotkey_side,
+            paste_last_hotkey_keycaps,
+            paste_last_hotkey_side,
+            available_microphones: self.available_microphones.clone(),
+            resolved_meeting_output_folder,
+            apple_intelligence_available: ai_available,
+            apple_intelligence_status: ai_status,
+            transcription_catalog: self.transcription_catalog_snapshot(),
+            opencode_catalog: self.opencode_catalog_snapshot(),
+            commands_snapshot: self.commands_snapshot(),
+            meetings,
+            activity: self.activity_snapshot(),
+            installed_applications: self.installed_applications.clone(),
         }
     }
 
     fn poll_preparation(&mut self) {
+        if let Some(rx) = &self.opencode_catalog_receiver
+            && let Ok(state) = rx.try_recv()
+        {
+            self.opencode_catalog_receiver = None;
+            self.opencode_catalog = state;
+            let snapshot = self.bootstrap_snapshot();
+            self.enqueue_event(
+                hex_event_tag_e::HEX_EVENT_OPENCODE_CATALOG_UPDATED,
+                &snapshot,
+            );
+        }
+
         let Some(result) = self.transcription_preparation.poll() else {
             return;
         };
         match result {
             Ok(selection) => {
-                if let Err(error) = self.settings.save_transcription(selection) {
-                    tracing::warn!(%error, "could not persist prepared transcription model");
-                    self.transcription_preparation
-                        .set_error(Some(error.to_string()));
+                if self.persist_settings {
+                    if let Err(error) = self.settings.save_transcription(selection) {
+                        tracing::warn!(%error, "could not persist prepared transcription model");
+                        self.transcription_preparation
+                            .set_error(Some(error.to_string()));
+                    } else {
+                        self.transcription_preparation.set_error(None);
+                    }
                 } else {
+                    self.settings.remember_transcription(selection);
                     self.transcription_preparation.set_error(None);
                 }
             }
@@ -633,6 +1597,7 @@ impl EngineCore {
                 self.ready_panel_deadline = None;
                 self.meeting_state = MeetingMenuState::Starting;
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
+                self.refresh_meetings_cache();
                 let panel = self.meeting_panel.clone();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
                 let snapshot = self.bootstrap_snapshot();
@@ -650,6 +1615,7 @@ impl EngineCore {
                     app_label: "Meeting".to_string(),
                     elapsed_text: "00:00".to_string(),
                 };
+                self.refresh_meetings_cache();
                 let panel = self.meeting_panel.clone();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
                 let snapshot = self.bootstrap_snapshot();
@@ -679,6 +1645,7 @@ impl EngineCore {
                         );
                     }
                 }
+                self.refresh_meetings_cache();
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
             }
@@ -698,6 +1665,7 @@ impl EngineCore {
                 self.ready_panel_deadline = None;
                 self.meeting_state = MeetingMenuState::Transcribing;
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
+                self.refresh_meetings_cache();
                 let panel = self.meeting_panel.clone();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
                 let snapshot = self.bootstrap_snapshot();
@@ -708,6 +1676,7 @@ impl EngineCore {
                 self.meeting_state = MeetingMenuState::Idle;
                 self.ready_panel_deadline = Some(Instant::now() + READY_TIMEOUT);
                 self.meeting_panel = Self::ready_panel_from_manifest(&manifest);
+                self.refresh_meetings_cache();
                 let panel = self.meeting_panel.clone();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
                 let snapshot = self.bootstrap_snapshot();
@@ -731,6 +1700,9 @@ impl EngineCore {
                     let panel = self.meeting_panel.clone();
                     self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
                 }
+                self.refresh_meetings_cache();
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
             }
             ControllerEvent::NotesFinished(manifest) => {
                 if let HexMeetingPanelSnapshot::Ready { meeting_id, .. } = &self.meeting_panel
@@ -740,6 +1712,9 @@ impl EngineCore {
                     let panel = self.meeting_panel.clone();
                     self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
                 }
+                self.refresh_meetings_cache();
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
             }
             ControllerEvent::Failed { title, error } => {
                 tracing::error!(%title, %error, "meeting recording failed");
@@ -747,6 +1722,7 @@ impl EngineCore {
                 self.ready_panel_deadline = None;
                 self.meeting_state = MeetingMenuState::Idle;
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
+                self.refresh_meetings_cache();
                 let panel = self.meeting_panel.clone();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
                 let snapshot = self.bootstrap_snapshot();
@@ -861,9 +1837,17 @@ impl EngineCore {
     fn dispatch(&mut self, command: HexEngineCommand) -> Result<(), String> {
         match command {
             HexEngineCommand::RefreshSnapshot => {
-                if let Ok(loaded) = AppSettings::load() {
+                if self.persist_settings
+                    && let Ok(loaded) = AppSettings::load()
+                {
                     self.settings = loaded;
                 }
+                if let Ok(mut status) = crate::personal_commands::load_status() {
+                    crate::personal_commands::include_builtin_transformations(&mut status);
+                    self.personal_commands_status = status;
+                }
+                self.refresh_meetings_cache();
+                self.refresh_activity_cache();
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
                 Ok(())
@@ -887,6 +1871,90 @@ impl EngineCore {
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_MODEL_PREP_UPDATED, &snapshot);
                 Ok(())
             }
+            HexEngineCommand::ChooseTranscriptionModel {
+                model_id,
+                language,
+                recognition_hints,
+            } => {
+                let model = TranscriptionModelId::from_str(&model_id).map_err(|e| e.to_string())?;
+                let definition = crate::transcription_models::definition(model);
+                let hints = if definition.supports_recognition_hints {
+                    recognition_hints
+                        .unwrap_or_else(|| self.settings.transcription.recognition_hints.clone())
+                } else {
+                    String::new()
+                };
+                let selection = TranscriptionSelection {
+                    model,
+                    language,
+                    recognition_hints: hints,
+                };
+                crate::transcription_models::validate(&selection).map_err(|e| e.to_string())?;
+                self.transcription_deletion_error = None;
+                self.transcription_preparation.set_error(None);
+                if is_installed(definition, &selection.language)
+                    && self.settings.transcription.model == model
+                    && self.settings.transcription.language == selection.language
+                {
+                    let mut candidate = self.settings.clone();
+                    candidate.remember_transcription(selection);
+                    self.commit_settings(candidate)?;
+                    let snapshot = self.bootstrap_snapshot();
+                    self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                    return Ok(());
+                }
+                self.transcription_preparation.start(selection, false);
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MODEL_PREP_UPDATED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetTranscriptionLanguage { language } => {
+                let mut candidate = self.settings.clone();
+                let current_def =
+                    crate::transcription_models::definition(candidate.transcription.model);
+                if !current_def.supports_language(&language) {
+                    if let Some(first) = crate::transcription_models::choices_for_runtime(&language)
+                        .first()
+                        .map(|c| c.model.id)
+                    {
+                        candidate.transcription.model = first;
+                    }
+                }
+                candidate.transcription.language = language;
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetRecognitionHints { hints } => {
+                let mut candidate = self.settings.clone();
+                candidate.transcription.recognition_hints = hints;
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::DeleteTranscriptionModel { model_id } => {
+                let model = TranscriptionModelId::from_str(&model_id).map_err(|e| e.to_string())?;
+                if self.settings.transcription.model == model {
+                    return Err("Cannot delete the currently active transcription model.".into());
+                }
+                if self.transcription_preparation.status().model == Some(model) {
+                    return Err("Cannot delete a model while it is being prepared.".into());
+                }
+                let definition = crate::transcription_models::definition(model);
+                if let Err(error) = crate::transcription_models::remove_installed(definition) {
+                    let msg = error.to_string();
+                    self.transcription_deletion_error = Some(msg.clone());
+                    let snapshot = self.bootstrap_snapshot();
+                    self.enqueue_event(hex_event_tag_e::HEX_EVENT_MODEL_PREP_UPDATED, &snapshot);
+                    return Err(msg);
+                }
+                self.transcription_deletion_error = None;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MODEL_PREP_UPDATED, &snapshot);
+                Ok(())
+            }
             HexEngineCommand::CancelModelPreparation => {
                 self.transcription_preparation.cancel();
                 let snapshot = self.bootstrap_snapshot();
@@ -894,6 +1962,12 @@ impl EngineCore {
                 Ok(())
             }
             HexEngineCommand::PasteLastDictation => {
+                if let Some(controls) = &self.recognition_controls {
+                    let _ = controls.try_send(RecognitionControl::PasteLast);
+                }
+                Ok(())
+            }
+            HexEngineCommand::PasteMeetingTurns => {
                 if let Some(controls) = &self.recognition_controls {
                     let _ = controls.try_send(RecognitionControl::PasteLast);
                 }
@@ -967,14 +2041,58 @@ impl EngineCore {
                 }
                 Ok(())
             }
+            HexEngineCommand::RenameMeeting { id, title } => {
+                let trimmed = title.split_whitespace().collect::<Vec<_>>().join(" ");
+                if trimmed.is_empty() {
+                    return Err("The meeting title cannot be empty.".into());
+                }
+                if self.persist_settings {
+                    meeting::rename(&id, &trimmed).map_err(|e| format!("{e:#}"))?;
+                    self.refresh_meetings_cache();
+                } else if let Some(item) = self.meetings_cache.iter_mut().find(|m| m.id == id) {
+                    item.title = trimmed;
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::DeleteMeeting { id } => {
+                if self.persist_settings {
+                    meeting::trash(&id).map_err(|e| format!("{e:#}"))?;
+                    self.refresh_meetings_cache();
+                } else {
+                    self.meetings_cache.retain(|m| m.id != id);
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SummarizeMeeting { id } => {
+                if let Some(requests) = &self.meeting_requests {
+                    let _ = requests.try_send(MeetingRequest::Summarize(id));
+                } else {
+                    meeting::spawn_summary(id, move |_result| {});
+                }
+                self.refresh_meetings_cache();
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::RefreshMeetings => {
+                self.refresh_meetings_cache();
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                Ok(())
+            }
             HexEngineCommand::SetSoundVolume { volume } => {
                 let clamped = volume.clamp(0.0, 1.0);
-                self.settings.sound_effects = clamped > 0.0;
+                let mut candidate = self.settings.clone();
+                candidate.sound_effects = clamped > 0.0;
                 if clamped > 0.0 {
-                    self.settings.sound_effect_volume = clamped;
+                    candidate.sound_effect_volume = clamped;
                 }
-                self.settings.save().map_err(|e| e.to_string())?;
-                if clamped > 0.0 {
+                self.commit_settings(candidate)?;
+                if self.persist_settings && clamped > 0.0 {
                     crate::feedback::play(crate::feedback::Tone::DictationStart);
                 }
                 let snapshot = self.bootstrap_snapshot();
@@ -982,17 +2100,517 @@ impl EngineCore {
                 Ok(())
             }
             HexEngineCommand::SetShowDockIcon { visible } => {
-                self.settings.show_dock_icon = visible;
-                self.settings.save().map_err(|e| e.to_string())?;
+                let mut candidate = self.settings.clone();
+                candidate.show_dock_icon = visible;
+                self.commit_settings(candidate)?;
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
                 Ok(())
             }
             HexEngineCommand::SetMeetingsEnabled { enabled } => {
-                self.settings.meetings.enabled = enabled;
-                self.settings.save().map_err(|e| e.to_string())?;
+                let mut candidate = self.settings.clone();
+                candidate.meetings.enabled = enabled;
+                self.commit_settings(candidate)?;
+                if enabled {
+                    self.refresh_meetings_cache();
+                }
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetMeetingNotesEnabled { enabled } => {
+                let mut candidate = self.settings.clone();
+                candidate.meetings.summarize_with_apple_intelligence = enabled;
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetMeetingOutputFolder { path } => {
+                let mut candidate = self.settings.clone();
+                candidate.meetings.output_folder = path
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .map(PathBuf::from);
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SaveSettings { settings } => {
+                self.commit_settings(settings)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::RequestPermission { kind } => {
+                match kind.as_str() {
+                    "microphone" => {
+                        let status = onboarding::status(&self.settings.transcription);
+                        if status.microphone == PermissionState::NeedsRequest {
+                            onboarding::request_microphone();
+                        } else {
+                            onboarding::open_permission_settings("microphone");
+                        }
+                    }
+                    "input_monitoring" | "input" => {
+                        crate::permission_guide::show_input_monitoring();
+                    }
+                    "accessibility" => {
+                        crate::permission_guide::show_accessibility();
+                    }
+                    "screen_recording" => {
+                        if !meeting::request_screen_recording() {
+                            meeting::open_screen_recording_settings();
+                        }
+                    }
+                    _ => onboarding::open_permission_settings(&kind),
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_READINESS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::OpenPermissionSettings { kind } => {
+                match kind.as_str() {
+                    "screen_recording" => meeting::open_screen_recording_settings(),
+                    "input_monitoring" => onboarding::open_permission_settings("input"),
+                    other => onboarding::open_permission_settings(other),
+                }
+                Ok(())
+            }
+            HexEngineCommand::RecordOnboardingCompletion => {
+                if self.persist_settings {
+                    onboarding::record_completion().map_err(|e| e.to_string())?;
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_READINESS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetHotkeyCaptureActive { active } => {
+                if self.persist_settings {
+                    crate::app_settings::set_hotkey_capture_active(active);
+                }
+                Ok(())
+            }
+            HexEngineCommand::SetHotkeyBinding { target, binding } => {
+                let mut candidate = self.settings.clone();
+                if let Some(ref b) = binding {
+                    if b.is_empty() {
+                        return Err("Press a shortcut".into());
+                    }
+                    if hotkey_binding_conflicts_for_target(&candidate, &target, b) {
+                        return Err("Shortcut is already in use.".into());
+                    }
+                }
+                match target.as_str() {
+                    "dictation" => {
+                        let b = binding.ok_or("Dictation shortcut cannot be disabled.")?;
+                        candidate.dictation_hotkey = b;
+                    }
+                    "edit" | "voice_action" => {
+                        let b = binding.ok_or("Voice Action shortcut cannot be empty.")?;
+                        candidate.edit_hotkey = b;
+                    }
+                    "paste_last" => {
+                        candidate.paste_last_hotkey = binding;
+                    }
+                    other => return Err(format!("Unknown hotkey target: {other}")),
+                }
+                self.commit_settings(candidate)?;
+                if self.persist_settings {
+                    crate::app_settings::set_hotkey_capture_active(false);
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::CaptureHotkey {
+                target,
+                key,
+                key_code,
+                modifier_flags,
+            } => {
+                let raw_modifiers = crate::app_settings::modifiers_from_flags(modifier_flags);
+                let binding = if let Some(key_str) = key.filter(|s| !s.trim().is_empty()) {
+                    let modifiers = raw_modifiers.without_side_constraints();
+                    let hk_key = resolve_hotkey_key(&key_str, key_code)?;
+                    if modifiers.is_empty() && !is_function_key_label(&hk_key.label) {
+                        return Err("Add a modifier".into());
+                    }
+                    HotkeyBinding {
+                        modifiers,
+                        key: Some(hk_key),
+                    }
+                } else {
+                    let mut sides = [
+                        raw_modifiers.control,
+                        raw_modifiers.option,
+                        raw_modifiers.shift,
+                        raw_modifiers.command,
+                    ]
+                    .into_iter()
+                    .flatten();
+                    let normalized = if let Some(first) = sides.next() {
+                        if sides.all(|s| s == first) {
+                            raw_modifiers
+                        } else {
+                            raw_modifiers.without_side_constraints()
+                        }
+                    } else {
+                        raw_modifiers
+                    };
+                    if normalized.is_empty() {
+                        return Err("Press a shortcut".into());
+                    }
+                    HotkeyBinding {
+                        modifiers: normalized,
+                        key: None,
+                    }
+                };
+                if hotkey_binding_conflicts_for_target(&self.settings, &target, &binding) {
+                    return Err("Already in use".into());
+                }
+                let mut candidate = self.settings.clone();
+                match target.as_str() {
+                    "dictation" => candidate.dictation_hotkey = binding,
+                    "edit" | "voice_action" => candidate.edit_hotkey = binding,
+                    "paste_last" => candidate.paste_last_hotkey = Some(binding),
+                    other => return Err(format!("Unknown hotkey target: {other}")),
+                }
+                self.commit_settings(candidate)?;
+                if self.persist_settings {
+                    crate::app_settings::set_hotkey_capture_active(false);
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetHotkeySide { target, side } => {
+                let parsed_side =
+                    parse_modifier_side(&side).ok_or_else(|| format!("Invalid side: {side}"))?;
+                let mut candidate = self.settings.clone();
+                let mut updated = match target.as_str() {
+                    "dictation" => candidate.dictation_hotkey.clone(),
+                    "edit" | "voice_action" => candidate.edit_hotkey.clone(),
+                    "paste_last" => candidate
+                        .paste_last_hotkey
+                        .clone()
+                        .ok_or("Paste Last shortcut is not set.")?,
+                    other => return Err(format!("Unknown hotkey target: {other}")),
+                };
+                if standalone_modifier_side(&updated).is_none() {
+                    return Err("Shortcut is not a standalone modifier.".into());
+                }
+                set_standalone_modifier_side(&mut updated, parsed_side);
+                if hotkey_binding_conflicts_for_target(&candidate, &target, &updated) {
+                    return Err("Already in use".into());
+                }
+                match target.as_str() {
+                    "dictation" => candidate.dictation_hotkey = updated,
+                    "edit" | "voice_action" => candidate.edit_hotkey = updated,
+                    "paste_last" => candidate.paste_last_hotkey = Some(updated),
+                    _ => unreachable!(),
+                }
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetDoubleTapLock { enabled } => {
+                let mut candidate = self.settings.clone();
+                candidate.double_tap_lock = enabled;
+                if !enabled {
+                    candidate.double_tap_only = false;
+                }
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetDoubleTapOnly { enabled } => {
+                let mut candidate = self.settings.clone();
+                if enabled && candidate.dictation_hotkey.key.is_none() {
+                    return Err(
+                        "Double-tap only requires a key shortcut (for example Control-Space)."
+                            .into(),
+                    );
+                }
+                if enabled {
+                    candidate.double_tap_lock = true;
+                }
+                candidate.double_tap_only = enabled;
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetIncrementalTranscription { enabled } => {
+                let mut candidate = self.settings.clone();
+                candidate.incremental_transcription = enabled;
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetRecordingAudioBehavior { behavior } => {
+                let mut candidate = self.settings.clone();
+                candidate.recording_audio_behavior = behavior;
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetMicrophone { device } => {
+                let mut candidate = self.settings.clone();
+                candidate.microphone = device.filter(|d| !d.trim().is_empty());
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::RefreshMicrophones => {
+                if let Ok(devices) = crate::audio::input_device_names() {
+                    self.available_microphones = devices;
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetReleaseMicrophoneWhileIdle {
+                enabled,
+                confirm_disable_commands,
+            } => {
+                let mut candidate = self.settings.clone();
+                if enabled && candidate.commands_enabled {
+                    if confirm_disable_commands {
+                        candidate.disable_commands_and_release_microphone();
+                    } else {
+                        return Err(
+                            "disable voice commands before enabling idle microphone release".into(),
+                        );
+                    }
+                } else {
+                    candidate
+                        .set_release_microphone_while_idle(enabled)
+                        .map_err(|e| e.to_string())?;
+                }
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetCommandsEnabled {
+                enabled,
+                confirm_keep_microphone_ready,
+            } => {
+                let mut candidate = self.settings.clone();
+                if enabled && candidate.release_microphone_while_idle {
+                    if confirm_keep_microphone_ready {
+                        candidate.keep_microphone_ready_and_enable_commands();
+                    } else {
+                        return Err(
+                            "disable idle microphone release before enabling voice commands".into(),
+                        );
+                    }
+                } else {
+                    candidate
+                        .set_commands_enabled(enabled)
+                        .map_err(|e| e.to_string())?;
+                }
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::RetryCommandsModel => {
+                if let Some(controls) = &self.recognition_controls {
+                    let _ = controls.try_send(RecognitionControl::RetryCommands);
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::ProvisionPersonalCommandsWorkspace => {
+                match crate::personal_commands::initialize_workspace() {
+                    Ok(_) => {
+                        self.personal_workspace_error = None;
+                        if let Ok(mut status) = crate::personal_commands::load_status() {
+                            crate::personal_commands::include_builtin_transformations(&mut status);
+                            self.personal_commands_status = status;
+                        }
+                    }
+                    Err(error) => {
+                        let msg = error.to_string();
+                        self.personal_workspace_error = Some(msg.clone());
+                        let snapshot = self.bootstrap_snapshot();
+                        self.enqueue_event(
+                            hex_event_tag_e::HEX_EVENT_PERSONAL_COMMANDS_UPDATED,
+                            &snapshot,
+                        );
+                        return Err(msg);
+                    }
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(
+                    hex_event_tag_e::HEX_EVENT_PERSONAL_COMMANDS_UPDATED,
+                    &snapshot,
+                );
+                Ok(())
+            }
+            HexEngineCommand::OpenPersonalCommandsConfig => {
+                let workspace =
+                    crate::app_paths::personal_commands_workspace().map_err(|e| e.to_string())?;
+                let config = workspace.join("hex.config.ts");
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg(&config)
+                    .spawn();
+                Ok(())
+            }
+            HexEngineCommand::CopyPersonalCommandsAgentPrompt => {
+                let workspace =
+                    crate::app_paths::personal_commands_workspace().map_err(|e| e.to_string())?;
+                let config = workspace.join("hex.config.ts");
+                let prompt = format!(
+                    "Help me configure my HEX custom voice commands.\n\n\
+                     Workspace: {}\n\
+                     Config: {}\n\n\
+                     Read AGENTS.md and .agents/skills/personal-commands/SKILL.md in the workspace \
+                     before editing. Ask me what commands or dictation phrases I want, update \
+                     hex.config.ts, and run `bun run check` from the workspace when finished. You \
+                     may add npm packages when a command needs them.",
+                    workspace.display(),
+                    config.display()
+                );
+                arboard::Clipboard::new()
+                    .and_then(|mut cb| cb.set_text(prompt))
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            }
+            HexEngineCommand::SetVoiceActionEnabled { enabled } => {
+                let mut candidate = self.settings.clone();
+                if enabled
+                    && hotkey_binding_conflicts_for_target(
+                        &candidate,
+                        "edit",
+                        &candidate.edit_hotkey,
+                    )
+                {
+                    return Err(
+                        "The Voice Action shortcut is already in use. Change it before enabling Voice Action."
+                            .into(),
+                    );
+                }
+                candidate.voice_action.enabled = enabled;
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetVoiceActionModel {
+                model,
+                variant,
+                deadline_seconds,
+            } => {
+                let mut candidate = self.settings.clone();
+                candidate.voice_action.model = model.filter(|m| !m.trim().is_empty());
+                candidate.voice_action.variant = variant.filter(|v| !v.trim().is_empty());
+                if let Some(secs) = deadline_seconds {
+                    candidate.voice_action.deadline_seconds = secs.max(1);
+                }
+                self.commit_settings(candidate)?;
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::ReloadOpenCodeCatalog => {
+                if self.opencode_catalog_receiver.is_none() {
+                    self.opencode_catalog = OpenCodeCatalogState::Loading;
+                    self.opencode_catalog_receiver = Some(start_opencode_catalog_worker());
+                    let snapshot = self.bootstrap_snapshot();
+                    self.enqueue_event(
+                        hex_event_tag_e::HEX_EVENT_OPENCODE_CATALOG_UPDATED,
+                        &snapshot,
+                    );
+                }
+                Ok(())
+            }
+            HexEngineCommand::OpenOpenCodeSetupDocs => {
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg("https://v2.opencode.ai/")
+                    .spawn();
+                Ok(())
+            }
+            HexEngineCommand::DiscoverInstalledApplications => {
+                let apps = crate::application_catalog::discover();
+                self.installed_applications = apps
+                    .into_iter()
+                    .map(|app| HexInstalledApplicationSnapshot {
+                        name: app.name,
+                        bundle_id: app.bundle_id,
+                        path: app.path.display().to_string(),
+                    })
+                    .collect();
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::SetHistoryRetention { retention } => {
+                let mut candidate = self.settings.clone();
+                candidate.history_retention = retention;
+                self.commit_settings(candidate)?;
+                if let Some(history) = &self.history {
+                    let _ = history.set_retention(retention);
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::DeleteHistoryEntry { id } => {
+                if let Some(history) = &self.history {
+                    history.delete(id).map_err(|e| e.to_string())?;
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::ClearHistory => {
+                if let Some(history) = &self.history {
+                    history.clear().map_err(|e| e.to_string())?;
+                }
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::RefreshActivity => {
+                self.refresh_activity_cache();
+                let snapshot = self.bootstrap_snapshot();
+                self.enqueue_event(hex_event_tag_e::HEX_EVENT_ACTIVITY_APPENDED, &snapshot);
+                Ok(())
+            }
+            HexEngineCommand::ConfigureHudTuning {
+                style,
+                line_count,
+                curvature,
+                speed,
+                sharpness,
+                glow,
+                depth,
+                light_angle,
+                outline,
+            } => {
+                self.indicator_sender
+                    .send(DictationIndicatorEvent::Configure(HudTuning {
+                        style,
+                        line_count,
+                        curvature,
+                        speed,
+                        sharpness,
+                        glow,
+                        depth,
+                        light_angle,
+                        outline,
+                    }));
                 Ok(())
             }
             HexEngineCommand::SimulateHudState { state, rms, peak } => {
@@ -1343,8 +2961,39 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
         wakeup_pending: AtomicBool::new(false),
     });
 
-    let core = Arc::new(Mutex::new(EngineCore {
+    let available_microphones = if cfg.start_workers {
+        crate::audio::input_device_names().unwrap_or_default()
+    } else {
+        vec!["MacBook Pro Microphone".to_string()]
+    };
+    let mut personal_commands_status = if cfg.start_workers {
+        crate::personal_commands::load_status().unwrap_or_default()
+    } else {
+        StatusSnapshot::default()
+    };
+    crate::personal_commands::include_builtin_transformations(&mut personal_commands_status);
+    let opencode_catalog_receiver = cfg.start_workers.then(start_opencode_catalog_worker);
+    let opencode_catalog = if cfg.start_workers {
+        OpenCodeCatalogState::Loading
+    } else {
+        OpenCodeCatalogState::Idle
+    };
+    let meetings_cache = if cfg.start_workers {
+        meeting::list().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let event_reader = if cfg.start_workers {
+        crate::app_paths::logs_dir()
+            .ok()
+            .map(|dir| EventReader::open(dir.join("live.ndjson")))
+    } else {
+        None
+    };
+
+    let mut initial_core = EngineCore {
         developer_features_enabled: cfg.developer_features_enabled,
+        persist_settings: cfg.start_workers,
         settings,
         hud: HudTelemetryTracker::default(),
         meeting_state: MeetingMenuState::Idle,
@@ -1352,15 +3001,31 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
         pending_offer: None,
         ready_panel_deadline: None,
         transcription_preparation: TranscriptionPreparation::default(),
+        transcription_deletion_error: None,
+        available_microphones,
+        opencode_catalog,
+        opencode_catalog_receiver,
+        personal_commands_status,
+        personal_workspace_error: None,
+        installed_applications: Vec::new(),
+        meetings_cache,
+        event_reader,
+        activity: DesktopActivity::default(),
+        recent_events: Vec::new(),
+        current_context: (None, None),
         history,
         recognition_controls: cfg.start_workers.then_some(recognition_control_sender),
         meeting_commands: cfg.start_workers.then_some(controller_cmd_sender),
         meeting_requests: cfg.start_workers.then_some(meeting_request_sender),
-        _indicator_sender: indicator_sender,
+        indicator_sender,
         mailbox: VecDeque::new(),
         next_generation: 0,
         callback_sink: callback_sink.clone(),
-    }));
+    };
+    if cfg.start_workers {
+        initial_core.refresh_activity_cache();
+    }
+    let core = Arc::new(Mutex::new(initial_core));
 
     let coordinator_core = core.clone();
     let coordinator_shutdown = shutdown.clone();
@@ -1607,15 +3272,65 @@ pub unsafe extern "C" fn hex_engine_copy_meeting_detail_json(
     engine: hex_engine_t,
     meeting_id_utf8: hex_slice_s,
 ) -> hex_slice_s {
-    let Some(_engine_ref) = (unsafe { engine.as_ref() }) else {
+    let Some(engine_ref) = (unsafe { engine.as_ref() }) else {
         return hex_slice_s::default();
     };
     let Ok(meeting_id) = slice_to_str(meeting_id_utf8) else {
         return hex_slice_s::default();
     };
-    let detail = meeting::list()
+    let manifest_opt = meeting::list()
         .ok()
-        .and_then(|items| items.into_iter().find(|item| item.id == meeting_id));
+        .and_then(|items| items.into_iter().find(|item| item.id == meeting_id))
+        .or_else(|| {
+            let guard = engine_ref.core.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .meetings_cache
+                .iter()
+                .find(|item| item.id == meeting_id)
+                .cloned()
+        });
+    let detail = manifest_opt.map(|manifest| {
+        let mut reader = meeting::TranscriptReader::default();
+        match reader.read(&meeting_id) {
+            Ok(entries) => {
+                let coalesced = meeting::coalesce_transcript(entries);
+                let transcript_markdown = meeting::transcript_markdown(&coalesced);
+                let turns = coalesced
+                    .iter()
+                    .scan(None, |previous_end: &mut Option<u64>, turn| {
+                        let pause_before_ms = previous_end
+                            .map(|end| turn.start_ms.saturating_sub(end))
+                            .filter(|pause| *pause >= 30_000);
+                        *previous_end =
+                            Some(previous_end.map_or(turn.end_ms, |end| end.max(turn.end_ms)));
+                        Some(HexMeetingTurnSnapshot {
+                            source: match turn.source {
+                                MeetingSource::Microphone => "you".to_string(),
+                                MeetingSource::System => "computer".to_string(),
+                            },
+                            clock: meeting::format_duration(turn.start_ms),
+                            start_ms: turn.start_ms,
+                            end_ms: turn.end_ms,
+                            pause_before_ms,
+                            text: turn.text.clone(),
+                        })
+                    })
+                    .collect();
+                HexMeetingDetailSnapshot {
+                    manifest: manifest_to_row_snapshot(&manifest),
+                    turns,
+                    transcript_markdown,
+                    transcript_error: None,
+                }
+            }
+            Err(error) => HexMeetingDetailSnapshot {
+                manifest: manifest_to_row_snapshot(&manifest),
+                turns: Vec::new(),
+                transcript_markdown: String::new(),
+                transcript_error: Some(error.to_string()),
+            },
+        }
+    });
     allocate_json_slice(&detail)
 }
 
@@ -1963,5 +3678,104 @@ int main(void) {{
             tracker.telemetry.phase,
             hex_hud_phase_e::HEX_HUD_PHASE_COMPLETED
         );
+    }
+
+    #[test]
+    fn settings_and_pane_commands_roundtrip_and_enforce_invariants() {
+        let cfg = hex_runtime_config_s {
+            userdata: ptr::null_mut(),
+            wakeup_cb: None,
+            event_cb: None,
+            developer_features_enabled: true,
+            start_workers: false,
+            preview_dictation_hud: false,
+        };
+        let engine = unsafe { hex_engine_new(&raw const cfg) };
+        assert!(!engine.is_null());
+
+        let dispatch = |json: &str| -> Result<(), String> {
+            let mut err_slice = hex_slice_s::default();
+            let ok = unsafe {
+                hex_engine_dispatch_json(
+                    engine,
+                    hex_slice_s {
+                        ptr: json.as_ptr().cast::<c_char>(),
+                        len: json.len(),
+                    },
+                    &raw mut err_slice,
+                )
+            };
+            if ok {
+                Ok(())
+            } else {
+                let err_str = slice_to_str(err_slice).unwrap_or("").to_string();
+                unsafe { hex_string_free(err_slice) };
+                Err(err_str)
+            }
+        };
+
+        let read_snapshot = || -> HexBootstrapSnapshot {
+            let slice = unsafe { hex_engine_copy_bootstrap_snapshot_json(engine) };
+            let text = slice_to_str(slice).unwrap();
+            let parsed: HexBootstrapSnapshot = serde_json::from_str(text).unwrap();
+            unsafe { hex_string_free(slice) };
+            parsed
+        };
+
+        let initial = read_snapshot();
+        assert!(!initial.transcription_catalog.languages.is_empty());
+        assert!(!initial.transcription_catalog.models.is_empty());
+        assert!(!initial.commands_snapshot.catalog.is_empty());
+        assert!(!initial.commands_snapshot.transformations.is_empty());
+        assert_eq!(initial.dictation_hotkey_side.as_deref(), Some("either"));
+
+        // Switch dictation standalone modifier side to right.
+        dispatch(r#"{"type":"set_hotkey_side","target":"dictation","side":"right"}"#).unwrap();
+        let after_side = read_snapshot();
+        assert_eq!(after_side.dictation_hotkey_side.as_deref(), Some("right"));
+        assert_eq!(after_side.dictation_hotkey_keycaps, vec!["R⌥".to_string()]);
+
+        // Double-tap only requires a key shortcut on dictation_hotkey; standalone Option must reject.
+        assert!(dispatch(r#"{"type":"set_double_tap_only","enabled":true}"#).is_err());
+
+        // Mutual exclusion between commands_enabled and release_microphone_while_idle.
+        dispatch(
+            r#"{"type":"set_commands_enabled","enabled":true,"confirm_keep_microphone_ready":false}"#,
+        )
+        .unwrap();
+        assert!(read_snapshot().commands_enabled);
+        assert!(
+            dispatch(
+                r#"{"type":"set_release_microphone_while_idle","enabled":true,"confirm_disable_commands":false}"#
+            )
+            .is_err()
+        );
+        dispatch(
+            r#"{"type":"set_release_microphone_while_idle","enabled":true,"confirm_disable_commands":true}"#,
+        )
+        .unwrap();
+        let after_confirm = read_snapshot();
+        assert!(!after_confirm.commands_enabled);
+        assert!(after_confirm.release_microphone_while_idle);
+
+        // Voice action toggle + model update.
+        dispatch(r#"{"type":"set_voice_action_enabled","enabled":true}"#).unwrap();
+        dispatch(
+            r#"{"type":"set_voice_action_model","model":"anthropic/claude-sonnet-4-5","variant":"low","deadline_seconds":15}"#,
+        )
+        .unwrap();
+        let after_va = read_snapshot();
+        assert!(after_va.voice_action_enabled);
+        assert_eq!(
+            after_va.settings.voice_action.model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(
+            after_va.settings.voice_action.variant.as_deref(),
+            Some("low")
+        );
+        assert_eq!(after_va.settings.voice_action.deadline_seconds, 15);
+
+        unsafe { hex_engine_free(engine) };
     }
 }
