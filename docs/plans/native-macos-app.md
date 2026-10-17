@@ -4,8 +4,8 @@
 
 ## Status & Scope
 
-- **Status:** Approved & In Implementation (`feat/native-macos`)
-- **Baseline:** `origin/feat/hex-voice-meetings` (`0aafaf9`, encompassing incremental dictation, meeting recording/transcripts/echo/notes, Apple Intelligence, and MCP) plus `origin/plan/native-macos` (`24eda3b`).
+- **Status:** Approved & In Implementation (`feat/native-macos`, M0–M3 implemented, M4 cutover pending)
+- **Baseline:** `origin/main` (`1c3dacf`, including PR #134 Meetings + `hex mcp`) and `origin/fix/meeting-echo` (`f2f273d`, PR #135 WAV sample-timeline echo suppression, double-talk preservation, rolling live transcript commits, and single-threaded Moonshine ONNX Runtime sessions) merged into `feat/native-macos`.
 - **Relationship to prior plans:** Supersedes the macOS half of [`docs/plans/shared-desktop-ui.md`](shared-desktop-ui.md) while preserving the Linux GPUI desktop shell (`src/linux_app.rs`), `hex` CLI, `local_api`, and TypeScript SDK contracts (`docs/plans/linux.md`, `docs/plans/typescript-sdk.md`). Continues to honor every non-migration rule in [`docs/plans/swift-app-handoff.md`](swift-app-handoff.md): bundle ID `com.kitlangton.hex2`, app name `Hex.app`, Sparkle ZIP root `HEX.app`, and `~/Library/Application Support/voice-control/` as the authoritative data root.
 - **Tunable Constants Policy:** `KnobsKit` integration is deferred; all tunable motion, spring, and sizing constants live in a single centralized `HexTuning` definition so they can be wired to live knobs later without touching call sites.
 
@@ -711,7 +711,7 @@ Every user-facing behavior ID across `docs/features/README.md`, `dictation.md`, 
 
 - `meetings.opt-in` — **Done**: `Meetings (Beta)` section in `HexGeneralSettingsPane` (enable toggle, Screen & System Audio permission check, transcript folder picker/reveal/reset, Apple Intelligence summary toggle) (`HexGeneralSettingsPane.swift`).
 - `meetings.detect` / `meetings.offer` / `meetings.record` / `meetings.call-ended` — **Done**: Focus-free `MeetingCapsulePanelController` for detected-call offers, active recording status, call-ended prompt, and ready summary (`MeetingCapsulePanelController.swift`, `StatusBarController.swift`).
-- `meetings.rolling` / `meetings.echo` / `meetings.output` — **Done**: Dual-stream capture, echo suppression, coalesced speaker turns (`You` / `Them`), and Markdown export in `libhex` (`src/ffi.rs`).
+- `meetings.rolling` / `meetings.echo` / `meetings.output` — **Done**: Dual-stream capture, WAV sample-timeline echo suppression with double-talk preservation (`f2f273d`), rolling `transcript.rolling.ndjson` delta tracking (`HEX_EVENT_MEETING_TRANSCRIPT_DELTA`), coalesced speaker turns (`You` / `Them`), single-threaded Moonshine ONNX Runtime initialization (`moonshine::run_sessions_single_threaded()` in both CLI and `libhex` FFI startup), and Markdown export in `libhex` (`src/ffi.rs`, `src/meeting_echo.rs`, `src/meeting_live.rs`, `src/meeting_transcript.rs`).
 - `meetings.rename` / `meetings.delete` / `meetings.title.provisional` / `meetings.notes` — **Done**: Full `HexMeetingsPane` workspace with search, start/stop recording, inline rename, two-step delete (disabled while busy), Apple Intelligence notes card (Summarize / Regenerate / Copy Notes), Copy Transcript, and Reveal Markdown (`HexHistoryCommandsMeetingsPanes.swift`).
 - `meetings.mcp` / `meetings.mcp.mirror` — **Done**: Preserved via CLI passthrough (`hex mcp`) in `macos/HexApp/main.swift` (`src/lib.rs`).
 
@@ -722,5 +722,7 @@ Every user-facing behavior ID across `docs/features/README.md`, `dictation.md`, 
 
 ### Remaining Cutover Work (Milestone M4)
 
-- **Partial — Legacy GPUI Preview Flag Parity (`scripts/capture-preview.sh`):** The native app supports `--preview-dictation`, `HexHudLabPane`, and `hex dev` (`HEX_EVENT_DEV_COMMAND_REQUESTED`), while the legacy CLI `preview <target>` flags still route to `src/app_window.rs` until M4 removes GPUI on macOS.
-- **Pending M4 — Delete Legacy macOS GPUI Modules:** Removing `src/app_window.rs`, `src/status_item.rs`, `src/dictation_indicator.rs`, `src/sparkle.rs`, and gating `gpui` to `cfg(target_os = "linux")` in `Cargo.toml` is scheduled for Milestone M4 after review.
+- **Pending M4 — Release Build Script Cutover (`scripts/build-app.sh`):** `scripts/build-app.sh` still packages the Rust binary (`target/release/hex`) rather than running `cargo build --release --lib` + `xcodebuild -project macos/Hex.xcodeproj -scheme Hex -configuration Release`. Until M4 switches `scripts/build-app.sh`, native `Hex.app` builds are produced via `xcodebuild` into `~/Library/Caches/hex-native-build/Hex.app` and tested locally with `scripts/swap-in-native-app.sh`.
+- **Partial — Legacy GPUI Preview Flag Parity (`scripts/capture-preview.sh`):** The native app supports `--preview-dictation`, `HexHudLabPane` (live-wired to `HexTuning.HUD`), and `hex dev` (`HEX_EVENT_DEV_COMMAND_REQUESTED`), while the legacy CLI `preview <target>` flags still route to `src/app_window.rs` until M4 removes GPUI on macOS.
+- **Architectural Simplification — Single `HexMacFeature` Target (`@Observable` Store):** In `macos/HexMacPackage`, M0–M3 were implemented in a single `HexMacFeature` module using `@MainActor @Observable` (`HexSettingsStore` + `HexEngineRuntime`) rather than splitting into multiple SPM targets or pulling in external `swift-composable-architecture`.
+- **Pending M4 — Delete Legacy macOS GPUI Modules:** Removing `src/app_window.rs`, `src/status_item.rs`, `src/dictation_indicator.rs`, `src/sparkle.rs`, `src/meeting_watcher.rs`, and gating `gpui` to `cfg(target_os = "linux")` in `Cargo.toml` is scheduled for Milestone M4 after local testing.
