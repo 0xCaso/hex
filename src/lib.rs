@@ -493,6 +493,7 @@ pub fn cli_main() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn run_cli_from_args(raw_args: Vec<std::ffi::OsString>) -> Result<()> {
+    moonshine::run_sessions_single_threaded();
     let _ = color_eyre::install();
     let cli = Cli::parse_from(mcp_alias_arguments(raw_args));
     // Before process logging, the instance lock, or any GUI or permission
@@ -1058,5 +1059,6 @@ mod tests {
 
 #[cfg(target_os = "linux")]
 pub fn cli_main() -> Result<()> {
+    moonshine::run_sessions_single_threaded();
     linux::run(&SHUTDOWN)
 }

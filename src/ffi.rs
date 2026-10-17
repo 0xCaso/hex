@@ -3212,6 +3212,7 @@ pub unsafe extern "C" fn hex_keyboard_initialize_layout_on_main_thread() -> bool
         );
         return false;
     }
+    crate::moonshine::run_sessions_single_threaded();
     match crate::keyboard::initialize_layout() {
         Ok(()) => true,
         Err(error) => {
@@ -3223,6 +3224,7 @@ pub unsafe extern "C" fn hex_keyboard_initialize_layout_on_main_thread() -> bool
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_cli_maybe_run_from_process_args() -> i32 {
+    crate::moonshine::run_sessions_single_threaded();
     let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if !crate::should_run_cli_from_args(&raw_args) {
         return -1;
