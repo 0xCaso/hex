@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import HexEngineFFI
 import Observation
@@ -95,7 +96,6 @@ public final class HexEngineRuntime {
     public init(
         developerFeaturesEnabled: Bool = false,
         startWorkers: Bool = true,
-        startLocalAPI: Bool = true,
         previewDictationHUD: Bool = false
     ) {
         let bridge = EngineCallbackBridge()
@@ -203,7 +203,7 @@ public final class HexEngineRuntime {
             onCommandFailed?(command, resolvedMessage)
         } else {
             switch command {
-            case .refreshSnapshot, .refreshStatus, .refreshMeetings, .refreshActivity,
+            case .refreshSnapshot, .refreshMeetings, .refreshActivity,
                  .discoverInstalledApplications, .reloadOpenCodeCatalog, .setHotkeyCaptureActive:
                 break
             default:
@@ -211,6 +211,16 @@ public final class HexEngineRuntime {
             }
         }
         return succeeded
+    }
+
+    @discardableResult
+    public func quitOtherHexInstancesAndRetry() -> Bool {
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.kitlangton.hex2")
+        where app.processIdentifier != myPid {
+            app.terminate()
+        }
+        return dispatch(.quitOtherHexInstancesAndRetry)
     }
 
     public func fetchHistoryEntries(query: String = "", limit: UInt32 = 200) -> [HexHistoryEntry] {

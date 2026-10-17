@@ -201,11 +201,17 @@ public struct HexHistoryPane: View {
         }
     }
 
-    private static func formatTimestamp(_ ms: UInt64) -> String {
-        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000.0)
+    @MainActor
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        return formatter
+    }()
+
+    @MainActor
+    private static func formatTimestamp(_ ms: UInt64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000.0)
+        return relativeDateFormatter.localizedString(for: date, relativeTo: Date())
     }
 }
 
@@ -465,7 +471,7 @@ public struct HexMeetingsPane: View {
                         ? (meetingMenu?.buttonTitle ?? "Start Recording")
                         : "Start Recording"
                     Button(startLabel) {
-                        store.runtime.dispatch(.startMeeting())
+                        store.runtime.dispatch(.startMeeting)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)

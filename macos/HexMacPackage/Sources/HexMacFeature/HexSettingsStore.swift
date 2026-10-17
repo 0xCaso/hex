@@ -128,11 +128,8 @@ public final class HexSettingsStore {
     public var newModeNameDraft: String = ""
     public var modeValidationError: String?
     public var confirmingDeleteModeIndex: Int?
-    public var isApplicationPickerOpen: Bool = false
-    public var applicationSearchQuery: String = ""
     public var newBrowserDomainDraft: String = ""
     public var browserDomainError: String?
-    public var isTransformationPickerOpen: Bool = false
 
     // History state
     public var historySearchQuery: String = ""
@@ -213,12 +210,7 @@ public final class HexSettingsStore {
     }
 
     public func quitOtherHexAndRetry() {
-        let myPid = ProcessInfo.processInfo.processIdentifier
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.kitlangton.hex2")
-        where app.processIdentifier != myPid {
-            app.terminate()
-        }
-        if runtime.dispatch(.quitOtherHexInstancesAndRetry) {
+        if runtime.quitOtherHexInstancesAndRetry() {
             bannerError = nil
         }
     }
@@ -678,6 +670,15 @@ public final class HexSettingsStore {
     // MARK: - HUD Lab
 
     public func applyHudTuning() {
+        HexTuning.HUD.lineStyle = hudStyle
+        HexTuning.HUD.lineCount = hudLineCount
+        HexTuning.HUD.lineCurvature = hudCurvature
+        HexTuning.HUD.lineSpeed = hudSpeed
+        HexTuning.HUD.lineSharpness = hudSharpness
+        HexTuning.HUD.lineGlow = hudGlow
+        HexTuning.HUD.sphereDepth = hudDepth
+        HexTuning.HUD.lightAngle = hudLightAngle
+        HexTuning.HUD.sphereOutline = hudOutline
         runtime.dispatch(
             .configureHudTuning(
                 style: hudStyle,

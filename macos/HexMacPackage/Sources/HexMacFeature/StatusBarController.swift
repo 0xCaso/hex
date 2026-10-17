@@ -244,12 +244,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func handleQuitOtherHexAndRetry(_ sender: Any?) {
-        let myPid = ProcessInfo.processInfo.processIdentifier
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.kitlangton.hex2")
-        where app.processIdentifier != myPid {
-            app.terminate()
-        }
-        runtime.dispatch(.quitOtherHexInstancesAndRetry)
+        _ = runtime.quitOtherHexInstancesAndRetry()
     }
 
     @objc private func handleOpenSettings(_ sender: Any?) {
@@ -265,8 +260,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func handleStartMeeting(_ sender: Any?) {
-        let title = runtime.snapshot?.statusMenu.meeting.rawTitle
-        runtime.dispatch(.startMeeting(title: title))
+        runtime.dispatch(.startMeeting)
     }
 
     @objc private func handleStopMeeting(_ sender: Any?) {

@@ -1,14 +1,28 @@
 import AppKit
+import Foundation
 import Testing
 @testable import HexMacFeature
 
 @Suite("HexEngineClient & M1 Native Panels")
 @MainActor
 struct HexEngineClientTests {
-    @Test("Metal HUD shader uniform layout matches 112-byte Metal struct")
-    func shaderUniformsStrideMatchesMetalLayout() {
+    @Test("Metal HUD shader uniform layout matches 112-byte Metal struct and fallback source matches src/dictation_indicator.metal")
+    func shaderUniformsStrideMatchesMetalLayoutAndFallbackSourceMatchesCanonicalShader() throws {
         #expect(MemoryLayout<HUDShaderUniforms>.size == DictationHUDPanelController.expectedUniformsSize)
         #expect(MemoryLayout<HUDShaderUniforms>.stride == DictationHUDPanelController.expectedUniformsSize)
+
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let canonicalShaderURL = repoRoot.appendingPathComponent("src/dictation_indicator.metal")
+        let canonicalShader = try String(contentsOf: canonicalShaderURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let embeddedShader = DictationHUDPanelController.embeddedIndicatorShaderSource
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(embeddedShader == canonicalShader)
     }
 
     @Test("Main-thread TIS keyboard layout initialization succeeds")
@@ -22,7 +36,6 @@ struct HexEngineClientTests {
         let runtime = HexEngineRuntime(
             developerFeaturesEnabled: true,
             startWorkers: false,
-            startLocalAPI: false,
             previewDictationHUD: false
         )
         defer { runtime.shutdown() }
@@ -93,7 +106,6 @@ struct HexEngineClientTests {
         let runtime = HexEngineRuntime(
             developerFeaturesEnabled: true,
             startWorkers: false,
-            startLocalAPI: false,
             previewDictationHUD: false
         )
         defer { runtime.shutdown() }
@@ -110,7 +122,6 @@ struct HexEngineClientTests {
         let runtime = HexEngineRuntime(
             developerFeaturesEnabled: true,
             startWorkers: false,
-            startLocalAPI: false,
             previewDictationHUD: false
         )
         defer { runtime.shutdown() }
@@ -220,5 +231,13 @@ struct HexEngineClientTests {
         #expect(store.alertError != nil)
         store.dismissAlertError()
         store.dismissBannerError()
+
+        // HUD Lab live tuning updates HexTuning.HUD
+        let previousLineCount = HexTuning.HUD.lineCount
+        store.hudLineCount = 4.0
+        store.applyHudTuning()
+        #expect(HexTuning.HUD.lineCount == 4.0)
+        store.hudLineCount = previousLineCount
+        store.applyHudTuning()
     }
 }

@@ -1079,7 +1079,6 @@ public struct HexBootstrapSnapshot: Codable, Sendable, Equatable {
 
 public enum HexEngineCommand: Encodable, Sendable, Equatable {
     case refreshSnapshot
-    case refreshStatus
     case requestPermission(kind: String)
     case openPermissionSettings(kind: String)
     case recordOnboardingCompletion
@@ -1087,12 +1086,11 @@ public enum HexEngineCommand: Encodable, Sendable, Equatable {
     case pasteMeetingTurns
     case selectInstalledModel(modelId: String)
     case chooseTranscriptionModel(modelId: String, language: String, recognitionHints: String?)
-    case prepareTranscriptionModel(modelId: String, language: String?, recognitionHints: String?, allowDownload: Bool)
     case setTranscriptionLanguage(language: String)
     case setRecognitionHints(hints: String)
     case deleteTranscriptionModel(modelId: String)
     case cancelModelPreparation
-    case startMeeting(title: String? = nil)
+    case startMeeting
     case stopMeeting
     case acceptMeetingOffer
     case dismissMeetingOffer
@@ -1169,7 +1167,7 @@ public enum HexEngineCommand: Encodable, Sendable, Equatable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .refreshSnapshot, .refreshStatus:
+        case .refreshSnapshot:
             try container.encode("refresh_snapshot", forKey: .type)
         case let .requestPermission(kind):
             try container.encode("request_permission", forKey: .type)
@@ -1190,11 +1188,6 @@ public enum HexEngineCommand: Encodable, Sendable, Equatable {
             try container.encode("choose_transcription_model", forKey: .type)
             try container.encode(modelId, forKey: .modelId)
             try container.encode(language, forKey: .language)
-            try container.encodeIfPresent(recognitionHints, forKey: .recognitionHints)
-        case let .prepareTranscriptionModel(modelId, language, recognitionHints, _):
-            try container.encode("choose_transcription_model", forKey: .type)
-            try container.encode(modelId, forKey: .modelId)
-            try container.encode(language ?? "en", forKey: .language)
             try container.encodeIfPresent(recognitionHints, forKey: .recognitionHints)
         case let .setTranscriptionLanguage(language):
             try container.encode("set_transcription_language", forKey: .type)

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-candidate=${1:-/private/var/folders/4t/_jnrck017r5f_jttbc19b7s40000gn/T/opencode/hex-native-build/Build/Products/Release/Hex.app}
+candidate=${1:-$HOME/Library/Caches/hex-native-build/Hex.app}
 target="/Applications/Hex.app"
 rollback_dir="$HOME/Library/Caches/hex-rollback"
 rollback_app="$rollback_dir/Hex.app"

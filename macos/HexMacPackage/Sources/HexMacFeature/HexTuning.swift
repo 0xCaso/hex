@@ -32,15 +32,15 @@ public enum HexTuning {
         public static let peakGain: Float = 3.0
         public static let peakDecayPer60HzFrame: Float = 0.91
 
-        public static let lineStyle: Float = 1.0
-        public static let lineCount: Float = 2.0
-        public static let lineCurvature: Float = 0.47
-        public static let lineSpeed: Float = 17.08
-        public static let lineSharpness: Float = 0.29
-        public static let lineGlow: Float = 0.77
-        public static let sphereDepth: Float = 0.65
-        public static let lightAngle: Float = 0.35
-        public static let sphereOutline: Float = 1.0
+        @MainActor public static var lineStyle: Float = 1.0
+        @MainActor public static var lineCount: Float = 2.0
+        @MainActor public static var lineCurvature: Float = 0.47
+        @MainActor public static var lineSpeed: Float = 17.08
+        @MainActor public static var lineSharpness: Float = 0.29
+        @MainActor public static var lineGlow: Float = 0.77
+        @MainActor public static var sphereDepth: Float = 0.65
+        @MainActor public static var lightAngle: Float = 0.35
+        @MainActor public static var sphereOutline: Float = 1.0
     }
 
     public enum MeetingCapsule {

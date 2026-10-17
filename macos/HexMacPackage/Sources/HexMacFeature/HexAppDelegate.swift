@@ -35,7 +35,6 @@ public final class HexAppDelegate: NSObject, NSApplicationDelegate {
         let engine = HexEngineRuntime(
             developerFeaturesEnabled: developerFeaturesEnabled,
             startWorkers: true,
-            startLocalAPI: true,
             previewDictationHUD: previewDictationHUD
         )
         self.runtime = engine
