@@ -528,7 +528,7 @@ pub enum HexEngineCommand {
         path: Option<String>,
     },
     SaveSettings {
-        settings: AppSettings,
+        settings: Box<AppSettings>,
     },
     RequestPermission {
         kind: String,
@@ -622,7 +622,6 @@ pub enum HexEngineCommand {
     SimulateMeetingPanel {
         panel: HexMeetingPanelSnapshot,
     },
-    CompleteOnboarding,
     RetryInstanceLock,
     QuitOtherHexInstancesAndRetry,
     RequestCheckForUpdates,
@@ -641,7 +640,7 @@ pub struct AtomicHudTelemetry {
 
 impl Default for AtomicHudTelemetry {
     fn default() -> Self {
-        let initial = Self {
+        Self {
             phase: AtomicU32::new(hex_hud_phase_e::HEX_HUD_PHASE_HIDDEN as u32),
             rms_bits: AtomicU32::new(0.0f32.to_bits()),
             peak_bits: AtomicU32::new(0.0f32.to_bits()),
@@ -649,8 +648,7 @@ impl Default for AtomicHudTelemetry {
             mode_color_rgba: AtomicU32::new(0xFF06_09FF),
             phase_started_ns: AtomicU64::new(0),
             flags: AtomicU32::new(0),
-        };
-        initial
+        }
     }
 }
 
@@ -953,7 +951,7 @@ struct EngineCore {
     meeting_panel: HexMeetingPanelSnapshot,
     pending_offer: Option<(MeetingCandidate, Instant)>,
     ready_panel_deadline: Option<Instant>,
-    active_meeting_transcript_len: u64,
+    active_meeting_transcript_sig: (u64, u64, u64, u128),
     transcription_picker_language: Option<String>,
     transcription_preparation: TranscriptionPreparation,
     transcription_deletion_error: Option<String>,
@@ -1244,7 +1242,54 @@ fn manifest_to_row_snapshot(manifest: &MeetingManifest) -> HexMeetingRowSnapshot
     }
 }
 
+fn meeting_transcript_signature(dir: &Path) -> (u64, u64, u64, u128) {
+    let file_stat = |name: &str| -> (u64, u128) {
+        let Ok(meta) = std::fs::metadata(dir.join(name)) else {
+            return (0, 0);
+        };
+        let modified_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
+        (meta.len(), modified_ns)
+    };
+    let (live_len, _) = file_stat("transcript.live.ndjson");
+    let (rolling_len, rolling_mtime) = file_stat("transcript.rolling.ndjson");
+    let (final_len, final_mtime) = file_stat("transcript.ndjson");
+    (
+        live_len,
+        rolling_len,
+        final_len,
+        rolling_mtime.max(final_mtime),
+    )
+}
+
 impl EngineCore {
+    fn emit_meeting_panel_changed(&mut self) {
+        let panel = self.meeting_panel.clone();
+        self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+    }
+
+    fn refresh_and_emit_meeting_state(&mut self) {
+        self.refresh_meetings_cache();
+        let snapshot = self.bootstrap_snapshot();
+        self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+    }
+
+    fn apply_indicator_event(&mut self, event: DictationIndicatorEvent) {
+        let is_completed = matches!(event, DictationIndicatorEvent::JobCompleted { .. });
+        if self.hud.apply(event) {
+            let telemetry = self.hud.telemetry;
+            self.enqueue_event(hex_event_tag_e::HEX_EVENT_HUD_CHANGED, &telemetry);
+        }
+        if is_completed {
+            let _ = self.refresh_activity_cache();
+            let snapshot = self.bootstrap_snapshot();
+            self.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
+        }
+    }
+
     fn commit_settings(&mut self, mut candidate: AppSettings) -> Result<(), String> {
         if candidate.commands_enabled && candidate.release_microphone_while_idle {
             return Err("voice commands require the microphone to remain ready".into());
@@ -2002,19 +2047,15 @@ impl EngineCore {
                     source_label: candidate.source.label().to_string(),
                     remaining_seconds: seconds,
                 };
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                self.emit_meeting_panel_changed();
             }
             ControllerEvent::Starting => {
                 self.pending_offer = None;
                 self.ready_panel_deadline = None;
                 self.meeting_state = MeetingMenuState::Starting;
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                self.refresh_meetings_cache();
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.emit_meeting_panel_changed();
+                self.refresh_and_emit_meeting_state();
             }
             ControllerEvent::RecordingStarted { title } => {
                 self.pending_offer = None;
@@ -2028,11 +2069,8 @@ impl EngineCore {
                     app_label: "Meeting".to_string(),
                     elapsed_text: "00:00".to_string(),
                 };
-                self.refresh_meetings_cache();
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.emit_meeting_panel_changed();
+                self.refresh_and_emit_meeting_state();
             }
             ControllerEvent::Retitled { title } => {
                 if let MeetingMenuState::Recording {
@@ -2051,16 +2089,10 @@ impl EngineCore {
                             app_label: "Meeting".to_string(),
                             elapsed_text: elapsed,
                         };
-                        let panel = self.meeting_panel.clone();
-                        self.enqueue_event(
-                            hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED,
-                            &panel,
-                        );
+                        self.emit_meeting_panel_changed();
                     }
                 }
-                self.refresh_meetings_cache();
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.refresh_and_emit_meeting_state();
             }
             ControllerEvent::CallEnded { app } => {
                 self.pending_offer = None;
@@ -2070,30 +2102,23 @@ impl EngineCore {
                     subtitle: "HEX is still recording.".to_string(),
                     app_label: app,
                 };
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                self.emit_meeting_panel_changed();
             }
             ControllerEvent::Transcribing => {
                 self.pending_offer = None;
                 self.ready_panel_deadline = None;
                 self.meeting_state = MeetingMenuState::Transcribing;
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                self.refresh_meetings_cache();
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.emit_meeting_panel_changed();
+                self.refresh_and_emit_meeting_state();
             }
             ControllerEvent::Finished(manifest) => {
                 self.pending_offer = None;
                 self.meeting_state = MeetingMenuState::Idle;
                 self.ready_panel_deadline = Some(Instant::now() + READY_TIMEOUT);
                 self.meeting_panel = Self::ready_panel_from_manifest(&manifest);
-                self.refresh_meetings_cache();
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.emit_meeting_panel_changed();
+                self.refresh_and_emit_meeting_state();
             }
             ControllerEvent::NotesStarted => {
                 if let HexMeetingPanelSnapshot::Ready {
@@ -2110,24 +2135,18 @@ impl EngineCore {
                         export_path: export_path.clone(),
                         summarizing: true,
                     };
-                    let panel = self.meeting_panel.clone();
-                    self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                    self.emit_meeting_panel_changed();
                 }
-                self.refresh_meetings_cache();
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.refresh_and_emit_meeting_state();
             }
             ControllerEvent::NotesFinished(manifest) => {
                 if let HexMeetingPanelSnapshot::Ready { meeting_id, .. } = &self.meeting_panel
                     && *meeting_id == manifest.id
                 {
                     self.meeting_panel = Self::ready_panel_from_manifest(&manifest);
-                    let panel = self.meeting_panel.clone();
-                    self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                    self.emit_meeting_panel_changed();
                 }
-                self.refresh_meetings_cache();
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.refresh_and_emit_meeting_state();
             }
             ControllerEvent::Failed { title, error } => {
                 tracing::error!(%title, %error, "meeting recording failed");
@@ -2135,11 +2154,8 @@ impl EngineCore {
                 self.ready_panel_deadline = None;
                 self.meeting_state = MeetingMenuState::Idle;
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                self.refresh_meetings_cache();
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.emit_meeting_panel_changed();
+                self.refresh_and_emit_meeting_state();
             }
         }
     }
@@ -2186,8 +2202,7 @@ impl EngineCore {
                 self.pending_offer = None;
                 if matches!(self.meeting_panel, HexMeetingPanelSnapshot::Offer { .. }) {
                     self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                    let panel = self.meeting_panel.clone();
-                    self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                    self.emit_meeting_panel_changed();
                 }
             } else {
                 let remaining = OFFER_TIMEOUT.saturating_sub(elapsed).as_secs() + 1;
@@ -2208,8 +2223,7 @@ impl EngineCore {
                         source_label: candidate.source.label().to_string(),
                         remaining_seconds: remaining,
                     };
-                    let panel = self.meeting_panel.clone();
-                    self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                    self.emit_meeting_panel_changed();
                 }
             }
         }
@@ -2220,8 +2234,7 @@ impl EngineCore {
             self.ready_panel_deadline = None;
             if matches!(self.meeting_panel, HexMeetingPanelSnapshot::Ready { .. }) {
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                self.emit_meeting_panel_changed();
             }
         }
 
@@ -2241,23 +2254,16 @@ impl EngineCore {
                     app_label: app_label.clone(),
                     elapsed_text: elapsed,
                 };
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                self.emit_meeting_panel_changed();
             }
             let mut transcript_changed = false;
             if let Some(active_manifest) = self.meetings_cache.first()
                 && let Ok(support_dir) = crate::app_paths::support_dir()
             {
                 let dir = support_dir.join("meetings").join(&active_manifest.id);
-                let live_len = std::fs::metadata(dir.join("transcript.live.ndjson"))
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                let final_len = std::fs::metadata(dir.join("transcript.ndjson"))
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                let combined_len = live_len.saturating_add(final_len);
-                if combined_len != self.active_meeting_transcript_len {
-                    self.active_meeting_transcript_len = combined_len;
+                let sig = meeting_transcript_signature(&dir);
+                if sig != self.active_meeting_transcript_sig {
+                    self.active_meeting_transcript_sig = sig;
                     transcript_changed = true;
                 }
             }
@@ -2471,8 +2477,7 @@ impl EngineCore {
             HexEngineCommand::AcceptMeetingOffer => {
                 let candidate = self.pending_offer.take().map(|(c, _)| c);
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                self.emit_meeting_panel_changed();
                 if let (Some(candidate), Some(commands)) = (candidate, &self.meeting_commands) {
                     let cmd = if candidate.key == "preview" {
                         ControllerCommand::Dismiss
@@ -2486,8 +2491,7 @@ impl EngineCore {
             HexEngineCommand::DismissMeetingOffer => {
                 self.pending_offer = None;
                 self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                let panel = self.meeting_panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                self.emit_meeting_panel_changed();
                 if let Some(commands) = &self.meeting_commands {
                     let _ = commands.try_send(ControllerCommand::Dismiss);
                 }
@@ -2499,8 +2503,7 @@ impl EngineCore {
                     HexMeetingPanelSnapshot::CallEnded { .. }
                 ) {
                     self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                    let panel = self.meeting_panel.clone();
-                    self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                    self.emit_meeting_panel_changed();
                 }
                 Ok(())
             }
@@ -2509,8 +2512,7 @@ impl EngineCore {
                 self.ready_panel_deadline = None;
                 if matches!(self.meeting_panel, HexMeetingPanelSnapshot::Ready { .. }) {
                     self.meeting_panel = HexMeetingPanelSnapshot::Hidden;
-                    let panel = self.meeting_panel.clone();
-                    self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
+                    self.emit_meeting_panel_changed();
                 }
                 Ok(())
             }
@@ -2546,15 +2548,11 @@ impl EngineCore {
                 } else {
                     meeting::spawn_summary(id, move |_result| {});
                 }
-                self.refresh_meetings_cache();
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.refresh_and_emit_meeting_state();
                 Ok(())
             }
             HexEngineCommand::RefreshMeetings => {
-                self.refresh_meetings_cache();
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_STATE_CHANGED, &snapshot);
+                self.refresh_and_emit_meeting_state();
                 Ok(())
             }
             HexEngineCommand::SetSoundVolume { volume } => {
@@ -2611,7 +2609,7 @@ impl EngineCore {
                 Ok(())
             }
             HexEngineCommand::SaveSettings { settings } => {
-                self.commit_settings(settings)?;
+                self.commit_settings(*settings)?;
                 let snapshot = self.bootstrap_snapshot();
                 self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
                 Ok(())
@@ -3135,16 +3133,8 @@ impl EngineCore {
             HexEngineCommand::SimulateMeetingPanel { panel } => {
                 self.pending_offer = None;
                 self.ready_panel_deadline = None;
-                self.meeting_panel = panel.clone();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_MEETING_PANEL_CHANGED, &panel);
-                Ok(())
-            }
-            HexEngineCommand::CompleteOnboarding => {
-                if self.persist_settings {
-                    onboarding::record_completion().map_err(|e| e.to_string())?;
-                }
-                let snapshot = self.bootstrap_snapshot();
-                self.enqueue_event(hex_event_tag_e::HEX_EVENT_SETTINGS_CHANGED, &snapshot);
+                self.meeting_panel = panel;
+                self.emit_meeting_panel_changed();
                 Ok(())
             }
             HexEngineCommand::RetryInstanceLock => self.try_acquire_instance_lock(),
@@ -3169,6 +3159,7 @@ impl EngineCore {
 
 pub struct hex_engine_s {
     core: Arc<Mutex<EngineCore>>,
+    transcript_reader: Mutex<meeting::TranscriptReader>,
     atomic_hud: Arc<AtomicHudTelemetry>,
     callback_sink: Arc<CallbackSink>,
     shutdown: Arc<AtomicBool>,
@@ -3204,6 +3195,11 @@ fn slice_to_str<'a>(slice: hex_slice_s) -> Result<&'a str, String> {
     std::str::from_utf8(bytes).map_err(|e| format!("invalid UTF-8 slice: {e}"))
 }
 
+/// Initializes the main-thread TIS keyboard layout snapshot and configures
+/// single-threaded ONNX Runtime sessions before workers start.
+///
+/// # Safety
+/// Must be called on the OS main thread before `hex_engine_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_keyboard_initialize_layout_on_main_thread() -> bool {
     if objc2::MainThreadMarker::new().is_none() {
@@ -3222,6 +3218,10 @@ pub unsafe extern "C" fn hex_keyboard_initialize_layout_on_main_thread() -> bool
     }
 }
 
+/// Runs the CLI entrypoint when process arguments specify a CLI command.
+///
+/// # Safety
+/// Must be called from the main process entrypoint before starting GUI workers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_cli_maybe_run_from_process_args() -> i32 {
     crate::moonshine::run_sessions_single_threaded();
@@ -3242,8 +3242,15 @@ pub unsafe extern "C" fn hex_cli_maybe_run_from_process_args() -> i32 {
     }
 }
 
+/// Allocates and starts a new `hex_engine_t` instance.
+///
+/// # Safety
+/// `runtime_cfg` must be either null or a valid pointer to an initialized
+/// `hex_runtime_config_s` whose callback pointers and `userdata` remain valid
+/// until `hex_engine_free` completes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s) -> hex_engine_t {
+    crate::moonshine::run_sessions_single_threaded();
     let Some(cfg) = (unsafe { runtime_cfg.as_ref() }).copied() else {
         return ptr::null_mut();
     };
@@ -3409,7 +3416,7 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
         meeting_panel: HexMeetingPanelSnapshot::Hidden,
         pending_offer: None,
         ready_panel_deadline: None,
-        active_meeting_transcript_len: 0,
+        active_meeting_transcript_sig: (0, 0, 0, 0),
         transcription_picker_language: None,
         transcription_preparation: TranscriptionPreparation::default(),
         transcription_deletion_error: None,
@@ -3463,6 +3470,7 @@ pub unsafe extern "C" fn hex_engine_new(runtime_cfg: *const hex_runtime_config_s
 
     Box::into_raw(Box::new(hex_engine_s {
         core,
+        transcript_reader: Mutex::new(meeting::TranscriptReader::default()),
         atomic_hud,
         callback_sink,
         shutdown,
@@ -3483,18 +3491,8 @@ fn run_coordinator_loop(
         let mut did_work = false;
         while let Ok(event) = indicator_receiver.try_recv() {
             did_work = true;
-            let is_completed = matches!(event, DictationIndicatorEvent::JobCompleted { .. });
             let mut guard = core.lock().unwrap_or_else(|e| e.into_inner());
-            let phase_changed = guard.hud.apply(event);
-            if phase_changed {
-                let telemetry = guard.hud.telemetry;
-                guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HUD_CHANGED, &telemetry);
-            }
-            if is_completed {
-                let _ = guard.refresh_activity_cache();
-                let snapshot = guard.bootstrap_snapshot();
-                guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
-            }
+            guard.apply_indicator_event(event);
         }
         while let Ok(event) = controller_events.try_recv() {
             did_work = true;
@@ -3517,19 +3515,8 @@ fn run_coordinator_loop(
         if !did_work {
             match indicator_receiver.recv_timeout(Duration::from_millis(16)) {
                 Ok(event) => {
-                    let is_completed =
-                        matches!(event, DictationIndicatorEvent::JobCompleted { .. });
                     let mut guard = core.lock().unwrap_or_else(|e| e.into_inner());
-                    let phase_changed = guard.hud.apply(event);
-                    if phase_changed {
-                        let telemetry = guard.hud.telemetry;
-                        guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HUD_CHANGED, &telemetry);
-                    }
-                    if is_completed {
-                        let _ = guard.refresh_activity_cache();
-                        let snapshot = guard.bootstrap_snapshot();
-                        guard.enqueue_event(hex_event_tag_e::HEX_EVENT_HISTORY_UPDATED, &snapshot);
-                    }
+                    guard.apply_indicator_event(event);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -3584,6 +3571,11 @@ fn handle_developer_call(
     }
 }
 
+/// Shuts down all background workers and frees `engine`.
+///
+/// # Safety
+/// `engine` must be either null or a valid pointer returned by `hex_engine_new`
+/// that has not yet been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_engine_free(engine: hex_engine_t) {
     if engine.is_null() {
@@ -3618,6 +3610,10 @@ pub unsafe extern "C" fn hex_engine_free(engine: hex_engine_t) {
     }
 }
 
+/// Drains pending engine events on the caller's thread and invokes `event_cb`.
+///
+/// # Safety
+/// `engine` must be either null or a valid live `hex_engine_t` pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_engine_tick(engine: hex_engine_t) {
     let Some(engine_ref) = (unsafe { engine.as_ref() }) else {
@@ -3652,6 +3648,10 @@ pub unsafe extern "C" fn hex_engine_tick(engine: hex_engine_t) {
     }
 }
 
+/// Reads the latest lock-free HUD telemetry snapshot.
+///
+/// # Safety
+/// `engine` must be either null or a valid live `hex_engine_t` pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_engine_read_hud_telemetry(
     engine: hex_engine_t,
@@ -3662,6 +3662,11 @@ pub unsafe extern "C" fn hex_engine_read_hud_telemetry(
     engine_ref.atomic_hud.load()
 }
 
+/// Copies the current bootstrap snapshot as an allocated UTF-8 JSON slice.
+///
+/// # Safety
+/// `engine` must be either null or a valid live `hex_engine_t` pointer. Free
+/// the returned slice with `hex_string_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_engine_copy_bootstrap_snapshot_json(
     engine: hex_engine_t,
@@ -3673,6 +3678,11 @@ pub unsafe extern "C" fn hex_engine_copy_bootstrap_snapshot_json(
     allocate_json_slice(&guard.bootstrap_snapshot())
 }
 
+/// Copies matching retained dictation history entries as an allocated UTF-8 JSON slice.
+///
+/// # Safety
+/// `engine` must be either null or a valid live `hex_engine_t` pointer, and
+/// `query_utf8` must reference `query_utf8.len` valid bytes when `ptr` is non-null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_engine_copy_history_page_json(
     engine: hex_engine_t,
@@ -3698,6 +3708,12 @@ pub unsafe extern "C" fn hex_engine_copy_history_page_json(
     allocate_json_slice(&entries)
 }
 
+/// Copies the manifest, coalesced turns, and Markdown transcript for a meeting
+/// as an allocated UTF-8 JSON slice.
+///
+/// # Safety
+/// `engine` must be either null or a valid live `hex_engine_t` pointer, and
+/// `meeting_id_utf8` must reference `meeting_id_utf8.len` valid bytes when `ptr` is non-null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_engine_copy_meeting_detail_json(
     engine: hex_engine_t,
@@ -3721,8 +3737,11 @@ pub unsafe extern "C" fn hex_engine_copy_meeting_detail_json(
                 .cloned()
         });
     let detail = manifest_opt.map(|manifest| {
-        let mut reader = meeting::TranscriptReader::default();
-        match reader.read(&meeting_id) {
+        let mut reader = engine_ref
+            .transcript_reader
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match reader.read(meeting_id) {
             Ok(entries) => {
                 let coalesced = meeting::coalesce_transcript(entries);
                 let transcript_markdown = meeting::transcript_markdown(&coalesced);
@@ -3765,6 +3784,11 @@ pub unsafe extern "C" fn hex_engine_copy_meeting_detail_json(
     allocate_json_slice(&detail)
 }
 
+/// Frees a `hex_slice_s` buffer allocated by `libhex`.
+///
+/// # Safety
+/// `str` must be either empty/null or a slice returned by a `hex_engine_copy_*`
+/// function or `out_error_json` that has not yet been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_string_free(str: hex_slice_s) {
     if str.ptr.is_null() || str.len == 0 {
@@ -3776,6 +3800,12 @@ pub unsafe extern "C" fn hex_string_free(str: hex_slice_s) {
     }
 }
 
+/// Dispatches a JSON-encoded `HexEngineCommand` to `engine`.
+///
+/// # Safety
+/// `engine` must be a valid live `hex_engine_t` pointer (or null, which fails
+/// cleanly), `action_json` must reference `action_json.len` valid bytes when
+/// non-null, and `out_error_json` must be either null or a valid writable pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hex_engine_dispatch_json(
     engine: hex_engine_t,
@@ -3956,8 +3986,13 @@ int main(void) {{
         let _ = std::fs::remove_dir_all(&probe_dir);
     }
 
+    static FFI_RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn engine_lifecycle_tick_mailbox_and_wakeup_coalescing() {
+        let _runtime_guard = FFI_RUNTIME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         struct TestHarness {
             wakeups: AtomicUsize,
             events: Mutex<Vec<(hex_event_tag_e, u64, String)>>,
@@ -4133,6 +4168,9 @@ int main(void) {{
 
     #[test]
     fn settings_and_pane_commands_roundtrip_and_enforce_invariants() {
+        let _runtime_guard = FFI_RUNTIME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cfg = hex_runtime_config_s {
             userdata: ptr::null_mut(),
             wakeup_cb: None,
@@ -4232,6 +4270,9 @@ int main(void) {{
 
     #[test]
     fn headless_ffi_dictation_capture_transcribe_and_paste_cycle() {
+        let _runtime_guard = FFI_RUNTIME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use crate::app_settings::{
             LEFT_OPTION_MASK, ModifierSide, OPTION_KEY_MASK, TextReplacement,
         };
@@ -4322,7 +4363,10 @@ int main(void) {{
             matched_phrase: "initiative".into(),
             output: "milestone".into(),
         }];
-        let save_cmd = serde_json::to_string(&HexEngineCommand::SaveSettings { settings }).unwrap();
+        let save_cmd = serde_json::to_string(&HexEngineCommand::SaveSettings {
+            settings: Box::new(settings),
+        })
+        .unwrap();
         dispatch(&save_cmd);
 
         // 3. Load synthetic speech audio from ~/Library/Caches/hex-echo-scratch/synth/part1.wav
@@ -4528,5 +4572,44 @@ int main(void) {{
         AppSettings::default().apply_runtime();
         unsafe { hex_engine_free(engine) };
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn native_startup_sets_single_threaded_moonshine_env_and_tracks_rolling_transcripts() {
+        let cfg = hex_runtime_config_s {
+            userdata: ptr::null_mut(),
+            wakeup_cb: None,
+            event_cb: None,
+            developer_features_enabled: true,
+            start_workers: false,
+            preview_dictation_hud: false,
+        };
+        let engine = unsafe { hex_engine_new(&raw const cfg) };
+        assert!(!engine.is_null());
+        assert_eq!(
+            std::env::var_os("MOONSHINE_ORT_SINGLE_THREAD").as_deref(),
+            Some(std::ffi::OsStr::new("1"))
+        );
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "hex-ffi-rolling-sig-{}-{}",
+            std::process::id(),
+            crate::events::now_ms()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let initial_sig = meeting_transcript_signature(&temp_dir);
+        assert_eq!(initial_sig, (0, 0, 0, 0));
+
+        std::fs::write(
+            temp_dir.join("transcript.rolling.ndjson"),
+            b"{\"source\":\"microphone\",\"text\":\"hello\"}\n",
+        )
+        .unwrap();
+        let rolling_sig = meeting_transcript_signature(&temp_dir);
+        assert!(rolling_sig.1 > 0);
+        assert_ne!(rolling_sig, initial_sig);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        unsafe { hex_engine_free(engine) };
     }
 }
