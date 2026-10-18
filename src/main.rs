@@ -24,6 +24,9 @@ mod context;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod dashboard;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+mod design_tokens;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod desktop_activity;
 #[cfg(target_os = "linux")]
 mod desktop_host;
