@@ -39,22 +39,22 @@ pub fn init_process_logging(shutdown: &'static AtomicBool) -> Result<PathBuf> {
     Ok(log_dir)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn opencode_workspace() -> Result<PathBuf> {
     Ok(support_dir()?.join("opencode"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn local_api_discovery_file() -> Result<PathBuf> {
     Ok(support_dir()?.join("local-api.json"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn personal_commands_status_file() -> Result<PathBuf> {
     Ok(support_dir()?.join("personal-commands.json"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn personal_commands_workspace() -> Result<PathBuf> {
     Ok(dirs::home_dir()
         .ok_or_else(|| eyre!("home directory is unavailable"))?
@@ -76,4 +76,77 @@ pub fn personal_commands_sdk() -> Result<PathBuf> {
     } else {
         Err(eyre!("personal command SDK resources were not found"))
     }
+}
+
+#[cfg(target_os = "windows")]
+pub fn personal_commands_host() -> Result<PathBuf> {
+    let package = personal_commands_workspace()?.join("node_modules/@hex/commands");
+    ["dist/bin.js", "src/bin.ts"]
+        .into_iter()
+        .map(|relative| package.join(relative))
+        .find(|host| host.is_file())
+        .ok_or_else(|| {
+            eyre!(
+                "personal command SDK is not installed; initialize the personal command workspace"
+            )
+        })
+}
+
+/// A source checkout's SDK, otherwise the SDK sources embedded in this
+/// executable, written once per content hash under Application Support.
+#[cfg(target_os = "windows")]
+pub fn personal_commands_sdk() -> Result<PathBuf> {
+    use std::fmt::Write as _;
+
+    use sha2::{Digest, Sha256};
+
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sdk/commands");
+    if source.join("src/bin.ts").is_file() {
+        return Ok(source);
+    }
+    macro_rules! sdk_files {
+        ($($path:literal),* $(,)?) => {
+            &[$(($path, include_bytes!(concat!("../sdk/commands/", $path)) as &[u8])),*]
+        };
+    }
+    const FILES: &[(&str, &[u8])] = sdk_files![
+        "package.json",
+        "src/bin.ts",
+        "src/captures.ts",
+        "src/effect.ts",
+        "src/host.ts",
+        "src/index.ts",
+        "src/model.ts",
+        "src/protocol.ts",
+        "workspace-template/AGENTS.md",
+        "workspace-template/hex.config.ts",
+        "workspace-template/package.json",
+        "workspace-template/tsconfig.json",
+        "workspace-template/.agents/skills/personal-commands/SKILL.md",
+    ];
+    let mut hasher = Sha256::new();
+    for (path, bytes) in FILES {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(bytes);
+    }
+    let mut fingerprint = String::with_capacity(16);
+    for byte in &hasher.finalize()[..8] {
+        write!(&mut fingerprint, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    let root = support_dir()?.join("commands-sdk").join(fingerprint);
+    for (relative, bytes) in FILES {
+        let destination = root.join(relative);
+        if fs::read(&destination).is_ok_and(|existing| existing == *bytes) {
+            continue;
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| eyre!("embedded SDK path has no parent"))?;
+        fs::create_dir_all(parent)?;
+        let temporary = destination.with_extension(format!("{}.partial", std::process::id()));
+        fs::write(&temporary, bytes)?;
+        crate::transcription_models::atomic_replace(&temporary, &destination)?;
+    }
+    Ok(root)
 }

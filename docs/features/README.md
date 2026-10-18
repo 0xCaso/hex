@@ -116,7 +116,7 @@ language prompting in `transcribe-cpp-sys` 0.1.3.
 Sources: [model catalog](../../src/transcription_models.rs),
 [shared picker](../../src/desktop_transcription_picker.rs), and the runtime
 options in [parakeet.rs](../../src/parakeet.rs) and
-[linux_transcriber.rs](../../src/linux_transcriber.rs). The regression
+[local_transcriber.rs](../../src/local_transcriber.rs). The regression
 `parakeet_v3_supports_portuguese_without_language_conditioning` checks that the
 Portuguese selection remains valid and available, sends no runtime language
 hint, and contrasts Whisper's `pt` hint. It does not run inference.
@@ -602,6 +602,22 @@ Linux beta                               // not macOS feature parity
 │   └── Overload (Xrun) glitch -> Logged; not a failure
 └── Paste -> Retain transcript clipboard, not restore previous contents
 ```
+
+```ts
+Windows beta                             // x64 (Vulkan GPU) and ARM64 (CPU)
+├── Install -> install-windows.ps1 -> per-architecture signed feed -> hex.exe
+├── HEX app -> Settings, tray, HUD; Enabled = shortcut works in every app
+├── Ctrl+Space -> Hold or Toggle -> Capture -> Stream (GPU) -> Paste
+├── Escape -> Cancel; a held modifier alone never ends or cancels a capture
+├── Paste -> Waits for Shift, Alt, and Win; a held Ctrl is kept and harmless
+└── Modes, Voice Action, History, Activity, transformations -> as on macOS
+```
+
+No Windows Commands, Meetings, or local transcription API. See the
+[Windows guide](../windows.md) for the parity table, streaming notes, and
+release flow; [check-windows](../../.github/workflows/check-windows.yml) builds,
+lints, and tests x64 and builds and tests ARM64 on every pull request. Physical
+smoke tests on Windows 10 and on ARM64 hardware have not been run.
 
 No Linux Commands, Voice Action, Modes processing, retained History, or meetings.
 `hex listen` instead prints Moonshine transcripts. Wayland needs explicit broad

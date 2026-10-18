@@ -15,7 +15,7 @@ use crate::feedback::{self, Tone};
 use crate::linux_desktop::LinuxIndicator;
 use crate::linux_input::{HotkeyEvent, HotkeyStatus, LinuxHotkeyMonitor};
 use crate::linux_paste::LinuxPaster;
-use crate::linux_transcriber::LinuxTranscriber;
+use crate::local_transcriber::LocalTranscriber;
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -45,11 +45,11 @@ pub fn run(
     device: Option<&str>,
     shutdown: &AtomicBool,
     settings: crate::linux_settings::LinuxSettings,
-    transcriber: Option<LinuxTranscriber>,
+    transcriber: Option<LocalTranscriber>,
     hotkey_status: HotkeyStatus,
 ) -> Result<()> {
     let transcriber =
-        transcriber.map_or_else(|| LinuxTranscriber::load(&settings.transcription), Ok)?;
+        transcriber.map_or_else(|| LocalTranscriber::load(&settings.transcription), Ok)?;
     // Drop audio/hotkeys and close the job queue before joining slow output on
     // every exit, including failures during startup or recording.
     let mut output = OutputWorker {
@@ -64,6 +64,7 @@ pub fn run(
     let hotkey = LinuxHotkeyMonitor::start(
         settings.dictation_hotkey,
         settings.double_tap_lock,
+        settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle,
         hotkey_status,
     )?;
     let wayland_modifiers = hotkey.wayland_modifiers();

@@ -13,6 +13,7 @@ use crate::transcription_models::{TranscriptionModelId, TranscriptionSelection};
 static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
+static SHORTCUT_TOGGLE: AtomicBool = AtomicBool::new(false);
 static INCREMENTAL_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
 static MEETINGS_ENABLED: AtomicBool = AtomicBool::new(false);
 static MEETING_NOTES_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -579,6 +580,7 @@ pub struct AppSettings {
     pub recording_audio_behavior: RecordingAudioBehavior,
     pub double_tap_lock: bool,
     pub double_tap_only: bool,
+    pub shortcut_mode: crate::dictation::ShortcutMode,
     /// Transcribe completed speech at pauses during hotkey captures.
     pub incremental_transcription: bool,
     pub dictation_hotkey: HotkeyBinding,
@@ -618,6 +620,7 @@ impl Default for AppSettings {
             recording_audio_behavior: RecordingAudioBehavior::DoNothing,
             double_tap_lock: true,
             double_tap_only: false,
+            shortcut_mode: crate::dictation::ShortcutMode::Hold,
             incremental_transcription: true,
             dictation_hotkey: HotkeyBinding::default(),
             edit_hotkey: HotkeyBinding::edit_default(),
@@ -835,6 +838,10 @@ impl AppSettings {
             self.double_tap_lock && self.double_tap_only && self.dictation_hotkey.key.is_some(),
             Ordering::Relaxed,
         );
+        SHORTCUT_TOGGLE.store(
+            self.shortcut_mode == crate::dictation::ShortcutMode::Toggle,
+            Ordering::Relaxed,
+        );
         INCREMENTAL_TRANSCRIPTION.store(self.incremental_transcription, Ordering::Relaxed);
         MEETINGS_ENABLED.store(self.meetings.available(), Ordering::Release);
         MEETING_NOTES_ENABLED.store(
@@ -1042,6 +1049,10 @@ pub fn double_tap_lock() -> bool {
 
 pub fn double_tap_only() -> bool {
     DOUBLE_TAP_ONLY.load(Ordering::Relaxed)
+}
+
+pub fn shortcut_toggle() -> bool {
+    SHORTCUT_TOGGLE.load(Ordering::Relaxed)
 }
 
 pub fn incremental_transcription() -> bool {
@@ -1624,6 +1635,22 @@ mod tests {
 
         assert_eq!(runtime.modifiers, binding.modifiers);
         assert_eq!(runtime.key_code, Some(49));
+    }
+
+    #[test]
+    fn shortcut_mode_defaults_to_hold_and_round_trips() {
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.shortcut_mode, crate::dictation::ShortcutMode::Hold);
+        let settings = AppSettings {
+            shortcut_mode: crate::dictation::ShortcutMode::Toggle,
+            ..Default::default()
+        };
+        let decoded: AppSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            decoded.shortcut_mode,
+            crate::dictation::ShortcutMode::Toggle
+        );
     }
 
     #[test]

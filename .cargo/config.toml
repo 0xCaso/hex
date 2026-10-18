@@ -1,0 +1,14 @@
+# Windows builds link the C and C++ runtimes statically, so hex.exe starts on
+# a clean PC without the Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# transcribe-cpp's CMake build defaults to the DLL runtime (/MD) even when Rust
+# links statically, so pin its MSVC runtime to match. transcribe-cpp-sys reads
+# CMAKE_ARGS beside TRANSCRIBE_CMAKE_ARGS, which stays free for per-build flags
+# such as -DGGML_NATIVE=OFF. Compilers other than MSVC ignore this define.
+[env]
+CMAKE_ARGS = "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"

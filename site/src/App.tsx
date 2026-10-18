@@ -1,4 +1,5 @@
 import * as m from "motion/react-m"
+import type { ReactNode } from "react"
 import ChatteringTeeth from "./ChatteringTeeth"
 
 const MAC_VERSION = "2.2.0"
@@ -7,6 +8,7 @@ const DOWNLOAD_URL =
 const GITHUB_DOWNLOAD_URL =
   `https://github.com/anomalyco/hex/releases/download/app-v${MAC_VERSION}/HEX-${MAC_VERSION}-arm64.dmg`
 const LINUX_INSTALL_URL = "https://github.com/anomalyco/hex/blob/main/docs/linux.md"
+const WINDOWS_INSTALL_URL = "https://github.com/anomalyco/hex/blob/main/docs/windows.md#install"
 
 function HexMark() {
   return (
@@ -34,8 +36,65 @@ function LinuxMark() {
   )
 }
 
+function WindowsMark() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="download__apple">
+      <path d="M4 5.6 10.5 4.7v6.6H4zM11.4 4.6 20 3.4v7.9h-8.6zM4 12.2h6.5v6.6L4 17.9zM11.4 12.2H20v7.9l-8.6-1.2z" />
+    </svg>
+  )
+}
+
+type Platform = "mac" | "linux" | "windows"
+
+interface Download {
+  href: string
+  label: string
+  mark: ReactNode
+  arrow: string
+  shortcut: string
+  requirements: string
+  alternative?: string
+}
+
+const DOWNLOADS: Record<Platform, Download> = {
+  mac: {
+    href: DOWNLOAD_URL,
+    label: "Download for Mac",
+    mark: <AppleMark />,
+    arrow: "\u2193",
+    shortcut: "Option",
+    requirements: `Version ${MAC_VERSION}  \u00b7  Apple silicon  \u00b7  macOS 15+`,
+    alternative: GITHUB_DOWNLOAD_URL,
+  },
+  linux: {
+    href: LINUX_INSTALL_URL,
+    label: "Install on Linux",
+    mark: <LinuxMark />,
+    arrow: "\u2197",
+    shortcut: "Alt-Space",
+    requirements: "x86_64 Arch Linux beta",
+  },
+  windows: {
+    href: WINDOWS_INSTALL_URL,
+    label: "Install on Windows",
+    mark: <WindowsMark />,
+    arrow: "\u2197",
+    shortcut: "Ctrl-Space",
+    requirements: "Windows 10 and 11 beta  \u00b7  x64 and ARM64",
+  },
+}
+
+function detectPlatform(): Platform {
+  const agent = navigator.userAgent
+  if (/\bWindows NT\b/i.test(agent)) return "windows"
+  if (/\bLinux\b/i.test(agent) && !/\bAndroid\b/i.test(agent)) return "linux"
+  return "mac"
+}
+
 export default function App() {
-  const isLinux = /\bLinux\b/i.test(navigator.userAgent) && !/\bAndroid\b/i.test(navigator.userAgent)
+  const platform = detectPlatform()
+  const download = DOWNLOADS[platform]
+  const name = { mac: "Mac", linux: "Linux", windows: "Windows" }[platform]
 
   return (
     <m.main
@@ -58,40 +117,27 @@ export default function App() {
             <ChatteringTeeth />
           </div>
           <p>
-            Local voice dictation for {isLinux ? "Linux." : "Mac."} Hold {isLinux ? "Alt-Space" : "Option"},
-            say what you mean, and HEX pastes it where you are.
+            Local voice dictation for {name}. Hold {download.shortcut}, say what you mean, and HEX
+            pastes it where you are.
           </p>
         </div>
 
         <div className="hero__action">
-          {isLinux ? (
-            <m.a
-              className="download"
-              href={LINUX_INSTALL_URL}
-              whileHover={{ y: -1 }}
-              whileTap={{ scale: 0.985 }}
-            >
-              <LinuxMark />
-              <span>Install on Linux</span>
-              <span className="download__arrow" aria-hidden="true">&#8599;</span>
-            </m.a>
-          ) : (
-            <m.a
-              className="download"
-              href={DOWNLOAD_URL}
-              whileHover={{ y: -1 }}
-              whileTap={{ scale: 0.985 }}
-            >
-              <AppleMark />
-              <span>Download for Mac</span>
-              <span className="download__arrow" aria-hidden="true">&#8595;</span>
-            </m.a>
-          )}
-          <p className="requirements">
-            {isLinux ? "x86_64 Arch Linux beta" : `Version ${MAC_VERSION}  ·  Apple silicon  ·  macOS 15+`}
-          </p>
-          {!isLinux && (
-            <a className="download-alternative" href={GITHUB_DOWNLOAD_URL}>
+          <m.a
+            className="download"
+            href={download.href}
+            whileHover={{ y: -1 }}
+            whileTap={{ scale: 0.985 }}
+          >
+            {download.mark}
+            <span>{download.label}</span>
+            <span className="download__arrow" aria-hidden="true">
+              {download.arrow}
+            </span>
+          </m.a>
+          <p className="requirements">{download.requirements}</p>
+          {download.alternative && (
+            <a className="download-alternative" href={download.alternative}>
               Alternative download: GitHub
             </a>
           )}

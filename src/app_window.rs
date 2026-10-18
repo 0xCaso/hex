@@ -954,6 +954,7 @@ pub struct AppWindow {
     commands_toggle: ToggleSpring,
     command_model_status: CommandModelStatus,
     release_microphone_toggle: ToggleSpring,
+    shortcut_mode_toggle: ToggleSpring,
     pending_microphone_policy: Option<MicrophonePolicyChange>,
     double_tap_toggle: ToggleSpring,
     double_tap_only_visibility: ToggleSpring,
@@ -1425,6 +1426,9 @@ impl AppWindow {
                 crate::recognition::command_model_status()
             },
             release_microphone_toggle: ToggleSpring::new(settings.release_microphone_while_idle),
+            shortcut_mode_toggle: ToggleSpring::new(
+                settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle,
+            ),
             pending_microphone_policy: preview
                 .as_ref()
                 .filter(|preview| preview.confirm_release_microphone)
@@ -3603,8 +3607,11 @@ impl AppWindow {
             }));
         let double_tap_position = self.double_tap_toggle.render_position(window);
         let release_microphone_position = self.release_microphone_toggle.render_position(window);
+        let toggle_mode = self.settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
         self.double_tap_only_visibility.set_enabled(
-            self.settings.double_tap_lock && self.settings.dictation_hotkey.key.is_some(),
+            !toggle_mode
+                && self.settings.double_tap_lock
+                && self.settings.dictation_hotkey.key.is_some(),
         );
         let double_tap_only_visibility = self
             .double_tap_only_visibility
@@ -3690,6 +3697,25 @@ impl AppWindow {
                         }))
                 },
             ));
+        let shortcut_mode_position = self.shortcut_mode_toggle.render_position(window);
+        let shortcut_mode = sliding_segmented_control(shortcut_mode_position, &[72.0; 2])
+            .id("shortcut-mode")
+            .children(
+                [
+                    ("Hold", crate::dictation::ShortcutMode::Hold),
+                    ("Toggle", crate::dictation::ShortcutMode::Toggle),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (label, mode))| {
+                    sliding_segmented_item(72.0, self.settings.shortcut_mode == mode)
+                        .id(("shortcut-mode", index))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_shortcut_mode(mode, cx);
+                        }))
+                }),
+            );
         let microphone_mode = sliding_segmented_control(release_microphone_position, &[114.0; 2])
             .id("microphone-mode")
             .children(
@@ -3817,10 +3843,19 @@ impl AppWindow {
                                 ))
                             },
                         )
+                        .child(settings_row(
+                            "Shortcut mode",
+                            if toggle_mode {
+                                "Press to start dictating, press again to transcribe"
+                            } else {
+                                "Hold to dictate, release to transcribe"
+                            },
+                            shortcut_mode,
+                        ))
                         .child(
                             settings_row(
                                 "Dictation shortcut",
-                                "Hold to dictate, release to transcribe",
+                                "Click to record a new shortcut",
                                 hotkey_control,
                             )
                             .border_b_0()
@@ -3848,18 +3883,20 @@ impl AppWindow {
                             microphone_mode,
                         ))
                         .children(microphone_confirmation)
-                        .child(
-                            settings_row(
-                                "Double-tap to lock",
-                                "Double-tap the shortcut for hands-free dictation",
-                                toggle(double_tap_position),
+                        .when(!toggle_mode, |panel| {
+                            panel.child(
+                                settings_row(
+                                    "Double-tap to lock",
+                                    "Double-tap the shortcut for hands-free dictation",
+                                    toggle(double_tap_position),
+                                )
+                                .id("double-tap-setting")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let enabled = !this.settings.double_tap_lock;
+                                    this.set_double_tap_lock(enabled, cx);
+                                })),
                             )
-                            .id("double-tap-setting")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let enabled = !this.settings.double_tap_lock;
-                                this.set_double_tap_lock(enabled, cx);
-                            })),
-                        )
+                        })
                         .child(
                             div()
                                 .h(px(SETTINGS_ROW_MIN_HEIGHT * double_tap_only_visibility))
@@ -4471,6 +4508,15 @@ impl AppWindow {
             }
         }) {
             self.double_tap_toggle.set_enabled(enabled);
+        }
+    }
+
+    fn set_shortcut_mode(&mut self, mode: crate::dictation::ShortcutMode, cx: &mut Context<Self>) {
+        if self.settings.shortcut_mode != mode
+            && self.update_settings(cx, |settings| settings.shortcut_mode = mode)
+        {
+            self.shortcut_mode_toggle
+                .set_enabled(mode == crate::dictation::ShortcutMode::Toggle);
         }
     }
 

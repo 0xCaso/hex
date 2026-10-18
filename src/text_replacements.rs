@@ -2,7 +2,16 @@ use std::sync::OnceLock;
 
 use regex::{Regex, RegexBuilder};
 
-use crate::app_settings::TextReplacement;
+#[cfg(target_os = "macos")]
+pub use crate::app_settings::TextReplacement;
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(default)]
+pub struct TextReplacement {
+    pub matched_phrase: String,
+    pub output: String,
+}
 
 #[derive(Clone)]
 struct CompiledRule {

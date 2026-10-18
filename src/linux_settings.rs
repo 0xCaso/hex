@@ -18,6 +18,7 @@ pub struct LinuxSettings {
     pub schema_version: u32,
     pub dictation_hotkey: LinuxHotkey,
     pub double_tap_lock: bool,
+    pub shortcut_mode: crate::dictation::ShortcutMode,
     #[serde(default = "legacy_paste_with_shift")]
     pub paste_with_shift: bool,
     pub sound_effect_volume: f32,
@@ -40,6 +41,7 @@ impl Default for LinuxSettings {
             schema_version: 1,
             dictation_hotkey: LinuxHotkey::default(),
             double_tap_lock: true,
+            shortcut_mode: crate::dictation::ShortcutMode::Hold,
             paste_with_shift: false,
             sound_effect_volume: 0.5,
             transcription: crate::transcription_models::TranscriptionSelection::default(),
@@ -213,6 +215,17 @@ mod tests {
         assert_eq!(
             settings.transcription,
             crate::transcription_models::TranscriptionSelection::default()
+        );
+    }
+
+    #[test]
+    fn shortcut_mode_defaults_to_hold_and_round_trips() {
+        let legacy: LinuxSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.shortcut_mode, crate::dictation::ShortcutMode::Hold);
+        let toggled: LinuxSettings = serde_json::from_str(r#"{"shortcut_mode":"toggle"}"#).unwrap();
+        assert_eq!(
+            toggled.shortcut_mode,
+            crate::dictation::ShortcutMode::Toggle
         );
     }
 

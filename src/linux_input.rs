@@ -81,14 +81,22 @@ impl LinuxHotkeyMonitor {
     pub fn start(
         binding: LinuxHotkey,
         double_tap_enabled: bool,
+        toggle: bool,
         status: HotkeyStatus,
     ) -> Result<Self> {
-        Self::start_for(binding, double_tap_enabled, LinuxSession::detect(), status)
+        Self::start_for(
+            binding,
+            double_tap_enabled,
+            toggle,
+            LinuxSession::detect(),
+            status,
+        )
     }
 
     fn start_for(
         binding: LinuxHotkey,
         double_tap_enabled: bool,
+        toggle: bool,
         session: LinuxSession,
         status: HotkeyStatus,
     ) -> Result<Self> {
@@ -109,6 +117,7 @@ impl LinuxHotkeyMonitor {
                     ready_sender.clone(),
                     binding,
                     double_tap_enabled,
+                    toggle,
                     worker_started.clone(),
                     status,
                 ),
@@ -118,6 +127,7 @@ impl LinuxHotkeyMonitor {
                     ready_sender.clone(),
                     binding,
                     double_tap_enabled,
+                    toggle,
                     worker_started.clone(),
                     worker_modifiers.expect("Wayland modifier state exists"),
                 ),
@@ -165,6 +175,7 @@ fn run(
     ready: SyncSender<Result<()>>,
     binding: LinuxHotkey,
     double_tap_enabled: bool,
+    toggle: bool,
     started: Arc<AtomicBool>,
     status: HotkeyStatus,
 ) -> Result<()> {
@@ -230,9 +241,11 @@ fn run(
                     }
                 } else if !active && !dirty {
                     active = true;
-                    second_tap = last_release
-                        .take()
-                        .is_some_and(|released: Instant| released.elapsed() < DOUBLE_TAP_WINDOW);
+                    // Toggle mode treats every press as the second tap of a double-tap.
+                    second_tap = toggle
+                        || last_release.take().is_some_and(|released: Instant| {
+                            released.elapsed() < DOUBLE_TAP_WINDOW
+                        });
                     escape_grabbed = grab_escape(&connection, root, escape, &escape_modifiers)?;
                     if status.update_escape_availability(!escape_grabbed.is_empty()) {
                         tracing::warn!("{ESCAPE_CANCEL_WARNING}; continuing without Escape-cancel");
@@ -606,6 +619,7 @@ mod tests {
         let monitor = LinuxHotkeyMonitor::start_for(
             LinuxHotkey::default(),
             true,
+            false,
             LinuxSession::X11,
             Default::default(),
         )
@@ -622,6 +636,7 @@ mod tests {
         let monitor = LinuxHotkeyMonitor::start_for(
             LinuxHotkey::default(),
             true,
+            false,
             LinuxSession::X11,
             Default::default(),
         )
@@ -651,9 +666,14 @@ mod tests {
             key: "f24".into(),
             ..LinuxHotkey::default()
         };
-        let monitor =
-            LinuxHotkeyMonitor::start_for(binding, false, LinuxSession::X11, Default::default())
-                .unwrap();
+        let monitor = LinuxHotkeyMonitor::start_for(
+            binding,
+            false,
+            false,
+            LinuxSession::X11,
+            Default::default(),
+        )
+        .unwrap();
         let trigger = harness.keymap.keycode(keysym("f24").unwrap()).unwrap();
         harness.send_key(KEY_PRESS, trigger);
         harness.send_key(KEY_RELEASE, trigger);
@@ -677,6 +697,7 @@ mod tests {
         let status = HotkeyStatus::default();
         let monitor = LinuxHotkeyMonitor::start_for(
             LinuxHotkey::default(),
+            false,
             false,
             LinuxSession::X11,
             status.clone(),
@@ -726,6 +747,7 @@ mod tests {
         let monitor = LinuxHotkeyMonitor::start_for(
             LinuxHotkey::default(),
             true,
+            false,
             LinuxSession::X11,
             status.clone(),
         )

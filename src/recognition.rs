@@ -328,6 +328,9 @@ pub fn listen(
     hotkeys
         .dictation
         .set_double_tap_only(crate::app_settings::double_tap_only());
+    hotkeys
+        .dictation
+        .set_toggle(crate::app_settings::shortcut_toggle());
     let mut edit_context = None;
     let mut edit_pending_since = None;
     let mut mode = Mode::Listening;
@@ -766,6 +769,9 @@ pub fn listen(
         hotkeys
             .dictation
             .set_double_tap_only(crate::app_settings::double_tap_only());
+        hotkeys
+            .dictation
+            .set_toggle(crate::app_settings::shortcut_toggle());
         hotkeys
             .dictation
             .set_binding(crate::app_settings::dictation_hotkey());

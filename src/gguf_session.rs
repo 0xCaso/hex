@@ -82,6 +82,34 @@ impl OfflineGgufSession {
         })
     }
 
+    pub(crate) fn device_type(&self) -> transcribe_cpp::Result<transcribe_cpp::DeviceType> {
+        Ok(self.model.device()?.device_type)
+    }
+
+    /// Runs `drive` against one live stream on this session, then rotates the
+    /// session like [`Self::run`] so the stream's buffered audio and scratch
+    /// are released. `cancel` stays installed only for the stream's lifetime.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn with_stream<R>(
+        &mut self,
+        options: &transcribe_cpp::RunOptions,
+        stream_options: &transcribe_cpp::StreamOptions,
+        cancel: &transcribe_cpp::CancelToken,
+        drive: impl FnOnce(&mut transcribe_cpp::Stream<'_>) -> R,
+    ) -> transcribe_cpp::Result<R> {
+        let mut session = match self.session.take() {
+            Some(session) => session,
+            None => self.model.session_with(&self.options)?,
+        };
+        session.set_cancel_token(cancel);
+        let result = session
+            .stream(options, stream_options)
+            .map(|mut stream| drive(&mut stream));
+        drop(session);
+        self.session = Some(self.model.session_with(&self.options)?);
+        result
+    }
+
     pub(crate) fn run(
         &mut self,
         samples: &[f32],

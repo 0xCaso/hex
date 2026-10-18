@@ -10,6 +10,8 @@ pub(crate) struct DesktopSnapshot {
     pub(crate) activity: DesktopActivity,
     pub(crate) dictation_shortcut: Vec<String>,
     pub(crate) double_tap_lock: bool,
+    #[serde(default)]
+    pub(crate) shortcut_mode: crate::dictation::ShortcutMode,
     pub(crate) listener: DesktopListenerSnapshot,
     pub(crate) operation_error: Option<String>,
     pub(crate) transcription: DesktopTranscriptionSnapshot,
@@ -58,6 +60,7 @@ pub(crate) enum DesktopAction {
     RestartIntoUpdate,
     SetDictationShortcut(DesktopShortcut),
     SetDoubleTapLock(bool),
+    SetShortcutMode(crate::dictation::ShortcutMode),
     StartListening,
     StopListening,
 }
