@@ -239,6 +239,9 @@ enum Command {
         /// For `meetings`: ask to delete the selected meeting.
         #[arg(long)]
         confirm_meeting_delete: bool,
+        /// For `meetings`: open the selected meeting's overflow menu.
+        #[arg(long)]
+        open_meeting_actions: bool,
         /// For `meetings`: show the pane before any meeting was recorded.
         #[arg(long)]
         meetings_empty: bool,
@@ -512,6 +515,7 @@ fn main() -> Result<()> {
             screen_recording_missing,
             meeting_recording,
             confirm_meeting_delete,
+            open_meeting_actions,
             meetings_empty,
             meeting_panel,
         } => {
@@ -582,6 +586,7 @@ fn main() -> Result<()> {
                     screen_recording_missing,
                     meeting_recording,
                     confirm_meeting_delete,
+                    open_meeting_actions,
                     meetings_empty,
                 }),
             )

@@ -30,14 +30,16 @@ use crate::desktop_transcription_picker::{
     transcription_selection_is_active,
 };
 use crate::desktop_ui::{
-    ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, detail_placeholder, detail_row,
-    disclosure_button, disclosure_frame, empty_state, error_message, error_panel, hotkey_keycaps,
-    icon, icon_button, inline_error, list_row, list_row_meta, list_row_title, listener_status,
-    menu, menu_item, mix_color, navigation_item, pane_body, pane_content, pane_detail, pane_header,
-    pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header, section_label,
-    segmented_control, segmented_item, settings_copy, settings_panel, settings_row,
-    settings_section_label, sidebar_frame, sliding_segmented_control, sliding_segmented_item,
-    small_button, status_dot, tag, toggle, truncated_line, window_frame,
+    ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, danger_menu_item, detail_body,
+    detail_header, detail_placeholder, detail_row, detail_title, disabled_menu_item,
+    disclosure_button, disclosure_frame, dropdown_menu, empty_state, error_message, error_panel,
+    hotkey_keycaps, icon, icon_button, inline_error, list_row, list_row_meta, list_row_title,
+    list_section_label, listener_status, menu, menu_item, menu_separator, mix_color,
+    navigation_item, pane_body, pane_content, pane_detail, pane_header, pane_header_with_action,
+    pane_list, pane_scroll_body, panel, panel_header, section_label, segmented_control,
+    segmented_item, settings_copy, settings_panel, settings_row, settings_section_label,
+    sidebar_frame, sliding_segmented_control, sliding_segmented_item, small_button, status_dot,
+    tag, toggle, truncated_line, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender, HudTuning};
@@ -82,7 +84,8 @@ fn sidebar_update_button(
     preview: bool,
 ) -> Option<gpui::Stateful<Div>> {
     (status == crate::sparkle::UpdateStatus::UpdateAvailable).then(|| {
-        button(ButtonKind::Primary, "Update")
+        button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+            .child("Update")
             .id("check-for-updates-sidebar")
             .on_click(move |_, window, cx| {
                 if !preview {
@@ -104,11 +107,9 @@ fn microphone_picker_menu(
     dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
     let choose = Rc::new(choose);
-    menu()
+    dropdown_menu()
         .id("microphone-picker")
         .debug_selector(|| "microphone-picker".into())
-        .absolute()
-        .top(px(CONTROL_HEIGHT + 4.0))
         .right_0()
         .w(px(DISCLOSURE_WIDTH))
         .max_h(px(240.0))
@@ -390,6 +391,7 @@ pub struct AppWindowPreview {
     pub screen_recording_missing: bool,
     pub meeting_recording: bool,
     pub confirm_meeting_delete: bool,
+    pub open_meeting_actions: bool,
     pub meetings_empty: bool,
 }
 
@@ -562,6 +564,7 @@ struct TranscriptLine {
 struct MeetingPreview {
     recording: bool,
     confirm_delete: bool,
+    open_actions: bool,
     empty: bool,
 }
 
@@ -1023,6 +1026,8 @@ pub struct AppWindow {
     meeting_search_text: HashMap<String, String>,
     meeting_rename: Option<(String, ProcessingInput)>,
     meeting_delete_armed: Option<String>,
+    /// The detail's overflow menu of less common meeting actions is open.
+    meeting_actions_open: bool,
     meeting_action_error: Option<String>,
     meeting_copied: Option<(String, &'static str)>,
     /// Deterministic transcripts for the Meetings preview.
@@ -1137,6 +1142,7 @@ impl AppWindow {
             .map(|preview| MeetingPreview {
                 recording: preview.meeting_recording,
                 confirm_delete: preview.confirm_meeting_delete,
+                open_actions: preview.open_meeting_actions,
                 empty: preview.meetings_empty,
             });
         let preview_choices = crate::transcription_models::choices_for_runtime;
@@ -1576,6 +1582,7 @@ impl AppWindow {
             meeting_search_text: HashMap::new(),
             meeting_rename: None,
             meeting_delete_armed: None,
+            meeting_actions_open: false,
             meeting_action_error: None,
             meeting_copied: None,
             meeting_preview_transcripts: None,
@@ -2342,6 +2349,7 @@ impl AppWindow {
         if self.selected_meeting.as_deref() != Some(id.as_str()) {
             self.meeting_rename = None;
             self.meeting_delete_armed = None;
+            self.meeting_actions_open = false;
             self.meeting_action_error = None;
             self.meeting_copied = None;
         }
@@ -2473,6 +2481,7 @@ impl AppWindow {
             if preview.confirm_delete {
                 self.meeting_delete_armed = Some(id);
             }
+            self.meeting_actions_open = preview.open_actions;
         }
     }
 
@@ -2611,12 +2620,10 @@ impl AppWindow {
             self.history_retention_open,
             |control| {
                 control.child(deferred(
-                    menu()
+                    dropdown_menu()
                         .id("history-retention-menu")
-                        .absolute()
-                        .top(px(CONTROL_HEIGHT + 4.0))
                         .right_0()
-                        .w(px(160.0))
+                        .w(px(MENU_WIDTH))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.history_retention_open = false;
                             cx.notify();
@@ -2742,84 +2749,60 @@ impl AppWindow {
         if entry.total_ms > 0 {
             latency.push_str(&format!(" · {} ms total", entry.total_ms));
         }
+        let section = |label: &'static str, first: bool| {
+            div()
+                .when(!first, |section| {
+                    section.mt_5().pt_5().border_t_1().border_color(rgb(LINE))
+                })
+                .child(section_label(label))
+        };
         div()
-            .id("history-detail")
             .flex_1()
             .min_w(px(0.0))
             .h_full()
-            .overflow_y_scroll()
-            .px_6()
-            .py_6()
+            .flex()
+            .flex_col()
+            .child(detail_header(
+                detail_title(entry.kind.label()),
+                vec![event_age(entry.timestamp_ms).into_any_element()],
+                vec![
+                    action_button(if copied { "Copied" } else { "Copy" }, "copy")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.copy_history_entry(id, cx)),
+                        )
+                        .into_any_element(),
+                    action_button("Delete", "delete")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.delete_history_entry(id, cx)),
+                        )
+                        .into_any_element(),
+                ],
+            ))
             .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
+                detail_body("history-detail")
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(div().text_headline().child(entry.kind.label()))
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(rgb(TEXT_TERTIARY))
-                                    .child(event_age(entry.timestamp_ms)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pt_4()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                action_button(if copied { "Copied" } else { "Copy" }, "copy")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.copy_history_entry(id, cx)
-                                    })),
-                            )
-                            .child(action_button("Delete", "delete").on_click(cx.listener(
-                                move |this, _, _, cx| this.delete_history_entry(id, cx),
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .mt_5()
-                            .pt_5()
-                            .border_t_1()
-                            .border_color(rgb(LINE))
-                            .child(section_label("Final text"))
-                            .child(
-                                div()
-                                    .pt_2()
-                                    .text_body()
-                                    .text_color(rgb(TEXT_PRIMARY))
-                                    .child(entry.final_text.clone()),
-                            ),
+                        section("Final text", true).child(
+                            div()
+                                .pt_2()
+                                .text_body()
+                                .text_color(rgb(TEXT_PRIMARY))
+                                .child(entry.final_text.clone()),
+                        ),
                     )
                     .when(show_raw, |detail| {
                         detail.child(
-                            div()
-                                .mt_5()
-                                .pt_5()
-                                .border_t_1()
-                                .border_color(rgb(LINE))
-                                .child(section_label("Raw transcript"))
-                                .child(
-                                    div()
-                                        .pt_2()
-                                        .text_body()
-                                        .text_color(rgb(TEXT_TERTIARY))
-                                        .child(entry.raw_text.clone()),
-                                ),
+                            section("Raw transcript", false).child(
+                                div()
+                                    .pt_2()
+                                    .text_body()
+                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .child(entry.raw_text.clone()),
+                            ),
                         )
                     })
                     .child(
                         div()
                             .mt_5()
-                            .pt_5()
                             .border_t_1()
                             .border_color(rgb(LINE))
                             .when_some(entry.application.clone(), |detail, application| {
@@ -3074,7 +3057,7 @@ impl AppWindow {
         side_animation.set_enabled(side.is_some());
         let side_position = side_animation.render_position(window).clamp(0.0, 1.0);
         let selected = side.unwrap_or(ModifierSide::Either);
-        let side_widths = [34.0, 44.0, 34.0];
+        let side_widths = [40.0, 50.0, 40.0];
         let side_selection_spring =
             &mut self.hotkey_side_selection_springs[hotkey_kind_index(kind)];
         side_selection_spring.set_target(hotkey_side_index(selected) as f32);
@@ -3867,7 +3850,7 @@ impl AppWindow {
                                         if self.settings.release_microphone_while_idle {
                                             "Opens only while holding the shortcut. Disables pre-roll and commands."
                                         } else {
-                                            "Keeps the microphone open for instant start and pre-roll."
+                                            "Keeps the microphone open for instant start and pre-roll"
                                         },
                                         microphone_mode,
                                     ))
@@ -4183,7 +4166,7 @@ impl AppWindow {
                 if self.settings.commands_enabled {
                     "Hear commands and dictation."
                 } else {
-                    "Record dictation while you hold the shortcut."
+                    "Record dictation while you hold the shortcut"
                 },
                 microphone,
             ));
@@ -4198,7 +4181,7 @@ impl AppWindow {
                 .into_any_element();
             permission_items.push((
                 "Input Monitoring",
-                "Recognize the dictation shortcut anywhere.",
+                "Recognize the dictation shortcut anywhere",
                 input_monitoring,
             ));
         }
@@ -4215,7 +4198,7 @@ impl AppWindow {
                 if self.settings.commands_enabled {
                     "Paste text and run keyboard commands."
                 } else {
-                    "Paste completed dictation into the foreground app."
+                    "Paste completed dictation into the foreground app"
                 },
                 accessibility,
             ));
@@ -4288,7 +4271,7 @@ impl AppWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(section_label("Permissions needed").px_1())
+                                .child(section_label("Permissions needed").px_4())
                                 .child(settings_panel().children(permission_rows)),
                         )
                     })
@@ -4297,7 +4280,7 @@ impl AppWindow {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(section_label("Local models").px_1())
+                            .child(section_label("Local models").px_4())
                             .child(
                                 settings_panel().child(
                                     settings_row(
@@ -4406,9 +4389,9 @@ impl AppWindow {
                         settings_row(
                             "Shortcut",
                             if enabled {
-                                "Hold to speak; selected text is included automatically."
+                                "Hold to speak; selected text is included automatically"
                             } else {
-                                "Saved for when Voice Action is enabled."
+                                "Saved for when Voice Action is enabled"
                             },
                             hotkey,
                         )
@@ -4532,7 +4515,7 @@ impl AppWindow {
         let entity = cx.new(|cx| {
             TextInput::multiline(
                 cx,
-                "Names and terms Whisper should expect, e.g. OpenCode, Effect...",
+                "Names and terms Whisper should expect, e.g. OpenCode, Effect…",
                 initial,
             )
         });
@@ -4661,7 +4644,7 @@ impl AppWindow {
                 cx,
             ),
             prompt: Self::multiline_processing_input(
-                "Describe how OpenCode should rewrite your dictation...",
+                "Describe how OpenCode should rewrite your dictation…",
                 &processing.prompt,
                 cx,
             ),
@@ -4869,11 +4852,10 @@ impl AppWindow {
                 .absolute()
                 .left(position.x)
                 .top(position.y)
-                .w(px(148.0))
+                .w(px(MENU_WIDTH))
                 .child(
-                    menu_item(false)
+                    danger_menu_item()
                         .id("context-delete-mode")
-                        .text_color(rgb(DANGER))
                         .child("Delete mode…")
                         .on_mouse_down(
                             MouseButton::Left,
@@ -5122,7 +5104,7 @@ impl AppWindow {
                     .flex_col()
                     .gap(px(SECTION_GAP))
                     .child(basics)
-                    .child(section_label("Text processing").pt_2().px_1())
+                    .child(section_label("Text processing").pt_2().px_4())
                     .child(corrections)
                     .child(processing)
                     .child(transformations)
@@ -5402,7 +5384,7 @@ impl AppWindow {
                         )
                 });
         let picker_status = match &self.application_catalog {
-            ApplicationCatalogState::Loading => Some("Finding applications on this Mac...".into()),
+            ApplicationCatalogState::Loading => Some("Finding applications on this Mac…".into()),
             ApplicationCatalogState::Loaded(applications) if applications.is_empty() => {
                 Some("No applications found.".into())
             }
@@ -5683,7 +5665,7 @@ impl AppWindow {
         let presentation = model_presentation(&self.model_catalog, selected_model);
         let (catalog_status, default_label, matches, variants) = match &self.model_catalog {
             ModelCatalogState::Loading => {
-                ("Loading OpenCode...".into(), None, Vec::new(), Vec::new())
+                ("Loading OpenCode…".into(), None, Vec::new(), Vec::new())
             }
             ModelCatalogState::Missing => (
                 "OpenCode beta required".into(),
@@ -6168,11 +6150,20 @@ impl AppWindow {
     }
 
     fn render_meetings(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let action = match meeting::active(&self.meetings).map(|meeting| meeting.status) {
+        let active_meeting = meeting::active(&self.meetings);
+        let action = match active_meeting.map(|meeting| meeting.status) {
             _ if self.meeting_stop_pending => busy_label("Finalizing…").into_any_element(),
             Some(MeetingStatus::Transcribing) => busy_label("Finalizing…").into_any_element(),
             Some(MeetingStatus::Starting) => busy_label("Starting…").into_any_element(),
-            Some(MeetingStatus::Recording) => button(ButtonKind::Primary, "Stop & transcribe")
+            // Recording is a state, not the screen's main action: a neutral
+            // button in the same red-dot language as the Recording tag.
+            Some(MeetingStatus::Recording) => button(ButtonKind::Secondary, status_dot(DANGER))
+                .child("Stop & transcribe")
+                .children(active_meeting.map(|meeting| {
+                    div()
+                        .text_color(rgb(TEXT_TERTIARY))
+                        .child(meeting::format_duration(meeting_duration(meeting)))
+                }))
                 .id("stop-meeting")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.meeting_stop_pending = true;
@@ -6218,13 +6209,7 @@ impl AppWindow {
         for (index, meeting) in visible.iter().enumerate() {
             let day = meeting::day_label(meeting.created_at_ms, now);
             if current_day.as_ref() != Some(&day) {
-                rows.push(
-                    section_label(day.clone())
-                        .pt(px(if rows.is_empty() { SPACE_1 } else { SPACE_3 }))
-                        .pb_1()
-                        .px_3()
-                        .into_any_element(),
-                );
+                rows.push(list_section_label(day.clone(), rows.is_empty()).into_any_element());
                 current_day = Some(day);
             }
             let id = meeting.id.clone();
@@ -6337,20 +6322,28 @@ impl AppWindow {
         };
         let action =
             |key: &'static str, label: &'static str| action_of(ButtonKind::Secondary, key, label);
+        let menu_action = |key: &'static str, item: Div| {
+            item.id(SharedString::from(format!("meeting-action-{key}")))
+        };
 
+        // Copy transcript and Rename stay visible; the rest live in the
+        // overflow menu, with Delete last.
         let mut actions: Vec<AnyElement> = Vec::new();
+        let mut menu_items: Vec<AnyElement> = Vec::new();
         if let Some(notes) = meeting.notes.clone() {
             let id = id.clone();
-            actions.push(
-                action(
+            menu_items.push(
+                menu_action(
                     "copy-notes",
-                    if copied("notes") {
+                    menu_item(false).child(if copied("notes") {
                         "Copied"
                     } else {
                         "Copy summary"
-                    },
+                    }),
                 )
+                // Stays open so "Copied" confirms the copy.
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
                     this.copy_meeting_text(id.clone(), "notes", meeting::notes_markdown(&notes), cx)
                 }))
                 .into_any_element(),
@@ -6379,23 +6372,33 @@ impl AppWindow {
                 .into_any_element(),
             );
         }
+        if !active && self.meeting_rename.is_none() {
+            let (id, title) = (id.clone(), title.clone());
+            actions.push(
+                action("rename", "Rename")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_meeting_rename(id.clone(), title.clone(), window, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
         if !active {
             let export_path = meeting.export_path.clone().filter(|path| path.exists());
             let reveal_id = id.clone();
-            actions.push(
-                action(
+            menu_items.push(
+                menu_action(
                     "reveal",
-                    if export_path.is_some() {
+                    menu_item(false).child(if export_path.is_some() {
                         "Reveal Markdown"
                     } else {
                         "Reveal files"
-                    },
-                )
-                .on_click(
-                    cx.listener(move |_, _, _, _| {
-                        reveal_meeting(&reveal_id, export_path.as_deref())
                     }),
                 )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.meeting_actions_open = false;
+                    reveal_meeting(&reveal_id, export_path.as_deref());
+                    cx.notify();
+                }))
                 .into_any_element(),
             );
         }
@@ -6404,19 +6407,24 @@ impl AppWindow {
             && self.apple_intelligence_availability().is_available()
         {
             if notes_running {
-                actions.push(busy_label("Summarizing…").into_any_element());
+                menu_items.push(
+                    disabled_menu_item()
+                        .child("Summarizing…")
+                        .into_any_element(),
+                );
             } else {
                 let id = id.clone();
-                actions.push(
-                    action(
+                menu_items.push(
+                    menu_action(
                         "notes",
-                        if meeting.notes.is_some() {
+                        menu_item(false).child(if meeting.notes.is_some() {
                             "Regenerate summary"
                         } else {
                             "Summarize"
-                        },
+                        }),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.meeting_actions_open = false;
                         if let Err(error) = this
                             .meeting_requests
                             .try_send(MeetingRequest::Summarize(id.clone()))
@@ -6429,37 +6437,63 @@ impl AppWindow {
                 );
             }
         }
-        if !active && self.meeting_rename.is_none() {
-            let (id, title) = (id.clone(), title.clone());
-            actions.push(
-                action("rename", "Rename")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_meeting_rename(id.clone(), title.clone(), window, cx)
+        let armed = self.meeting_delete_armed.as_deref() == Some(id.as_str());
+        if !active && !notes_running && !armed {
+            let delete_id = id.clone();
+            if !menu_items.is_empty() {
+                menu_items.push(menu_separator().into_any_element());
+            }
+            menu_items.push(
+                menu_action("delete", danger_menu_item().child("Delete…"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.meeting_actions_open = false;
+                        this.trash_meeting(delete_id.clone(), cx)
                     }))
                     .into_any_element(),
             );
         }
-        if !active && !notes_running {
-            let armed = self.meeting_delete_armed.as_deref() == Some(id.as_str());
+        if !menu_items.is_empty() {
+            let trigger = icon_button(ButtonKind::Secondary, Icon::Ellipsis)
+                .id("meeting-action-more")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.meeting_actions_open = true;
+                    cx.notify();
+                }));
+            actions.push(
+                div()
+                    .relative()
+                    .child(trigger)
+                    .when(self.meeting_actions_open, |more| {
+                        more.child(deferred(
+                            dropdown_menu()
+                                .id("meeting-actions-menu")
+                                .debug_selector(|| "meeting-actions-menu".into())
+                                .left_0()
+                                .w(px(MENU_WIDTH))
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.meeting_actions_open = false;
+                                    cx.notify();
+                                }))
+                                .children(menu_items),
+                        ))
+                    })
+                    .into_any_element(),
+            );
+        }
+        if !active && !notes_running && armed {
             let delete_id = id.clone();
             actions.push(
                 action_of(
-                    if armed {
-                        ButtonKind::Danger
-                    } else {
-                        ButtonKind::Secondary
-                    },
+                    ButtonKind::Danger,
                     "delete",
-                    match (
-                        armed,
-                        meeting
-                            .export_path
-                            .as_ref()
-                            .is_some_and(|path| path.exists()),
-                    ) {
-                        (false, _) => "Delete",
-                        (true, true) => "Trash recording & Markdown",
-                        (true, false) => "Trash recording",
+                    if meeting
+                        .export_path
+                        .as_ref()
+                        .is_some_and(|path| path.exists())
+                    {
+                        "Trash recording & Markdown"
+                    } else {
+                        "Trash recording"
                     },
                 )
                 .on_click(
@@ -6467,16 +6501,14 @@ impl AppWindow {
                 )
                 .into_any_element(),
             );
-            if armed {
-                actions.push(
-                    action("cancel-delete", "Cancel")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.meeting_delete_armed = None;
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                );
-            }
+            actions.push(
+                action("cancel-delete", "Cancel")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.meeting_delete_armed = None;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
         }
 
         let title_row: AnyElement = match &self.meeting_rename {
@@ -6496,7 +6528,7 @@ impl AppWindow {
                     })),
                 )
                 .into_any_element(),
-            _ => div().text_headline().child(title).into_any_element(),
+            _ => detail_title(title).into_any_element(),
         };
 
         let mut meta = vec![
@@ -6542,15 +6574,15 @@ impl AppWindow {
             MeetingTranscript::Empty => empty_state("No transcript selected."),
             MeetingTranscript::Loaded(lines) if lines.is_empty() => {
                 empty_state(match meeting.status {
-                    MeetingStatus::Starting => "Preparing local audio capture...",
+                    MeetingStatus::Starting => "Preparing local audio capture…",
                     MeetingStatus::Recording if meeting.live_transcription_error.is_some() => {
                         "Live transcription is unavailable. Audio is still recording safely."
                     }
                     MeetingStatus::Recording if self.meeting_stop_pending => {
-                        "Building the final transcript..."
+                        "Building the final transcript…"
                     }
-                    MeetingStatus::Recording => "Listening for speech...",
-                    MeetingStatus::Transcribing => "Building the final transcript...",
+                    MeetingStatus::Recording => "Listening for speech…",
+                    MeetingStatus::Transcribing => "Building the final transcript…",
                     MeetingStatus::Complete => "No speech was transcribed.",
                     MeetingStatus::Interrupted | MeetingStatus::Failed => {
                         "No recoverable transcript is available."
@@ -6605,56 +6637,20 @@ impl AppWindow {
             .overflow_hidden()
             .flex()
             .flex_col()
+            .child(detail_header(
+                title_row,
+                meeting_status_chip(meeting.status, self.meeting_stop_pending, true)
+                    .map(IntoElement::into_any_element)
+                    .into_iter()
+                    .chain([truncated_line(FOOTNOTE, meta.join(" · "))
+                        .flex_1()
+                        .into_any_element()])
+                    .collect(),
+                actions,
+            ))
             .child(
-                div()
-                    .px_6()
-                    .pt_5()
-                    .pb_4()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(rgb(LINE))
-                    .child(title_row)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_color(rgb(TEXT_TERTIARY))
-                            .when_some(
-                                meeting_status_chip(
-                                    meeting.status,
-                                    self.meeting_stop_pending,
-                                    true,
-                                ),
-                                |row, chip| row.child(chip),
-                            )
-                            .child(truncated_line(FOOTNOTE, meta.join(" · ")).flex_1()),
-                    )
-                    .when(!actions.is_empty(), |header| {
-                        header.child(
-                            div()
-                                .debug_selector(|| "meeting-actions".into())
-                                .pt_2()
-                                .flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .children(actions),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .id("meeting-transcript")
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
+                detail_body("meeting-transcript")
                     .track_scroll(&self.meeting_transcript_scroll)
-                    .px_6()
-                    .pt_5()
-                    .pb_6()
                     .children(errors.into_iter().map(|error| {
                         div()
                             .mb_4()
@@ -6843,13 +6839,7 @@ impl AppWindow {
             });
         let mut groups: Vec<AnyElement> = Vec::new();
         for task in tasks {
-            groups.push(
-                section_label(task.clone())
-                    .px_3()
-                    .pt_3()
-                    .pb_1()
-                    .into_any_element(),
-            );
+            groups.push(list_section_label(task.clone(), groups.is_empty()).into_any_element());
             groups.extend(
                 visible
                     .iter()
@@ -6923,22 +6913,14 @@ impl AppWindow {
                                             )
                                             .flex_1()
                                             .min_h(px(0.0)),
-                                        )
-                                        .child(
-                                            truncated_line(
-                                                CAPTION,
-                                                format!("Current context: {context_label}"),
-                                            )
-                                            .px_1()
-                                            .text_color(rgb(TEXT_TERTIARY)),
                                         ),
                                 )
                                 .child(
-                                    pane_detail(
-                                        self.render_command_detail(effective_selected.as_deref()),
-                                    )
-                                    .id("command-detail")
-                                    .overflow_y_scroll(),
+                                    pane_detail(self.render_command_detail(
+                                        effective_selected.as_deref(),
+                                        &context_label,
+                                    ))
+                                    .id("command-detail"),
                                 ),
                         ),
                 ),
@@ -6946,7 +6928,7 @@ impl AppWindow {
             .into_any_element()
     }
 
-    fn render_command_detail(&self, selected: Option<&str>) -> AnyElement {
+    fn render_command_detail(&self, selected: Option<&str>, context_label: &str) -> AnyElement {
         let Some(command) =
             selected.and_then(|id| self.commands.iter().find(|command| command.id == id))
         else {
@@ -6958,21 +6940,21 @@ impl AppWindow {
             command.aliases.join("\n")
         };
         div()
-            .p_6()
-            .child(div().text_headline().child(command.phrase.clone()))
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(detail_header(
+                detail_title(command.phrase.clone()),
+                vec![command.description.clone().into_any_element()],
+                Vec::new(),
+            ))
             .child(
-                div()
+                detail_body("command-detail-body")
                     .pt_1()
-                    .text_body()
-                    .text_color(rgb(TEXT_TERTIARY))
-                    .child(command.description.clone()),
-            )
-            .child(
-                div()
-                    .pt_4()
                     .child(detail_row("Task", command.task.clone()))
                     .child(detail_row("Context", command_scope(&command.scope)))
-                    .child(detail_row("Aliases", aliases)),
+                    .child(detail_row("Aliases", aliases))
+                    .child(detail_row("Current context", context_label.to_string())),
             )
             .into_any_element()
     }
@@ -7763,7 +7745,7 @@ fn preview_history() -> Option<History> {
 
 fn voice_action_description(enabled: bool) -> &'static str {
     if enabled {
-        "Use the shortcut below with OpenCode to run spoken instructions."
+        "Use the shortcut below with OpenCode to run spoken instructions"
     } else {
         "Off by default. Its saved shortcut is not reserved until you enable Voice Action."
     }
@@ -8537,6 +8519,7 @@ fn timestamped_list_row(
         .child(
             div()
                 .flex_none()
+                .pt(px(baseline_offset(BODY, CAPTION)))
                 .text_caption()
                 .text_color(rgb(if selected {
                     TEXT_SECONDARY
@@ -8652,8 +8635,9 @@ fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement {
                 .when(mine, |turn| turn.items_end())
                 .when(!mine, |turn| turn.items_start())
                 .child(
+                    // Inset to the bubble's text, not its rounded edge.
                     div()
-                        .px_1()
+                        .px_3()
                         .flex()
                         .gap_2()
                         .text_caption()
@@ -9030,6 +9014,7 @@ mod tests {
                 screen_recording_missing: false,
                 meeting_recording: false,
                 confirm_meeting_delete: false,
+                open_meeting_actions: false,
                 meetings_empty: false,
             }),
             window,
@@ -9065,6 +9050,7 @@ mod tests {
                 screen_recording_missing: false,
                 meeting_recording: false,
                 confirm_meeting_delete: false,
+                open_meeting_actions: false,
                 meetings_empty: false,
             }),
             window,
@@ -9082,7 +9068,7 @@ mod tests {
             let detail = cx.debug_bounds("meeting-detail").expect("detail rendered");
             let them = cx.debug_bounds("meeting-bubble-0").expect("first turn");
             let you = cx.debug_bounds("meeting-bubble-1").expect("second turn");
-            let actions = cx.debug_bounds("meeting-actions").expect("actions");
+            let actions = cx.debug_bounds("detail-actions").expect("actions");
             for bounds in [them, you, actions] {
                 assert!(
                     bounds.left() >= detail.left() && bounds.right() <= detail.right(),
@@ -9096,6 +9082,26 @@ mod tests {
                 "{width}: You is right-aligned"
             );
         }
+    }
+
+    #[gpui::test]
+    fn meeting_overflow_menu_opens_beside_the_visible_actions(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(meetings_fixture);
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| view.meeting_actions_open = true);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let actions = cx.debug_bounds("detail-actions").expect("actions");
+        let menu = cx.debug_bounds("meeting-actions-menu").expect("menu");
+        assert!(menu.top() >= actions.bottom() - px(CONTROL_HEIGHT));
+        assert_eq!(menu.size.width, px(MENU_WIDTH));
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.select_meeting("preview-design".into());
+                assert!(!view.meeting_actions_open, "a new selection closes the menu");
+            })
+        });
     }
 
     #[gpui::test]
