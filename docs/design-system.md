@@ -33,7 +33,13 @@ outside the system: its glossy capsule is hand-tuned in HUD Lab.
 5. **One icon set.** Use `Icon` / `NavigationIcon`: line-weight SF Symbols at
    medium weight on macOS, never `.fill` variants. Never draw an icon with text
    glyphs or letters.
-6. **Verify by looking.** Capture every pane you touched with
+6. **One accent per screen.** The accent fill (`ButtonKind::Primary`) marks at
+   most one action per screen: the thing the person came to do (see
+   [Colour](#colour)). Everything else is neutral.
+7. **Few visible actions.** A detail header shows its one to three most common
+   actions; the rest go in an `Icon::Ellipsis` overflow menu, with the
+   destructive choice last after a separator.
+8. **Verify by looking.** Capture every pane you touched with
    `scripts/capture-preview.sh` (see [Verification](#verification)).
 
 ## Tokens
@@ -83,6 +89,21 @@ DANGER   #f17471  DANGER_SURFACE  #2b1718  DANGER_BORDER  #66292c
 `ACCENT` is the only primary-action fill, the toggle "on" colour, and the
 focus ring.
 
+### Colour
+
+Saturated colour is spent on meaning, never decoration:
+
+- **Accent fill:** at most one Primary button per screen, for the main action
+  (Meetings "Start recording", setup "Choose model", a dialog's confirm). A
+  meeting capsule is its own screen: "Record", "Stop & transcribe" after the
+  call ends, "Reveal" when ready. Never in persistent chrome like the sidebar.
+- **States are not actions:** an ongoing state uses a Secondary button with a
+  `status_dot` in the state's colour, matching its `tag`. "Stop & transcribe"
+  while recording is Secondary with a red dot and the elapsed time; the
+  sidebar's "Update" is Secondary with an accent dot.
+- **Danger** marks destructive choices and armed confirmations only; **success**
+  marks ready and live states only.
+
 ### Type scale
 
 The window frame sets `BODY`, so text with no step inherits 13 px.
@@ -110,6 +131,10 @@ Use GPUI spacing utilities on the 4 px grid: `_1` 4, `_2` 8, `_3` 12, `_4` 16,
 `_5` 20, `_6` 24, `_8` 32. `PANE_GUTTER` (32) is the one horizontal inset for
 pane headers and bodies, so cards line up with the header rule.
 
+Smaller text beside a larger line (a timestamp beside a row title, a
+`detail_row` label beside its value) shares its baseline: inset it from the top
+by `baseline_offset(LARGER, SMALLER)`, never `items_center`.
+
 ```ts
 RADIUS_KNOB 2 · RADIUS_SMALL 4 · RADIUS_CONTROL 6 · RADIUS_PANEL 10 · RADIUS_MODAL 12
 icon_radius(size)            // app icons and mode icons: 22% of the size
@@ -118,6 +143,7 @@ rounded_full                 // dots, avatars, meeting capsules and their button
 CONTROL_HEIGHT 30            // buttons, inputs, disclosures, segmented controls
 CONTROL_HEIGHT_SMALL 24      // small buttons, keycaps
 TAG_HEIGHT 18 · MENU_ITEM_HEIGHT 28 · NAV_ITEM_HEIGHT 32
+MENU_WIDTH 180 · MENU_OFFSET 4  // menu width; gap below its trigger
 PANEL_HEADER_HEIGHT 38 · SETTINGS_ROW_MIN_HEIGHT 56 · PANE_HEADER_HEIGHT 70
 SIDEBAR_WIDTH 220 · PANE_CONTENT_WIDTH 940
 PANE_LIST_WIDTH 320 · PANE_LIST_WIDTH_COMPACT 220 (Modes)
@@ -135,10 +161,12 @@ ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
 | Fixed pane body / scrolling pane body | `pane_body` + `pane_content`, `pane_scroll_body(id, pane_content())` |
 | List + detail | `pane_list(id, empty, error_title, error, rows)` beside `pane_detail(content)` |
 | Row in a list | `list_row(selected)` with `list_row_title`, `list_row_meta` |
+| Group heading in a list | `list_section_label(label, first)` |
+| Top of a detail card | `detail_header(detail_title(…), meta, actions)` over `detail_body(id)` |
 | Any text that must fit one line | `truncated_line(STEP, text)` (ends in "…") |
 | Card | `panel()`; titled card: `panel_header(title, action)` |
 | Settings | `settings_section_label` → `settings_panel` → `settings_row(title, description, control)` |
-| Label above a group | `section_label` (caption, semibold, tertiary) |
+| Label above a group | `section_label` (caption, semibold, tertiary); above a card, inset `px_4` to the card's row text |
 | Label / value in a detail card | `detail_row` |
 | Main action of a view (at most one) | `button(ButtonKind::Primary, …)` |
 | Any other action | `button(ButtonKind::Secondary, …)` |
@@ -147,15 +175,21 @@ ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
 | Icon-only action | `icon_button(ButtonKind::Ghost, Icon)` in cards and rows; `Secondary` when it stands alone |
 | Work in progress where a button was | `busy_label` |
 | Dropdown trigger | `disclosure_button(label)`; custom content: `disclosure_frame()` + `Icon::ChevronDown` |
-| Popover / menu and its choices | `menu()`, `menu_item(selected)` |
+| Popover / menu and its choices | `menu()`, `menu_item(selected)`; under a control: `dropdown_menu()` at `MENU_WIDTH` |
+| Destructive / unavailable menu choice | `danger_menu_item()` after `menu_separator()`; `disabled_menu_item()` |
+| Overflow of less common actions | `icon_button(ButtonKind::Secondary, Icon::Ellipsis)` opening a `dropdown_menu()` |
 | On/off | `toggle(position)`; never repeat "On"/"Off" beside it |
 | A few exclusive choices | `segmented_control` + `segmented_item`, or the sliding variants |
 | Status (never clickable) | `tag(Tone::{Neutral, Accent, Success, Danger}, label)` |
 | Live / recorded state | `status_dot(colour)` |
 | Shortcut | `hotkey_keycaps` |
 | Text entry | `TextInput` ([`text_input.rs`](../src/text_input.rs)): `BODY`, `CONTROL_HEIGHT`, `RADIUS_CONTROL` |
-| Nothing to show | `empty_state`; centred in a detail card: `detail_placeholder` |
+| Nothing to show | `empty_state`; centred in a card: `detail_placeholder` (`pane_list` centres its own) |
 | Errors | `error_panel` (card), `error_message` (inside a card), `inline_error` (under a control) |
+
+A destructive menu choice ends in "…" ("Delete…") and keeps its two-step
+confirmation: choosing it closes the menu and puts the armed Danger button and
+Cancel in the action row.
 
 Buttons are always filled or bordered. Only icon buttons and menu items are
 borderless. Tags never have a border or hover state, so they can't be mistaken
@@ -174,6 +208,9 @@ Meeting capsules are pill-shaped. They use the shared buttons with
   variables are identifiers, not copy.
 - Use "…" (one character) for ellipses, for both progress ("Saving…") and for
   buttons that open a further choice ("Choose from Finder…").
+- Settings and permission row descriptions are one phrase with no closing
+  period ("Hold to dictate, release to transcribe"). Two sentences keep their
+  periods.
 - Keep one direct line per control. Don't add intro paragraphs above cards,
   repeat field labels per row, put state words next to toggles, or warn "cannot
   be undone" beside a two-step confirmation.
@@ -183,8 +220,8 @@ Meeting capsules are pill-shaped. They use the shared buttons with
 
 ## Icons
 
-- Use `Icon` (`ArrowRight`, `ChevronDown`, `Close`, `DragHandle`, `Globe`,
-  `Plus`) via `icon(Icon, colour)` at `ICON_SIZE_SMALL`, or `sized_icon` for a
+- Use `Icon` (`ArrowRight`, `ChevronDown`, `Close`, `DragHandle`, `Ellipsis`,
+  `Globe`, `Plus`) via `icon(Icon, colour)` at `ICON_SIZE_SMALL`, or `sized_icon` for a
   different size. Use `NavigationIcon` for the sidebar.
 - On macOS these are line-weight SF Symbols (no `.fill` variants) at medium
   weight, monochrome. On Linux they fall back to Heroicons (navigation) and
@@ -207,8 +244,9 @@ HEX_PREVIEW_SKIP_BUILD=1 ./scripts/capture-preview.sh /tmp/hex-modes.png modes
 
 Capture every pane and state you touched. The preview targets and flags are
 listed in [AGENTS.md](../AGENTS.md#development). Check at least these:
-alignment with the header rule, no clipped text without "…", one primary button
-per view, and sentence case.
+alignment with the header rule, section labels on their card's text edge,
+shared baselines, no clipped text without "…", at most one accent button per
+screen, and sentence case.
 
 ## Audit: before → after
 

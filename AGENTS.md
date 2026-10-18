@@ -403,7 +403,9 @@ CoreAudio formats, AppleScript details, or event serialization.
   `design_tokens` values and `desktop_ui` components: no raw colours, type
   sizes, line heights, or radii (`desktop_sources_use_tokens_instead_of_raw_styles`
   enforces this). Use sentence case and the product name "Hex" in all copy.
-  Extend a token or component instead of adding a parallel helper, and verify
+  Reserve the accent (Primary) fill for at most one main action per screen;
+  states such as recording or an available update use a Secondary button with
+  a status dot. Extend a token or component instead of adding a parallel helper, and verify
   visual changes with `scripts/capture-preview.sh`.
 - Public app updates are Developer ID signed, notarized, stapled, EdDSA signed,
   published artifact-first/feed-last, and installed through Sparkle.
@@ -510,7 +512,8 @@ preview. Targets include `settings`, `modes`, `voice-action`, `commands`,
 Pass `--meetings-enabled` and `--screen-recording-missing` to Settings for the
 Meetings section. The `meetings` preview has sample meetings with notes and a
 transcript; add `--meeting-recording` for the live state,
-`--confirm-meeting-delete` for the delete confirmation, or `--meetings-empty`. The Modes preview includes representative activation,
+`--confirm-meeting-delete` for the delete confirmation, `--open-meeting-actions`
+for the overflow menu, or `--meetings-empty`. The Modes preview includes representative activation,
 correction, model-variant, and transformation data so it exercises the complete
 editor. Pass `--collapse-mode-processing` to expose the lower transformation
 and deletion states without scrolling. Use `--open-transformation-picker`,
