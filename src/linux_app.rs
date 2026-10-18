@@ -24,7 +24,7 @@ use crate::desktop_transcription_picker::{
 };
 use crate::desktop_ui::{
     ButtonKind, NavigationIcon, button, disclosure_button, hotkey_keycaps, navigation_item,
-    pane_content, pane_header, pane_scroll_body, segmented_control, segmented_item, settings_panel,
+    pane_content, pane_header, pane_scroll_body, panel, segmented_control, segmented_item,
     settings_row, settings_section_label, sidebar_frame, status_dot, toggle, window_frame,
 };
 use crate::events::EventReader;
@@ -1156,7 +1156,7 @@ impl LinuxApp {
                             pane_content()
                                 .relative()
                                 .child(settings_section_label("Listener"))
-                                .child(settings_panel().child(settings_row(
+                                .child(panel().child(settings_row(
                                     "Dictation",
                                     "Global hotkey dictation",
                                     div().flex().items_center().gap_3()
@@ -1177,7 +1177,7 @@ impl LinuxApp {
                                 )))
                                 .when_some(snapshot.listener.warning.clone(), |content, warning| {
                                     content.child(
-                                        div().id("linux-listener-warning").mt_3().p_3().rounded(RADIUS_PANEL).border_1().border_color(rgb(LINE)).bg(rgb(SURFACE))
+                                        panel().id("linux-listener-warning").mt_3().p_3()
                                             .child(div().text_footnote().child(warning))
                                             .child(div().mt_2().text_footnote().text_color(rgb(TEXT_TERTIARY))
                                                 .child("Dictation still works. Release the hold shortcut or press the locked shortcut to finish. Free Escape in the other application; Hex retries on the next capture.")),
@@ -1207,7 +1207,7 @@ impl LinuxApp {
                                 })
                                 .child(settings_section_label("Dictation"))
                                 .child(
-                                    settings_panel()
+                                    panel()
                                         .child(settings_row(
                                             "Local transcription",
                                             "Language and on-device speech model",
@@ -1259,7 +1259,7 @@ impl LinuxApp {
                                 )
                                 .child(settings_section_label("Behavior"))
                                 .child(
-                                    settings_panel().child(
+                                    panel().child(
                                         settings_row(
                                             "Double-tap to lock",
                                             "Double-tap the shortcut for hands-free dictation",
@@ -1301,7 +1301,7 @@ impl LinuxApp {
                                 )
                                 .child(settings_section_label("Application"))
                                 .child(
-                                    settings_panel()
+                                    panel()
                                         .child(settings_row(
                                             "Hex",
                                             "Private local dictation for Linux",

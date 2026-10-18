@@ -165,7 +165,7 @@ ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
 | Top of a detail card | `detail_header(detail_title(…), meta, actions)` over `detail_body(id)` |
 | Any text that must fit one line | `truncated_line(STEP, text)` (ends in "…") |
 | Card | `panel()`; titled card: `panel_header(title, action)` |
-| Settings | `settings_section_label` → `settings_panel` → `settings_row(title, description, control)` |
+| Settings | `settings_section_label` → `panel` → `settings_row(title, description, control)` |
 | Label above a group | `section_label` (caption, semibold, tertiary); above a card, inset `px_4` to the card's row text |
 | Label / value in a detail card | `detail_row` |
 | Main action of a view (at most one) | `button(ButtonKind::Primary, …)` |
@@ -221,9 +221,9 @@ Meeting capsules are pill-shaped. They use the shared buttons with
 ## Icons
 
 - Use `Icon` (`ArrowRight`, `ChevronDown`, `Close`, `DragHandle`, `Ellipsis`,
-  `Globe`, `Plus`) via `icon(Icon, colour)` at `ICON_SIZE_SMALL`, or `sized_icon` for a
-  different size. `Ellipsis` draws at `ICON_SIZE` so its dots match the other
-  glyphs optically. Use `NavigationIcon` for the sidebar.
+  `Globe`, `Plus`) via `icon(Icon, colour)` at `ICON_SIZE_SMALL`. `Ellipsis`
+  draws at `ICON_SIZE` so its dots match the other glyphs optically. Use
+  `NavigationIcon` for the sidebar.
 - On macOS these are line-weight SF Symbols (no `.fill` variants) at medium
   weight, monochrome. On Linux they fall back to Heroicons (navigation) and
   matching glyphs (inline).

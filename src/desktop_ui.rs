@@ -141,12 +141,9 @@ impl Icon {
 }
 
 /// An inline icon at [`ICON_SIZE_SMALL`] (optically matched) in `color`.
-pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
-    sized_icon(icon, icon.optical_size(), color)
-}
-
 #[cfg(target_os = "macos")]
-pub(crate) fn sized_icon(icon: Icon, size: f32, color: u32) -> AnyElement {
+pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
+    let size = icon.optical_size();
     div()
         .size(px(size))
         .flex_none()
@@ -163,8 +160,10 @@ pub(crate) fn sized_icon(icon: Icon, size: f32, color: u32) -> AnyElement {
         .into_any_element()
 }
 
+/// An inline icon at [`ICON_SIZE_SMALL`] (optically matched) in `color`.
 #[cfg(target_os = "linux")]
-pub(crate) fn sized_icon(icon: Icon, size: f32, color: u32) -> AnyElement {
+pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
+    let size = icon.optical_size();
     div()
         .size(px(size))
         .flex_none()
@@ -377,7 +376,8 @@ pub(crate) fn pane_detail(content: impl IntoElement) -> Div {
 pub(crate) fn list_section_label(label: impl IntoElement, first: bool) -> Div {
     section_label(label)
         .px_3()
-        .pt(px(if first { SPACE_1 } else { SPACE_3 }))
+        .when(first, |label| label.pt_1())
+        .when(!first, |label| label.pt_3())
         .pb_1()
 }
 
@@ -458,6 +458,7 @@ fn fit_line(text: SharedString, width: Pixels, window: &mut Window, cx: &mut App
 pub(crate) fn panel() -> Div {
     div()
         .w_full()
+        .relative()
         .rounded(RADIUS_PANEL)
         .border_1()
         .border_color(rgb(LINE))
@@ -608,10 +609,6 @@ pub(crate) fn settings_row(
         .child(control)
 }
 
-pub(crate) fn settings_panel() -> Div {
-    panel().relative()
-}
-
 /// A label and value inside a detail card.
 pub(crate) fn detail_row(label: &'static str, value: impl Into<String>) -> AnyElement {
     div()
@@ -719,9 +716,6 @@ pub(crate) fn hotkey_keycaps(parts: Vec<String>, opacity: f32) -> AnyElement {
         }))
         .into_any_element()
 }
-
-/// The minimum width of one keycap in [`hotkey_keycaps`].
-pub(crate) const KEYCAP_WIDTH: f32 = 34.0;
 
 fn split_sided_keycap(part: &str) -> (Option<&'static str>, String) {
     match part {
@@ -1266,11 +1260,19 @@ mod layout_tests {
         }
     }
 
-    fn line_width(cx: &mut TestAppContext, build: fn() -> AnyElement) -> f32 {
+    fn measured_width(
+        cx: &mut TestAppContext,
+        selector: &'static str,
+        build: fn() -> AnyElement,
+    ) -> f32 {
         let (_, cx) = cx.add_window_view(move |_, _| Probe(build));
         cx.simulate_resize(size(px(1000.0), px(400.0)));
         cx.run_until_parked();
-        f32::from(cx.debug_bounds("line").unwrap().size.width)
+        f32::from(cx.debug_bounds(selector).unwrap().size.width)
+    }
+
+    fn line_width(cx: &mut TestAppContext, build: fn() -> AnyElement) -> f32 {
+        measured_width(cx, "line", build)
     }
 
     fn line(step: TypeStep, text: &'static str) -> Div {
@@ -1309,16 +1311,9 @@ mod layout_tests {
         assert!(width > 180.0 && width < PANE_LIST_WIDTH, "{width}");
     }
 
-    fn value_width(cx: &mut TestAppContext, build: fn() -> AnyElement) -> f32 {
-        let (_, cx) = cx.add_window_view(move |_, _| Probe(build));
-        cx.simulate_resize(size(px(1000.0), px(400.0)));
-        cx.run_until_parked();
-        f32::from(cx.debug_bounds("detail-row-value").unwrap().size.width)
-    }
-
     #[gpui::test]
     fn detail_rows_fill_a_detail_body(cx: &mut TestAppContext) {
-        let width = value_width(cx, || {
+        let width = measured_width(cx, "detail-row-value", || {
             div()
                 .w(px(600.0))
                 .h(px(300.0))

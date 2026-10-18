@@ -37,9 +37,9 @@ use crate::desktop_ui::{
     list_section_label, listener_status, menu, menu_item, menu_separator, mix_color,
     navigation_item, pane_body, pane_content, pane_detail, pane_header, pane_header_with_action,
     pane_list, pane_scroll_body, panel, panel_header, section_label, segmented_control,
-    segmented_item, settings_copy, settings_panel, settings_row, settings_section_label,
-    sidebar_frame, sliding_segmented_control, sliding_segmented_item, small_button, status_dot,
-    tag, toggle, truncated_line, window_frame,
+    segmented_item, settings_copy, settings_row, settings_section_label, sidebar_frame,
+    sliding_segmented_control, sliding_segmented_item, small_button, status_dot, tag, toggle,
+    truncated_line, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender, HudTuning};
@@ -132,23 +132,10 @@ fn microphone_picker_menu(
                     choose(&device, window, cx);
                 })
         }))
-        .when_some(error, |picker, error| {
-            picker.child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_caption()
-                    .text_color(rgb(DANGER))
-                    .child(error),
-            )
-        })
+        .when_some(error, |picker, error| picker.child(inline_error(error)))
 }
 
-fn settings_pane(content: Div) -> AnyElement {
-    settings_pane_titled("Settings", "settings-scroll", content)
-}
-
-fn settings_pane_titled(title: &'static str, scroll_id: &'static str, content: Div) -> AnyElement {
+fn settings_pane(title: &'static str, scroll_id: &'static str, content: Div) -> AnyElement {
     div()
         .size_full()
         .flex()
@@ -3477,26 +3464,22 @@ impl AppWindow {
         Some(
             div()
                 .child(settings_section_label("Permissions needed"))
-                .child(
-                    settings_panel().children(warnings.into_iter().enumerate().map(
-                        |(index, warning)| {
-                            let (name, description) = permission_warning_copy(warning.kind);
-                            let action = button(
-                                ButtonKind::Secondary,
-                                permission_action_label(warning.action),
-                            )
-                            .id(permission_warning_id(warning.kind))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.perform_permission_action(warning);
-                                    cx.notify();
-                                },
-                            ));
-                            settings_row(name, description, action)
-                                .when(index + 1 == warning_count, |row| row.border_b_0())
-                        },
-                    )),
-                )
+                .child(panel().children(warnings.into_iter().enumerate().map(
+                    |(index, warning)| {
+                        let (name, description) = permission_warning_copy(warning.kind);
+                        let action = button(
+                            ButtonKind::Secondary,
+                            permission_action_label(warning.action),
+                        )
+                        .id(permission_warning_id(warning.kind))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.perform_permission_action(warning);
+                            cx.notify();
+                        }));
+                        settings_row(name, description, action)
+                            .when(index + 1 == warning_count, |row| row.border_b_0())
+                    },
+                )))
                 .into_any_element(),
         )
     }
@@ -3792,202 +3775,204 @@ impl AppWindow {
                 )
         });
         settings_pane(
+            "Settings",
+            "settings-scroll",
             div()
-                                    .children(permission_warnings)
-                                    .child(settings_section_label("Dictation"))
-                                    .child(
-                                        settings_panel()
-                                    .child(settings_row(
-                                        "Local transcription",
-                                        "Language and on-device speech model",
-                                        transcription_control,
-                                    ))
-                                    .child(settings_row(
-                                        "Microphone",
-                                        "Input device for dictation and commands",
-                                        div()
-                                            .relative()
-                                            .flex_none()
-                                            .child(
-                                                disclosure_button(microphone_label)
-                                                    .id("microphone-setting")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.toggle_microphone_picker(cx)
-                                                    })),
-                                            )
-                                            .children(microphone_picker.map(deferred)),
-                                    ))
-                                    .when(
-                                        transcription_model.supports_recognition_hints,
-                                        |settings| {
-                                            settings.child(settings_row(
-                                                "Recognition hints",
-                                                "Names and terms to prime the speech model",
-                                                div()
-                                                    .w(px(320.0))
-                                                    .flex_none()
-                                                    .child(
-                                                        self.transcription_hints.entity.clone(),
-                                                    ),
-                                            ))
-                                        },
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Dictation shortcut",
-                                            "Hold to dictate, release to transcribe",
-                                            hotkey_control,
-                                        )
-                                        .border_b_0()
-                                        .id("dictation-hotkey-setting"),
-                                    ),
-                            )
-                            .child(settings_section_label("Behavior"))
-                            .child(
-                                settings_panel()
-                                    .child(
-                                        settings_row(
-                                            "While dictating",
-                                            "Mute or pause other audio during dictation",
-                                            audio_behavior,
-                                        )
-                                        .id("recording-audio-setting"),
-                                    )
-                                    .child(settings_row(
-                                        "Microphone mode",
-                                        if self.settings.release_microphone_while_idle {
-                                            "Opens only while holding the shortcut. Disables pre-roll and commands."
-                                        } else {
-                                            "Keeps the microphone open for instant start and pre-roll"
-                                        },
-                                        microphone_mode,
-                                    ))
-                                    .children(microphone_confirmation)
-                                    .child(
-                                        settings_row(
-                                            "Double-tap to lock",
-                                            "Double-tap the shortcut for hands-free dictation",
-                                            toggle(double_tap_position),
-                                        )
-                                        .id("double-tap-setting")
+                .children(permission_warnings)
+                .child(settings_section_label("Dictation"))
+                .child(
+                    panel()
+                        .child(settings_row(
+                            "Local transcription",
+                            "Language and on-device speech model",
+                            transcription_control,
+                        ))
+                        .child(settings_row(
+                            "Microphone",
+                            "Input device for dictation and commands",
+                            div()
+                                .relative()
+                                .flex_none()
+                                .child(
+                                    disclosure_button(microphone_label)
+                                        .id("microphone-setting")
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            let enabled = !this.settings.double_tap_lock;
-                                            this.set_double_tap_lock(enabled, cx);
+                                            this.toggle_microphone_picker(cx)
                                         })),
-                                    )
-                                    .child(
-                                        div()
-                                            .h(px(SETTINGS_ROW_MIN_HEIGHT * double_tap_only_visibility))
-                                            .overflow_hidden()
-                                            .opacity(double_tap_only_visibility)
-                                            .child(
-                                                settings_row(
-                                                    "Double-tap only",
-                                                    "Wait for two complete shortcut taps before recording",
-                                                    toggle(if self.settings.double_tap_only { 1.0 } else { 0.0 }),
-                                                )
-                                                .id("double-tap-only-setting")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    let enabled = !this.settings.double_tap_only;
-                                                    this.set_double_tap_only(enabled, cx);
-                                                })),
-                                            ),
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Transcribe during pauses",
-                                            "Finish long dictations sooner by transcribing at each pause",
-                                            toggle(incremental_position),
-                                        )
-                                        .id("incremental-transcription-setting")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            let enabled = !this.settings.incremental_transcription;
-                                            if this.update_settings(cx, |settings| {
-                                                settings.incremental_transcription = enabled
-                                            }) {
-                                                this.incremental_toggle.set_enabled(enabled);
-                                            }
-                                        })),
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Paste last dictation",
-                                            "Re-paste the most recent dictation",
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(paste_last_control)
-                                                .when(self.settings.paste_last_hotkey.is_some(), |row| {
-                                                    row.child(
-                                                        button(ButtonKind::Secondary, "Clear")
-                                                            .id("disable-paste-last-hotkey")
-                                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                                this.update_settings(cx, |settings| settings.paste_last_hotkey = None);
-                                                            })),
-                                                    )
-                                                }),
-                                        )
-                                        .border_b_0()
-                                        .id("paste-last-hotkey-setting"),
-                                    )
-                            )
-                            .child(settings_section_label("Meetings"))
-                            .child(meetings_section)
-                            .child(settings_section_label("Application"))
-                            .child(
-                                settings_panel()
-                                    .child(
-                                        settings_row(
-                                            "Launch at login",
-                                            "Start Hex when you log in",
-                                            launch_at_login_control,
-                                        )
-                                        .id("launch-at-login-setting")
-                                        .when(
-                                            matches!(self.launch_at_login_status, Some(LoginItemStatus::Enabled | LoginItemStatus::Disabled))
-                                                && (self.preview || self.login_item_worker.is_some()),
-                                            |row| {
-                                                row.on_click(cx.listener(
-                                                    |this, _, _, cx| {
-                                                        let enabled = !this.launch_at_login_toggle.enabled();
-                                                        this.set_launch_at_login(enabled, cx);
-                                                    },
-                                                ))
-                                            },
+                                )
+                                .children(microphone_picker.map(deferred)),
+                        ))
+                        .when(
+                            transcription_model.supports_recognition_hints,
+                            |settings| {
+                                settings.child(settings_row(
+                                    "Recognition hints",
+                                    "Names and terms to prime the speech model",
+                                    div()
+                                        .w(px(320.0))
+                                        .flex_none()
+                                        .child(
+                                            self.transcription_hints.entity.clone(),
                                         ),
+                                ))
+                            },
+                        )
+                        .child(
+                            settings_row(
+                                "Dictation shortcut",
+                                "Hold to dictate, release to transcribe",
+                                hotkey_control,
+                            )
+                            .border_b_0()
+                            .id("dictation-hotkey-setting"),
+                        ),
+                )
+                .child(settings_section_label("Behavior"))
+                .child(
+                    panel()
+                        .child(
+                            settings_row(
+                                "While dictating",
+                                "Mute or pause other audio during dictation",
+                                audio_behavior,
+                            )
+                            .id("recording-audio-setting"),
+                        )
+                        .child(settings_row(
+                            "Microphone mode",
+                            if self.settings.release_microphone_while_idle {
+                                "Opens only while holding the shortcut. Disables pre-roll and commands."
+                            } else {
+                                "Keeps the microphone open for instant start and pre-roll"
+                            },
+                            microphone_mode,
+                        ))
+                        .children(microphone_confirmation)
+                        .child(
+                            settings_row(
+                                "Double-tap to lock",
+                                "Double-tap the shortcut for hands-free dictation",
+                                toggle(double_tap_position),
+                            )
+                            .id("double-tap-setting")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let enabled = !this.settings.double_tap_lock;
+                                this.set_double_tap_lock(enabled, cx);
+                            })),
+                        )
+                        .child(
+                            div()
+                                .h(px(SETTINGS_ROW_MIN_HEIGHT * double_tap_only_visibility))
+                                .overflow_hidden()
+                                .opacity(double_tap_only_visibility)
+                                .child(
+                                    settings_row(
+                                        "Double-tap only",
+                                        "Wait for two complete shortcut taps before recording",
+                                        toggle(if self.settings.double_tap_only { 1.0 } else { 0.0 }),
                                     )
-                                    .when_some(
-                                        self.launch_at_login_error.clone(),
-                                        |settings, error| {
-                                            settings.child(inline_error(error))
+                                    .id("double-tap-only-setting")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let enabled = !this.settings.double_tap_only;
+                                        this.set_double_tap_only(enabled, cx);
+                                    })),
+                                ),
+                        )
+                        .child(
+                            settings_row(
+                                "Transcribe during pauses",
+                                "Finish long dictations sooner by transcribing at each pause",
+                                toggle(incremental_position),
+                            )
+                            .id("incremental-transcription-setting")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let enabled = !this.settings.incremental_transcription;
+                                if this.update_settings(cx, |settings| {
+                                    settings.incremental_transcription = enabled
+                                }) {
+                                    this.incremental_toggle.set_enabled(enabled);
+                                }
+                            })),
+                        )
+                        .child(
+                            settings_row(
+                                "Paste last dictation",
+                                "Re-paste the most recent dictation",
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(paste_last_control)
+                                    .when(self.settings.paste_last_hotkey.is_some(), |row| {
+                                        row.child(
+                                            button(ButtonKind::Secondary, "Clear")
+                                                .id("disable-paste-last-hotkey")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.update_settings(cx, |settings| settings.paste_last_hotkey = None);
+                                                })),
+                                        )
+                                    }),
+                            )
+                            .border_b_0()
+                            .id("paste-last-hotkey-setting"),
+                        )
+                )
+                .child(settings_section_label("Meetings"))
+                .child(meetings_section)
+                .child(settings_section_label("Application"))
+                .child(
+                    panel()
+                        .child(
+                            settings_row(
+                                "Launch at login",
+                                "Start Hex when you log in",
+                                launch_at_login_control,
+                            )
+                            .id("launch-at-login-setting")
+                            .when(
+                                matches!(self.launch_at_login_status, Some(LoginItemStatus::Enabled | LoginItemStatus::Disabled))
+                                    && (self.preview || self.login_item_worker.is_some()),
+                                |row| {
+                                    row.on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            let enabled = !this.launch_at_login_toggle.enabled();
+                                            this.set_launch_at_login(enabled, cx);
                                         },
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Show Dock icon",
-                                            "Keep Hex in the menu bar when Settings is closed",
-                                            toggle(dock_icon_position),
-                                        )
-                                        .id("dock-icon-setting")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if !this.update_settings(cx, |settings| settings.show_dock_icon = !settings.show_dock_icon) {
-                                                return;
-                                            }
-                                            this.dock_icon_toggle
-                                                .set_enabled(this.settings.show_dock_icon);
-                                        })),
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Sound volume",
-                                            "Recording, cancellation, and error tones",
-                                            sound_volume,
-                                        )
-                                        .border_b_0()
-                                        .id("sound-effects-setting"),
-                                    ),
+                                    ))
+                                },
                             ),
+                        )
+                        .when_some(
+                            self.launch_at_login_error.clone(),
+                            |settings, error| {
+                                settings.child(inline_error(error))
+                            },
+                        )
+                        .child(
+                            settings_row(
+                                "Show Dock icon",
+                                "Keep Hex in the menu bar when Settings is closed",
+                                toggle(dock_icon_position),
+                            )
+                            .id("dock-icon-setting")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.update_settings(cx, |settings| settings.show_dock_icon = !settings.show_dock_icon) {
+                                    return;
+                                }
+                                this.dock_icon_toggle
+                                    .set_enabled(this.settings.show_dock_icon);
+                            })),
+                        )
+                        .child(
+                            settings_row(
+                                "Sound volume",
+                                "Recording, cancellation, and error tones",
+                                sound_volume,
+                            )
+                            .border_b_0()
+                            .id("sound-effects-setting"),
+                        ),
+                ),
         )
     }
 
@@ -4001,7 +3986,7 @@ impl AppWindow {
             .map(|relative| format!("~/{}", relative.display()))
             .unwrap_or_else(|_| folder.display().to_string());
         let permission_control = if self.screen_recording_permitted {
-            setup_ready_badge()
+            tag(Tone::Success, "Ready").into_any_element()
         } else {
             button(ButtonKind::Secondary, "Open settings")
                 .id("meeting-screen-recording")
@@ -4014,7 +3999,7 @@ impl AppWindow {
                 }))
                 .into_any_element()
         };
-        settings_panel()
+        panel()
             .child(
                 settings_row(
                     "Meetings (beta)",
@@ -4151,7 +4136,7 @@ impl AppWindow {
     fn render_setup(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let status = self.setup_status;
         let microphone = match status.microphone {
-            PermissionState::Ready => setup_ready_badge(),
+            PermissionState::Ready => tag(Tone::Success, "Ready").into_any_element(),
             PermissionState::NeedsRequest => button(ButtonKind::Secondary, "Allow")
                 .id("setup-microphone")
                 .on_click(cx.listener(|_this, _, _, cx| {
@@ -4224,7 +4209,7 @@ impl AppWindow {
         let model_notice =
             dictation_model_notice(status, self.transcription_status.model.is_some());
         let models = if models_ready {
-            setup_ready_badge()
+            tag(Tone::Success, "Ready").into_any_element()
         } else {
             button(ButtonKind::Primary, "Choose model")
                 .id("setup-models")
@@ -4280,7 +4265,7 @@ impl AppWindow {
                                 .flex_col()
                                 .gap_2()
                                 .child(section_label("Permissions needed").px_4())
-                                .child(settings_panel().children(permission_rows)),
+                                .child(panel().children(permission_rows)),
                         )
                     })
                     .child(
@@ -4290,7 +4275,7 @@ impl AppWindow {
                             .gap_2()
                             .child(section_label("Local models").px_4())
                             .child(
-                                settings_panel().child(
+                                panel().child(
                                     settings_row(
                                         if let Some((title, _)) = model_notice {
                                             title
@@ -4369,7 +4354,7 @@ impl AppWindow {
             )
             .mt_4();
             Some(
-                settings_panel()
+                panel()
                     .p_4()
                     .child(settings_copy(copy.title, copy.description))
                     .when_some(copy.error, |card, error| {
@@ -4381,11 +4366,11 @@ impl AppWindow {
         } else {
             Some(self.render_voice_action_processing(window, cx))
         };
-        settings_pane_titled(
+        settings_pane(
             "Voice Action",
             "voice-action-scroll",
             div()
-                .child(settings_panel().mt_6().child(
+                .child(panel().mt_6().child(
                     settings_row("Enable Voice Action", description, enabled_control).border_b_0(),
                 ))
                 .when_some(self.voice_action_inputs.error.clone(), |column, error| {
@@ -4393,7 +4378,7 @@ impl AppWindow {
                 })
                 .child(settings_section_label("Capture"))
                 .child(
-                    settings_panel().child(
+                    panel().child(
                         settings_row(
                             "Shortcut",
                             if enabled {
@@ -5110,7 +5095,7 @@ impl AppWindow {
                     .w_full()
                     .flex()
                     .flex_col()
-                    .gap(px(SECTION_GAP))
+                    .gap_2()
                     .child(basics)
                     .child(section_label("Text processing").pt_2().px_4())
                     .child(corrections)
@@ -5177,7 +5162,7 @@ impl AppWindow {
                     .child(
                         div()
                             .id(("drag-mode-transformation", target_index))
-                            .w(px(SPACE_5))
+                            .w_5()
                             .h_full()
                             .flex_none()
                             .flex()
@@ -5915,7 +5900,7 @@ impl AppWindow {
                     .when_some(refresh_control, |row, refresh| row.child(refresh)),
             )
             .when_some(suggestions, |field, suggestions| field.child(suggestions));
-        settings_panel()
+        panel()
             .child(
                 settings_row("OpenCode model", catalog_status, model_field)
                     .when(!has_variants, |row| row.border_b_0()),
@@ -6275,29 +6260,25 @@ impl AppWindow {
             .flex()
             .flex_col()
             .child(pane_header_with_action("Meetings", Some(header_action)))
-            .when_some(self.meeting_runtime_error.clone(), |pane, error| {
-                pane.child(
-                    div().flex().justify_center().px(px(PANE_GUTTER)).child(
-                        div()
-                            .w_full()
-                            .max_w(px(PANE_CONTENT_WIDTH))
-                            .py_3()
-                            .border_b_1()
-                            .border_color(rgb(LINE))
-                            .text_footnote()
-                            .text_color(rgb(DANGER))
-                            .child(error),
-                    ),
-                )
-            })
             .child(
                 pane_body().child(
                     pane_content()
                         .id("meetings-workspace")
-                        .flex_row()
-                        .gap_5()
-                        .child(list)
-                        .child(pane_detail(self.render_meeting_detail(cx))),
+                        .gap_3()
+                        .when_some(self.meeting_runtime_error.clone(), |column, error| {
+                            column.child(
+                                error_panel("Meeting could not be recorded.", error).flex_none(),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .flex()
+                                .gap_5()
+                                .child(list)
+                                .child(pane_detail(self.render_meeting_detail(cx))),
+                        ),
                 ),
             )
             .into_any_element()
@@ -6549,26 +6530,30 @@ impl AppWindow {
         meta.extend(meeting.app.clone());
 
         let errors = [
-            self.meeting_action_error.clone(),
-            meeting.error.clone(),
+            self.meeting_action_error
+                .clone()
+                .map(|error| ("Meeting could not be updated.", error)),
+            meeting
+                .error
+                .clone()
+                .map(|error| ("Recording failed.", error)),
             meeting
                 .export_error
                 .clone()
-                .map(|error| format!("Markdown not saved: {error}")),
+                .map(|error| ("Markdown not saved.", error)),
             meeting
                 .notes_error
                 .clone()
                 .filter(|_| !notes_running)
-                .map(|error| format!("Notes: {error}")),
+                .map(|error| ("Notes could not be written.", error)),
             meeting
                 .live_transcription_error
                 .clone()
                 .filter(|_| active)
-                .map(|error| format!("Live draft unavailable: {error}")),
+                .map(|error| ("Live draft unavailable.", error)),
         ]
         .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .flatten();
 
         let notes = meeting.notes.clone().map(render_meeting_notes).or_else(|| {
             notes_running.then(|| {
@@ -6661,19 +6646,7 @@ impl AppWindow {
             .child(
                 detail_body("meeting-transcript")
                     .track_scroll(&self.meeting_transcript_scroll)
-                    .children(errors.into_iter().map(|error| {
-                        div()
-                            .mb_4()
-                            .px_3()
-                            .py_2()
-                            .rounded(RADIUS_CONTROL)
-                            .border_1()
-                            .border_color(rgb(DANGER_BORDER))
-                            .bg(rgb(DANGER_SURFACE))
-                            .text_footnote()
-                            .text_color(rgb(DANGER))
-                            .child(error)
-                    }))
+                    .children(errors.map(|(message, error)| error_panel(message, error).mb_4()))
                     .when_some(notes, |content, notes| content.child(notes))
                     .child(
                         div()
@@ -6796,7 +6769,7 @@ impl AppWindow {
             .gap_2()
             .child(config_control)
             .when_some(copy_prompt, |controls, prompt| controls.child(prompt))
-            .child(div().mx_1().w(px(1.0)).h(px(SPACE_5)).bg(rgb(LINE)))
+            .child(div().mx_1().w(px(1.0)).h_5().bg(rgb(LINE)))
             .child(
                 div()
                     .id("commands-enabled")
@@ -7908,7 +7881,7 @@ fn hotkey_keycaps_width(keycap_count: usize) -> f32 {
     if keycap_count == 0 {
         0.0
     } else {
-        34.0 * keycap_count as f32 + 3.0 * keycap_count.saturating_sub(1) as f32
+        KEYCAP_WIDTH * keycap_count as f32 + 3.0 * keycap_count.saturating_sub(1) as f32
     }
 }
 
@@ -8329,10 +8302,6 @@ fn command_model_notice(status: &CommandModelStatus) -> Option<(&'static str, &'
             "The command model could not load. Retry or turn off commands; hotkey dictation is unaffected.",
         )),
     }
-}
-
-fn setup_ready_badge() -> AnyElement {
-    tag(Tone::Success, "Ready").into_any_element()
 }
 
 const fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'static str) {
@@ -8996,7 +8965,11 @@ mod tests {
     use super::*;
     use crate::personal_commands::StatusExecution;
 
-    fn editor_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
+    fn preview_fixture(
+        preview: AppWindowPreview,
+        window: &mut Window,
+        cx: &mut Context<AppWindow>,
+    ) -> AppWindow {
         AppWindow::new(
             PathBuf::from("unused-preview-events.ndjson"),
             crate::config::voice_control(),
@@ -9004,104 +8977,58 @@ mod tests {
             crate::dictation_indicator::channel().0,
             None,
             None,
-            Some(AppWindowPreview {
-                pane: DeveloperPane::Modes,
-                transcription_picker: None,
-                onboarding: false,
-                confirm_model_deletion: false,
+            Some(preview),
+            window,
+            cx,
+        )
+    }
+
+    fn pane_preview(pane: DeveloperPane) -> AppWindowPreview {
+        AppWindowPreview {
+            pane,
+            transcription_picker: None,
+            onboarding: false,
+            confirm_model_deletion: false,
+            collapse_mode_processing: false,
+            open_transformation_picker: false,
+            select_global_mode: false,
+            voice_action_enabled: false,
+            opencode_unavailable: false,
+            permissions_missing: false,
+            model_missing: false,
+            command_model_missing: false,
+            open_history_retention: false,
+            confirm_release_microphone: false,
+            update_available: false,
+            meetings_enabled: true,
+            screen_recording_missing: false,
+            meeting_recording: false,
+            confirm_meeting_delete: false,
+            open_meeting_actions: false,
+            meetings_empty: false,
+        }
+    }
+
+    fn editor_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
+        preview_fixture(
+            AppWindowPreview {
                 collapse_mode_processing: true,
-                open_transformation_picker: false,
                 select_global_mode: true,
-                voice_action_enabled: false,
                 opencode_unavailable: true,
-                permissions_missing: false,
-                model_missing: false,
-                command_model_missing: false,
-                open_history_retention: false,
-                confirm_release_microphone: false,
-                update_available: false,
                 meetings_enabled: false,
-                screen_recording_missing: false,
-                meeting_recording: false,
-                confirm_meeting_delete: false,
-                open_meeting_actions: false,
-                meetings_empty: false,
-            }),
+                ..pane_preview(DeveloperPane::Modes)
+            },
             window,
             cx,
         )
     }
 
     fn meetings_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
-        AppWindow::new(
-            PathBuf::from("unused-preview-events.ndjson"),
-            crate::config::voice_control(),
-            sync_channel(1).0,
-            crate::dictation_indicator::channel().0,
-            None,
-            None,
-            Some(AppWindowPreview {
-                pane: DeveloperPane::Meetings,
-                transcription_picker: None,
-                onboarding: false,
-                confirm_model_deletion: false,
-                collapse_mode_processing: false,
-                open_transformation_picker: false,
-                select_global_mode: false,
-                voice_action_enabled: false,
-                opencode_unavailable: false,
-                permissions_missing: false,
-                model_missing: false,
-                command_model_missing: false,
-                open_history_retention: false,
-                confirm_release_microphone: false,
-                update_available: false,
-                meetings_enabled: true,
-                screen_recording_missing: false,
-                meeting_recording: false,
-                confirm_meeting_delete: false,
-                open_meeting_actions: false,
-                meetings_empty: false,
-            }),
-            window,
-            cx,
-        )
+        preview_fixture(pane_preview(DeveloperPane::Meetings), window, cx)
     }
 
     fn history_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
-        AppWindow::new(
-            PathBuf::from("unused-preview-events.ndjson"),
-            crate::config::voice_control(),
-            sync_channel(1).0,
-            crate::dictation_indicator::channel().0,
-            None,
-            None,
-            Some(AppWindowPreview {
-                pane: DeveloperPane::History,
-                transcription_picker: None,
-                onboarding: false,
-                confirm_model_deletion: false,
-                collapse_mode_processing: false,
-                open_transformation_picker: false,
-                select_global_mode: false,
-                voice_action_enabled: false,
-                opencode_unavailable: false,
-                permissions_missing: false,
-                model_missing: false,
-                command_model_missing: false,
-                open_history_retention: false,
-                confirm_release_microphone: false,
-                update_available: false,
-                meetings_enabled: true,
-                screen_recording_missing: false,
-                meeting_recording: false,
-                confirm_meeting_delete: false,
-                open_meeting_actions: false,
-                meetings_empty: false,
-            }),
-            window,
-            cx,
-        )
+        preview_fixture(pane_preview(DeveloperPane::History), window, cx)
     }
 
     #[gpui::test]
@@ -9559,8 +9486,10 @@ mod tests {
                     .child(sidebar_frame())
                     .child(
                         div().flex_1().min_w_0().h_full().child(settings_pane(
+                            "Settings",
+                            "settings-scroll",
                             div()
-                                .child(settings_panel().child(settings_row(
+                                .child(panel().child(settings_row(
                                     "Microphone",
                                     "Automatically chooses the preferred available input",
                                     disclosure_button("Automatic"),

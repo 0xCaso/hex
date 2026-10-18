@@ -138,13 +138,10 @@ pub(crate) trait Typography: Styled + Sized {
 
 impl<E: Styled> Typography for E {}
 
-// Spacing: a 4 px grid. Use GPUI's spacing utilities on these steps only:
-// `*_1` 4, `*_2` 8, `*_3` 12, `*_4` 16, `*_5` 20, `*_6` 24, `*_8` 32.
-pub(crate) const SPACE_1: f32 = 4.0;
+// Spacing: a 4 px grid. Prefer GPUI's spacing utilities (`*_1` 4, `*_2` 8,
+// `*_3` 12, `*_4` 16, `*_5` 20, `*_6` 24, `*_8` 32); `SPACE_2` is named for
+// arithmetic on control heights and negative icon-button margins.
 pub(crate) const SPACE_2: f32 = 8.0;
-pub(crate) const SPACE_3: f32 = 12.0;
-pub(crate) const SPACE_5: f32 = 20.0;
-pub(crate) const SPACE_8: f32 = 32.0;
 
 // Radii.
 pub(crate) const RADIUS_SMALL: Pixels = px(4.0);
@@ -161,11 +158,12 @@ pub(crate) fn icon_radius(size: f32) -> Pixels {
 // Control geometry.
 pub(crate) const CONTROL_HEIGHT: f32 = 30.0;
 pub(crate) const CONTROL_HEIGHT_SMALL: f32 = 24.0;
+pub(crate) const KEYCAP_WIDTH: f32 = 34.0;
 pub(crate) const TAG_HEIGHT: f32 = 18.0;
 pub(crate) const MENU_ITEM_HEIGHT: f32 = 28.0;
 pub(crate) const MENU_WIDTH: f32 = 180.0;
 /// The gap between a control and the menu it opens.
-pub(crate) const MENU_OFFSET: f32 = SPACE_1;
+pub(crate) const MENU_OFFSET: f32 = 4.0;
 pub(crate) const NAV_ITEM_HEIGHT: f32 = 32.0;
 pub(crate) const MULTILINE_INPUT_HEIGHT: f32 = 76.0;
 pub(crate) const DISCLOSURE_WIDTH: f32 = 220.0;
@@ -186,7 +184,7 @@ pub(crate) const TITLEBAR_INSET: f32 = 52.0;
 pub(crate) const PANE_HEADER_HEIGHT: f32 = 70.0;
 /// Horizontal inset shared by every pane header and body, so cards align
 /// with the header rule.
-pub(crate) const PANE_GUTTER: f32 = SPACE_8;
+pub(crate) const PANE_GUTTER: f32 = 32.0;
 /// The one content width every pane is bounded to.
 pub(crate) const PANE_CONTENT_WIDTH: f32 = 940.0;
 /// The list column of a list+detail pane.
@@ -199,7 +197,6 @@ pub(crate) const MODAL_HEIGHT: f32 = 520.0;
 pub(crate) const PROGRESS_HEIGHT: f32 = 3.0;
 pub(crate) const PANEL_HEADER_HEIGHT: f32 = 38.0;
 pub(crate) const SETTINGS_ROW_MIN_HEIGHT: f32 = 56.0;
-pub(crate) const SECTION_GAP: f32 = SPACE_2;
 
 #[cfg(test)]
 mod tests {

@@ -1293,20 +1293,30 @@ impl Render for MeetingPanel {
                     div()
                         .flex()
                         .gap_2()
-                        .child(secondary_button("not-now", "Not now", move |window, _| {
-                            let _ = dismiss.try_send(ControllerCommand::Dismiss);
-                            window.remove_window();
-                        }))
-                        .child(primary_button("record", "Record", move |window, _| {
-                            let command = if is_preview {
-                                ControllerCommand::Dismiss
-                            } else {
-                                ControllerCommand::Record(candidate.clone())
-                            };
-                            if record.try_send(command).is_ok() {
+                        .child(capsule_button(
+                            ButtonKind::Secondary,
+                            "not-now",
+                            "Not now",
+                            move |window, _| {
+                                let _ = dismiss.try_send(ControllerCommand::Dismiss);
                                 window.remove_window();
-                            }
-                        })),
+                            },
+                        ))
+                        .child(capsule_button(
+                            ButtonKind::Primary,
+                            "record",
+                            "Record",
+                            move |window, _| {
+                                let command = if is_preview {
+                                    ControllerCommand::Dismiss
+                                } else {
+                                    ControllerCommand::Record(candidate.clone())
+                                };
+                                if record.try_send(command).is_ok() {
+                                    window.remove_window();
+                                }
+                            },
+                        )),
                 )
             }
             PanelKind::CallEnded { app } => {
@@ -1318,14 +1328,16 @@ impl Render for MeetingPanel {
                     div()
                         .flex()
                         .gap_2()
-                        .child(secondary_button(
+                        .child(capsule_button(
+                            ButtonKind::Secondary,
                             "keep-recording",
                             "Keep recording",
                             |window, _| {
                                 window.remove_window();
                             },
                         ))
-                        .child(primary_button(
+                        .child(capsule_button(
+                            ButtonKind::Primary,
                             "stop-meeting",
                             "Stop & transcribe",
                             move |window, _| {
@@ -1373,7 +1385,8 @@ impl Render for MeetingPanel {
                         .gap_2()
                         .when_some(copy_path, |actions, path| {
                             let label = if self.copied { "Copied" } else { "Copy" };
-                            actions.child(secondary_button(
+                            actions.child(capsule_button(
+                                ButtonKind::Secondary,
                                 "copy-transcript",
                                 label,
                                 move |_, cx| match std::fs::read_to_string(&path) {
@@ -1391,7 +1404,8 @@ impl Render for MeetingPanel {
                             ))
                         })
                         .when_some(reveal_path, |actions, path| {
-                            actions.child(primary_button(
+                            actions.child(capsule_button(
+                                ButtonKind::Primary,
                                 "reveal-transcript",
                                 "Reveal",
                                 move |window, _| {
@@ -1437,22 +1451,6 @@ impl Render for MeetingPanel {
 }
 
 /// Capsule buttons are the shared buttons in the capsule's pill shape.
-fn primary_button(
-    id: &'static str,
-    label: &'static str,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    capsule_button(ButtonKind::Primary, id, label, on_click)
-}
-
-fn secondary_button(
-    id: &'static str,
-    label: &'static str,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    capsule_button(ButtonKind::Secondary, id, label, on_click)
-}
-
 fn capsule_button(
     kind: ButtonKind,
     id: &'static str,
