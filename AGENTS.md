@@ -144,11 +144,12 @@ substitute for source inspection or a second roadmap.
 - `desktop_host`: the Linux Settings/service snapshot-and-action contract.
   macOS chooses its navigation directly from the developer-feature flag and
   uses the shared presentation primitives while committing its own settings.
-- `desktop_ui`: platform-neutral GPUI visual tokens and controls shared by both
-  desktop roots, including the mandatory pane scaffold: `pane_header` /
-  `pane_header_with_action`, `pane_body`, `pane_content`, the shared
-  `header_button` action chip, and the single `PANE_CONTENT_WIDTH` and
-  `PANE_LIST_WIDTH` layout constants.
+- `design_tokens`: the desktop design tokens (surface, text and role colours,
+  the five-step type scale, spacing, radii, and control geometry) plus the
+  `Typography` trait and the test that rejects raw styles in desktop sources.
+- `desktop_ui`: the platform-neutral GPUI components shared by both desktop
+  roots: the pane scaffold, cards and rows, the one button system, tags, menus,
+  segmented controls, icons, and empty and error states.
 - `text_input`: the shared GPUI single- and multi-line text input with editing,
   selection, clipboard, and input-method support.
 - `desktop_transcription_picker`: the single GPUI language/model picker used by
@@ -405,26 +406,15 @@ CoreAudio formats, AppleScript details, or event serialization.
   paste output has completed, including ordered post-processing and insertion.
 - The HUD is observational and click-through. It must not alter capture
   boundaries, steal focus, or block controls in the foreground application.
-- Every desktop pane renders the shared scaffold from `desktop_ui`: the
-  bounded pane header plus one centered content column at `PANE_CONTENT_WIDTH`,
-  with list+detail panes using the fixed `PANE_LIST_WIDTH` list column (`pane_list_card`
-  and `compact_panel` detail cards with rounded `list_row` items). Panes
-  must not introduce their own header treatments, ad-hoc row helpers, or content
-  widths, and text columns beside a fixed column carry `flex_1` with a zero
-  min-width so long lines wrap instead of widening the pane. Any `.truncate()`
-  element must also set `.overflow_x_hidden()` so GPUI shapes an ellipsis (`…`)
-  rather than clipping mid-glyph.
-- Desktop UI follows the OpenCode V2 dark surface hierarchy (`SIDEBAR` recessed
-  at `#111111`, `CANVAS` base at `#161616`, elevated `SURFACE` cards at `#1d1d1d`,
-  and recessed `CANVAS` controls with `LINE` borders inside cards). Interactive
-  controls inside `SURFACE` cards must use bordered chips (`canvas_button`,
-  `header_button`, or `disclosure_button`) rather than borderless `SURFACE`
-  buttons, and dropdown/picker triggers must include a visible disclosure
-  affordance. Keep copy to one direct line per control; never add intro
-  paragraphs above setting cards, repeated per-row field labels, or redundant
-  "cannot be undone" warnings beside two-step confirmation buttons. Render
-  modal/list errors at the top of the scrollable container so they are never
-  hidden below the fold.
+- Desktop UI is governed by [`docs/design-system.md`](docs/design-system.md);
+  read it before changing any GPUI pane, capsule, or picker. Use only
+  `design_tokens` values and `desktop_ui` components: no raw colours, type
+  sizes, line heights, or radii (`desktop_sources_use_tokens_instead_of_raw_styles`
+  enforces this). Use sentence case and the product name "Hex" in all copy.
+  Reserve the accent (Primary) fill for at most one main action per screen;
+  states such as recording or an available update use a Secondary button with
+  a status dot. Extend a token or component instead of adding a parallel helper, and verify
+  visual changes with `scripts/capture-preview.sh`.
 - Public app updates are Developer ID signed, notarized, stapled, EdDSA signed,
   published artifact-first/feed-last, and installed through Sparkle.
 - Linux direct-install updates accept only a strictly newer signed stable
@@ -523,14 +513,15 @@ cd sdk/typescript && bun run check && bun run test && bun run build
 
 Use `scripts/capture-preview.sh` as the default desktop-UI iteration loop. It
 builds the release binary, launches one isolated deterministic preview, waits
-for that process's `HEX` window, captures only that window, and terminates the
+for that process's `Hex` window, captures only that window, and terminates the
 preview. Targets include `settings`, `modes`, `voice-action`, `commands`,
 `meetings`, `activity`, `onboarding`, `transcription-picker`, `hud-lab`,
 `dictation-hud`, and `meeting-offer` (with `--meeting-panel call-ended|ready`).
 Pass `--meetings-enabled` and `--screen-recording-missing` to Settings for the
 Meetings section. The `meetings` preview has sample meetings with notes and a
 transcript; add `--meeting-recording` for the live state,
-`--confirm-meeting-delete` for the delete confirmation, or `--meetings-empty`. The Modes preview includes representative activation,
+`--confirm-meeting-delete` for the delete confirmation, `--open-meeting-actions`
+for the overflow menu, or `--meetings-empty`. The Modes preview includes representative activation,
 correction, model-variant, and transformation data so it exercises the complete
 editor. Pass `--collapse-mode-processing` to expose the lower transformation
 and deletion states without scrolling. Use `--open-transformation-picker`,

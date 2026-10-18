@@ -5,7 +5,7 @@ This maps existing behavior. [ROADMAP.md](../../ROADMAP.md) owns future work;
 [AGENTS.md](../../AGENTS.md) owns implementation invariants.
 
 Initial source baseline: September 1, 2026, `9e9da53aa9ed`. Public macOS release:
-[2.1.25](../releases/2.1.25.md), with custom-domain downloads, a GitHub DMG mirror,
+[2.2.0](../releases/2.2.0.md), with custom-domain downloads, a GitHub DMG mirror,
 and model-download recovery guidance. The initial map was source-only. Listed checks are
 locators unless an executed result is explicitly recorded, as in the
 [keyboard-layout verification](recovery.md#keyboard-layout-resolution).
@@ -469,7 +469,7 @@ Show Dock icon off                       // maintain.dock-policy
 ```ts
 Settings > Launch at login               // maintain.login-item
 ├── Open -> Checking until macOS returns the initial state
-├── Refresh / toggle / Open Settings -> One persistent background worker
+├── Refresh / toggle / Open settings -> One persistent background worker
 │   └── One active request; latest pending user action precedes the next refresh
 ├── Failed toggle -> Show error and reconcile with actual macOS state when available
 └── Close Settings -> Release channels without waiting for an active native call

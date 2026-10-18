@@ -58,7 +58,7 @@ Or install manually:
 - **Accessibility** lets HEX paste into the foreground app. Drag the HEX tile into the list.
 - **Transcription model** downloads the speech model that runs locally.
 
-HEX checks for signed updates automatically. Use **HEX > Check for Updates...**
+HEX checks for signed updates automatically. Use **Hex > Check for Updates…**
 to check immediately.
 
 Organizations that manage app versions themselves can turn off in-app updates,
@@ -68,7 +68,7 @@ including manual checks, with the `DisableUpdates` Boolean in the
 single Mac run `defaults write com.kitlangton.hex2 DisableUpdates -bool true`.
 Relaunch HEX to apply it. Model downloads still work.
 
-**Download blocked?** [Alternative download: GitHub — Hex 2.1.25](https://github.com/anomalyco/hex/releases/download/app-v2.1.25/HEX-2.1.25-arm64.dmg)
+**Download blocked?** [Alternative download: GitHub — Hex 2.2.0](https://github.com/anomalyco/hex/releases/download/app-v2.2.0/HEX-2.2.0-arm64.dmg)
 contains the identical signed DMG for Apple silicon and macOS 15+. App releases
 use `app-v…` tags; the repository also publishes separate TypeScript SDK releases.
 If an older installation cannot check for updates on your network, install the

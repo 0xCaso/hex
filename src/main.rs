@@ -24,6 +24,9 @@ mod context;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod dashboard;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+mod design_tokens;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod desktop_activity;
 #[cfg(target_os = "linux")]
 mod desktop_host;
@@ -236,6 +239,9 @@ enum Command {
         /// For `meetings`: ask to delete the selected meeting.
         #[arg(long)]
         confirm_meeting_delete: bool,
+        /// For `meetings`: open the selected meeting's overflow menu.
+        #[arg(long)]
+        open_meeting_actions: bool,
         /// For `meetings`: show the pane before any meeting was recorded.
         #[arg(long)]
         meetings_empty: bool,
@@ -510,6 +516,7 @@ fn main() -> Result<()> {
             screen_recording_missing,
             meeting_recording,
             confirm_meeting_delete,
+            open_meeting_actions,
             meetings_empty,
             meeting_panel,
         } => {
@@ -580,6 +587,7 @@ fn main() -> Result<()> {
                     screen_recording_missing,
                     meeting_recording,
                     confirm_meeting_delete,
+                    open_meeting_actions,
                     meetings_empty,
                 }),
             )
