@@ -657,7 +657,7 @@ Sources: the service owner and client in [linux_app.rs](../../src/linux_app.rs),
 [linux_service.rs](../../src/linux_service.rs), and the managed installer/Nix
 user units. `hex status` queries the running service; `--lines` explicitly reads
 historical observations. `hex app --hidden` is a compatibility alias for starting
-the service. GUI exit does not mean Stop Listening; the explicit listener and
+the service. GUI exit does not mean Disable; the Settings card's Enable/Disable listener and
 service controls retain separate meanings. No root daemon or new input grants.
 
 Listener starts consume the service-owned settings snapshot; the foreground
