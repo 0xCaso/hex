@@ -85,6 +85,19 @@ pub(crate) const KEYCAP_SIDE_BADGE: TypeStep = TypeStep {
 
 pub(crate) const MONOSPACE_FAMILY: &str = "SF Mono";
 
+/// SF Pro's ascender and descender as fractions of the font size.
+const FONT_ASCENT: f32 = 0.952;
+const FONT_DESCENT: f32 = 0.241;
+
+/// The top inset that puts `smaller`'s first baseline on `larger`'s when both
+/// lines start at the same top, such as a timestamp beside a row title.
+pub(crate) fn baseline_offset(larger: TypeStep, smaller: TypeStep) -> f32 {
+    // GPUI centres the font's ascent + descent in the line box.
+    let baseline =
+        |step: TypeStep| step.line_height / 2.0 + step.size * (FONT_ASCENT - FONT_DESCENT) / 2.0;
+    baseline(larger) - baseline(smaller)
+}
+
 /// Applies type steps to any styled element. Weight is applied only by steps
 /// that own one, so call `font_weight` after the step to emphasise text.
 pub(crate) trait Typography: Styled + Sized {
@@ -150,6 +163,9 @@ pub(crate) const CONTROL_HEIGHT: f32 = 30.0;
 pub(crate) const CONTROL_HEIGHT_SMALL: f32 = 24.0;
 pub(crate) const TAG_HEIGHT: f32 = 18.0;
 pub(crate) const MENU_ITEM_HEIGHT: f32 = 28.0;
+pub(crate) const MENU_WIDTH: f32 = 180.0;
+/// The gap between a control and the menu it opens.
+pub(crate) const MENU_OFFSET: f32 = SPACE_1;
 pub(crate) const NAV_ITEM_HEIGHT: f32 = 32.0;
 pub(crate) const MULTILINE_INPUT_HEIGHT: f32 = 76.0;
 pub(crate) const DISCLOSURE_WIDTH: f32 = 220.0;
@@ -240,6 +256,14 @@ mod tests {
         for step in steps {
             assert!(step.line_height >= step.size * 1.25);
         }
+    }
+
+    #[test]
+    fn baseline_offset_lowers_smaller_text_onto_the_larger_baseline() {
+        assert_eq!(baseline_offset(BODY, BODY), 0.0);
+        let caption = baseline_offset(BODY, CAPTION);
+        assert!((2.5..3.0).contains(&caption), "{caption}");
+        assert!(baseline_offset(HEADLINE, CAPTION) > caption);
     }
 
     /// Raw styling values belong here. A pane that writes a literal colour,

@@ -98,6 +98,7 @@ pub(crate) enum Icon {
     ChevronDown,
     Close,
     DragHandle,
+    Ellipsis,
     Globe,
     Plus,
 }
@@ -110,6 +111,7 @@ impl Icon {
             Self::ChevronDown => "chevron.down",
             Self::Close => "xmark",
             Self::DragHandle => "line.3.horizontal",
+            Self::Ellipsis => "ellipsis",
             Self::Globe => "globe",
             Self::Plus => "plus",
         }
@@ -122,6 +124,7 @@ impl Icon {
             Self::ChevronDown => "⌄",
             Self::Close => "×",
             Self::DragHandle => "≡",
+            Self::Ellipsis => "…",
             Self::Globe => "◎",
             Self::Plus => "+",
         }
@@ -328,7 +331,9 @@ pub(crate) fn pane_list(
         .h_full()
         .flex_none()
         .overflow_y_scroll()
-        .when_some(empty, |list, message| list.child(empty_state(message)))
+        .when_some(empty, |list, message| {
+            list.flex().flex_col().child(detail_placeholder(message))
+        })
         .when_some(error, |list, error| {
             list.child(error_message(error_title, error))
         })
@@ -356,6 +361,15 @@ pub(crate) fn pane_detail(content: impl IntoElement) -> Div {
         .flex()
         .flex_col()
         .child(content)
+}
+
+/// A [`section_label`] heading a group of rows in a [`pane_list`], inset to
+/// the row text. The first group sits closer to the top of the card.
+pub(crate) fn list_section_label(label: impl IntoElement, first: bool) -> Div {
+    section_label(label)
+        .px_3()
+        .pt(px(if first { SPACE_1 } else { SPACE_3 }))
+        .pb_1()
 }
 
 /// A rounded, selectable row inside a list column.
@@ -471,9 +485,72 @@ pub(crate) fn section_label(label: impl IntoElement) -> Div {
         .child(label)
 }
 
-/// A [`section_label`] spaced to head a settings card.
+/// A [`section_label`] spaced to head a settings card, inset to the card's
+/// row text so both share one left edge.
 pub(crate) fn settings_section_label(label: &'static str) -> AnyElement {
-    section_label(label).pt_6().pb_2().px_1().into_any_element()
+    section_label(label).pt_6().pb_2().px_4().into_any_element()
+}
+
+/// The fixed top of a detail card: a [`detail_title`], an optional metadata
+/// line, and an optional action row, ruled off edge to edge from the
+/// [`detail_body`] below.
+pub(crate) fn detail_header(
+    title: impl IntoElement,
+    meta: Vec<AnyElement>,
+    actions: Vec<AnyElement>,
+) -> Div {
+    div()
+        .flex_none()
+        .px_6()
+        .pt_5()
+        .pb_4()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .border_b_1()
+        .border_color(rgb(LINE))
+        .child(title)
+        .when(!meta.is_empty(), |header| {
+            header.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_footnote()
+                    .text_color(rgb(TEXT_TERTIARY))
+                    .children(meta),
+            )
+        })
+        .when(!actions.is_empty(), |header| {
+            header.child(
+                div()
+                    .debug_selector(|| "detail-actions".into())
+                    .pt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(actions),
+            )
+        })
+}
+
+/// The title of a [`detail_header`].
+pub(crate) fn detail_title(text: impl Into<SharedString>) -> Div {
+    div().text_headline().child(text.into())
+}
+
+/// The scrolling content under a [`detail_header`].
+pub(crate) fn detail_body(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .overflow_y_scroll()
+        .px_6()
+        .pt_5()
+        .pb_6()
 }
 
 pub(crate) fn settings_copy(title: &'static str, description: impl IntoElement) -> AnyElement {
@@ -539,6 +616,7 @@ pub(crate) fn detail_row(label: &'static str, value: impl Into<String>) -> AnyEl
             div()
                 .w(px(92.0))
                 .flex_none()
+                .pt(px(baseline_offset(BODY, FOOTNOTE)))
                 .text_footnote()
                 .text_color(rgb(TEXT_TERTIARY))
                 .child(label),
@@ -844,8 +922,43 @@ pub(crate) fn menu() -> Div {
         .occlude()
 }
 
+/// A [`menu`] that drops [`MENU_OFFSET`] below the [`CONTROL_HEIGHT`] control
+/// that opens it. Put both in a `relative` wrapper and pin the menu to the
+/// control's left or right edge.
+pub(crate) fn dropdown_menu() -> Div {
+    menu().absolute().top(px(CONTROL_HEIGHT + MENU_OFFSET))
+}
+
 /// One choice inside a [`menu`].
 pub(crate) fn menu_item(selected: bool) -> Div {
+    menu_item_frame()
+        .text_color(rgb(if selected {
+            TEXT_PRIMARY
+        } else {
+            TEXT_SECONDARY
+        }))
+        .when(selected, |item| item.bg(rgb(SURFACE_SELECTED)))
+        .hover(|item| item.bg(rgb(SURFACE_HOVER)))
+}
+
+/// A destructive choice: last in its [`menu`], after a [`menu_separator`].
+pub(crate) fn danger_menu_item() -> Div {
+    menu_item_frame()
+        .text_color(rgb(DANGER))
+        .hover(|item| item.bg(rgb(DANGER_SURFACE)))
+}
+
+/// A choice that is temporarily unavailable, such as work in progress.
+pub(crate) fn disabled_menu_item() -> Div {
+    menu_item_frame().text_color(rgb(TEXT_TERTIARY))
+}
+
+/// A rule between groups of [`menu`] choices.
+pub(crate) fn menu_separator() -> Div {
+    div().mx_2().my_1().h(px(1.0)).flex_none().bg(rgb(LINE))
+}
+
+fn menu_item_frame() -> Div {
     div()
         .w_full()
         .h(px(MENU_ITEM_HEIGHT))
@@ -857,13 +970,6 @@ pub(crate) fn menu_item(selected: bool) -> Div {
         .gap_2()
         .rounded(RADIUS_CONTROL)
         .text_footnote()
-        .text_color(rgb(if selected {
-            TEXT_PRIMARY
-        } else {
-            TEXT_SECONDARY
-        }))
-        .when(selected, |item| item.bg(rgb(SURFACE_SELECTED)))
-        .hover(|item| item.bg(rgb(SURFACE_HOVER)))
 }
 
 pub(crate) const SOUND_VOLUME_STEPS: [(&str, f32); 5] = [
