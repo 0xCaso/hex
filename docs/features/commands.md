@@ -13,7 +13,7 @@ previews, providers, or native actions were run for this split.
 Hex > Commands                                      // commands; off by default
 ├── Enable -> Prepare command model                  // needs setup permissions
 ├── Search / select a catalog row -> Inspect, not execute
-└── Create Config / Edit Config / Copy agent prompt  // personal workspace
+└── Create config / Edit config / Copy agent prompt  // personal workspace
 
 hex commands init -> Create or refresh ~/.config/hex // does not start listening
 hex listen -> Use saved command opt-in               // never beside another listener
@@ -31,7 +31,7 @@ changes the running app's opt-in; it is not a release CLI route.
 
 ```ts
 Enable Commands                                     // commands.opt-in
-├── Release when idle active -> Confirm Keep Microphone Ready & Enable Commands
+├── Release when idle active -> Confirm Keep microphone ready & enable commands
 └── Load separate Moonshine model in background
     ├── Ready -> Recognize commands, initially awake
     └── Failure -> Keep opt-in; show Retry / Turn off commands
@@ -127,7 +127,7 @@ is discoverability, not proof that its scope is active or its action succeeded.
 ### Personal Config
 
 ```ts
-Create Config / hex commands init                      // commands.personal-config
+Create config / hex commands init                      // commands.personal-config
   -> Managed Bun workspace + @hex/commands SDK
   -> ~/.config/hex/hex.config.ts                         // trusted executable user code
 

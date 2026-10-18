@@ -10,13 +10,15 @@ use std::time::{Duration, Instant};
 use color_eyre::eyre::{Result, eyre};
 use gpui::{
     App, Application, Bounds, ClipboardItem, Context, IntoElement, KeyBinding, Menu, MenuItem,
-    Render, Rgba, SystemMenuType, Timer, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
+    Render, SystemMenuType, Timer, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 
 use crate::app_settings::AppSettings;
 use crate::app_window::AppWindow;
 use crate::context::ContextSnapshot;
+use crate::design_tokens::*;
+use crate::desktop_ui::{ButtonKind, button, status_dot, truncated_line};
 use crate::dictation_indicator::DictationIndicatorEvent;
 use crate::dictation_indicator::{self, DictationIndicatorUi};
 use crate::meeting::{self, MeetingRequest};
@@ -458,7 +460,7 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             ),
         };
         if let Err(error) = result {
-            tracing::error!(%error, "could not open HEX");
+            tracing::error!(%error, "could not open Hex");
         }
     });
     let application_runtime_workers = runtime_workers.clone();
@@ -508,13 +510,13 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             MenuItem::action("Settings…", crate::app_window::ShowSettings),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide HEX", crate::app_window::HideApplication),
+            MenuItem::action("Hide Hex", crate::app_window::HideApplication),
             MenuItem::separator(),
-            MenuItem::action("Quit HEX", crate::app_window::QuitApplication),
+            MenuItem::action("Quit Hex", crate::app_window::QuitApplication),
         ]);
         cx.set_menus(vec![
             Menu {
-                name: "HEX".into(),
+                name: "Hex".into(),
                 items: application_items,
             },
             Menu {
@@ -539,7 +541,7 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             match crate::status_item::install() {
                 Ok(actions) => Some(actions),
                 Err(error) => {
-                    tracing::error!(%error, "could not install HEX status item");
+                    tracing::error!(%error, "could not install Hex status item");
                     None
                 }
             }
@@ -582,7 +584,7 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             None => None,
         };
         if let Some(Err(error)) = open_result {
-            tracing::error!(%error, "could not open HEX");
+            tracing::error!(%error, "could not open Hex");
         }
         let quit_shutdown = shutdown;
         let quit_workers = application_runtime_workers.clone();
@@ -692,7 +694,7 @@ async fn drive_ui(
                         });
                     }
                     Err(error) => {
-                        tracing::error!(%error, "could not open HEX from status item");
+                        tracing::error!(%error, "could not open Hex from status item");
                     }
                 },
                 crate::status_item::StatusItemAction::SelectModel(model) => {
@@ -741,7 +743,7 @@ async fn drive_ui(
                 }
             });
             if let Err(error) = result {
-                tracing::error!(%error, "could not handle HEX status item action");
+                tracing::error!(%error, "could not handle Hex status item action");
                 return;
             }
         }
@@ -860,7 +862,7 @@ async fn drive_ui(
                     meeting_state = MeetingMenuState::Idle;
                     ui.show_meeting_window(
                         offer_window.take(),
-                        "could not open HEX for meeting failure",
+                        "could not open Hex for meeting failure",
                         cx,
                         |window, cx| window.meeting_failed(title, error, cx),
                     )
@@ -1224,12 +1226,10 @@ fn open_panel(
     timeout: Option<Duration>,
     cx: &mut App,
 ) -> gpui::Result<WindowHandle<MeetingPanel>> {
-    let deadline = timeout.map(|timeout| (Instant::now(), timeout));
     let handle = cx.open_window(panel_options(cx), |_, cx| {
         cx.new(|_| MeetingPanel {
             kind,
             commands,
-            deadline,
             copied: false,
         })
     })?;
@@ -1270,18 +1270,11 @@ enum PanelKind {
 struct MeetingPanel {
     kind: PanelKind,
     commands: SyncSender<ControllerCommand>,
-    deadline: Option<(Instant, Duration)>,
     copied: bool,
 }
 
 impl Render for MeetingPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let remaining = self.deadline.map(|(opened, timeout)| {
-            1.0 - (opened.elapsed().as_secs_f32() / timeout.as_secs_f32()).clamp(0.0, 1.0)
-        });
-        if remaining.is_some() {
-            window.request_animation_frame();
-        }
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (dot, title, subtitle, actions) = match &self.kind {
             PanelKind::Offer(candidate) => {
                 let dismiss = self.commands.clone();
@@ -1293,52 +1286,60 @@ impl Render for MeetingPanel {
                 } else {
                     format!("{} call detected", candidate.source.label())
                 };
-                let seconds = self
-                    .deadline
-                    .map(|(opened, timeout)| timeout.saturating_sub(opened.elapsed()).as_secs() + 1)
-                    .unwrap_or_default();
                 (
-                    rgb(0xd4d4d4),
+                    TEXT_SECONDARY,
                     title,
-                    format!("Record locally? Tell participants · {seconds}s"),
+                    "Record locally? Tell participants.".to_string(),
                     div()
                         .flex()
                         .gap_2()
-                        .child(secondary_button("not-now", "Not Now", move |window, _| {
-                            let _ = dismiss.try_send(ControllerCommand::Dismiss);
-                            window.remove_window();
-                        }))
-                        .child(primary_button("record", "Record", move |window, _| {
-                            let command = if is_preview {
-                                ControllerCommand::Dismiss
-                            } else {
-                                ControllerCommand::Record(candidate.clone())
-                            };
-                            if record.try_send(command).is_ok() {
+                        .child(capsule_button(
+                            ButtonKind::Secondary,
+                            "not-now",
+                            "Not now",
+                            move |window, _| {
+                                let _ = dismiss.try_send(ControllerCommand::Dismiss);
                                 window.remove_window();
-                            }
-                        })),
+                            },
+                        ))
+                        .child(capsule_button(
+                            ButtonKind::Primary,
+                            "record",
+                            "Record",
+                            move |window, _| {
+                                let command = if is_preview {
+                                    ControllerCommand::Dismiss
+                                } else {
+                                    ControllerCommand::Record(candidate.clone())
+                                };
+                                if record.try_send(command).is_ok() {
+                                    window.remove_window();
+                                }
+                            },
+                        )),
                 )
             }
             PanelKind::CallEnded { app } => {
                 let stop = self.commands.clone();
                 (
-                    rgb(0xff5f57),
+                    DANGER,
                     format!("{app} left the call"),
-                    "HEX is still recording.".into(),
+                    "Hex is still recording.".into(),
                     div()
                         .flex()
                         .gap_2()
-                        .child(secondary_button(
+                        .child(capsule_button(
+                            ButtonKind::Secondary,
                             "keep-recording",
-                            "Keep Recording",
+                            "Keep recording",
                             |window, _| {
                                 window.remove_window();
                             },
                         ))
-                        .child(primary_button(
+                        .child(capsule_button(
+                            ButtonKind::Primary,
                             "stop-meeting",
-                            "Stop & Transcribe",
+                            "Stop & transcribe",
                             move |window, _| {
                                 if stop.try_send(ControllerCommand::Stop).is_ok() {
                                     window.remove_window();
@@ -1376,7 +1377,7 @@ impl Render for MeetingPanel {
                     format!("Ready · {title}")
                 };
                 (
-                    rgb(0x5ac46a),
+                    SUCCESS,
                     title,
                     subtitle,
                     div()
@@ -1384,7 +1385,8 @@ impl Render for MeetingPanel {
                         .gap_2()
                         .when_some(copy_path, |actions, path| {
                             let label = if self.copied { "Copied" } else { "Copy" };
-                            actions.child(secondary_button(
+                            actions.child(capsule_button(
+                                ButtonKind::Secondary,
                                 "copy-transcript",
                                 label,
                                 move |_, cx| match std::fs::read_to_string(&path) {
@@ -1402,7 +1404,8 @@ impl Render for MeetingPanel {
                             ))
                         })
                         .when_some(reveal_path, |actions, path| {
-                            actions.child(primary_button(
+                            actions.child(capsule_button(
+                                ButtonKind::Primary,
                                 "reveal-transcript",
                                 "Reveal",
                                 move |window, _| {
@@ -1414,22 +1417,21 @@ impl Render for MeetingPanel {
                 )
             }
         };
-        div().size_full().p(px(4.0)).child(
+        div().size_full().p_1().child(
             div()
-                .relative()
                 .size_full()
                 .flex()
                 .items_center()
                 .gap_3()
                 .pl_4()
                 .pr_2()
-                .bg(rgb(0x161616))
+                .bg(rgb(CANVAS))
                 .border_1()
-                .border_color(rgb(0x303030))
+                .border_color(rgb(LINE_STRONG))
                 .rounded_full()
                 .shadow_lg()
                 .overflow_hidden()
-                .child(div().flex_none().size(px(8.0)).rounded_full().bg(dot))
+                .child(status_dot(dot).size_2())
                 .child(
                     div()
                         .flex_1()
@@ -1437,77 +1439,27 @@ impl Render for MeetingPanel {
                         .flex()
                         .flex_col()
                         .child(
-                            div()
-                                .text_size(px(13.0))
+                            truncated_line(BODY, title)
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xf1f1f1))
-                                .overflow_x_hidden()
-                                .truncate()
-                                .child(title),
+                                .text_color(rgb(TEXT_PRIMARY)),
                         )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(0x8f8f8f))
-                                .overflow_x_hidden()
-                                .truncate()
-                                .child(subtitle),
-                        ),
+                        .child(truncated_line(CAPTION, subtitle).text_color(rgb(TEXT_TERTIARY))),
                 )
-                .child(actions.flex_none())
-                .when_some(remaining, |panel, remaining| {
-                    panel.child(
-                        div()
-                            .absolute()
-                            .bottom_0()
-                            .left_0()
-                            .h(px(2.0))
-                            .w(px((PANEL_WIDTH - 8.0) * remaining))
-                            .bg(rgb(0x5a5a5a)),
-                    )
-                }),
+                .child(actions.flex_none()),
         )
     }
 }
 
-fn primary_button(
+/// Capsule buttons are the shared buttons in the capsule's pill shape.
+fn capsule_button(
+    kind: ButtonKind,
     id: &'static str,
     label: &'static str,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    button(id, label, rgb(0xe8e8e8), rgb(0x111111), on_click)
-}
-
-fn secondary_button(
-    id: &'static str,
-    label: &'static str,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    button(id, label, rgb(0x262626), rgb(0xbdbdbd), on_click)
-}
-
-fn button(
-    id: &'static str,
-    label: &'static str,
-    background: Rgba,
-    foreground: Rgba,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
+    button(kind, label)
         .id(id)
-        .h(px(32.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .justify_center()
         .rounded_full()
-        .bg(background)
-        .text_size(px(12.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(foreground)
-        .hover(|style| style.opacity(0.86))
-        .active(|style| style.opacity(0.8))
-        .child(label)
         .on_click(move |_, window, cx| on_click(window, cx))
 }
 

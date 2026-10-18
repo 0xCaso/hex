@@ -470,7 +470,7 @@ Show Dock icon off                       // maintain.dock-policy
 ```ts
 Settings > Launch at login               // maintain.login-item
 ├── Open -> Checking until macOS returns the initial state
-├── Refresh / toggle / Open Settings -> One persistent background worker
+├── Refresh / toggle / Open settings -> One persistent background worker
 │   └── One active request; latest pending user action precedes the next refresh
 ├── Failed toggle -> Show error and reconcile with actual macOS state when available
 └── Close Settings -> Release channels without waiting for an active native call
