@@ -10,9 +10,9 @@ Linked checks are locators unless an executed result is recorded below.
 ## How To Get To It
 
 ```ts
-Settings > MEETINGS > Meetings (beta)               // meetings.opt-in; off by default
+Settings > Meetings > Meetings (beta)               // meetings.opt-in; off by default
 ├── On -> Meetings pane, menu-bar items, call detection, Option-Control-V
-│   ├── Screen & System Audio Recording missing -> "Open Settings" row
+│   ├── Screen & System Audio Recording missing -> "Open settings" row
 │   ├── Transcript folder -> ~/Documents/Hex Meetings by default; Reveal / choose
 │   └── Summarize with Apple Intelligence -> on by default; one-line availability
 └── Off -> Controller idles; no microphone-activity inspection, pane, or shortcut
@@ -35,8 +35,8 @@ Zoom / Teams / Slack huddle / FaceTime / browser call uses the microphone
   -> 4 stable observations (about 2 s)              // meetings.detect
   -> Capsule below the menu bar, focus-free          // meetings.offer
      ├── Record -> Start recording
-     ├── Not Now -> Close
-     └── 20 s countdown -> Close                     // never records on timeout
+     ├── Not now -> Close
+     └── 20 s timeout -> Close                       // never records on timeout
   -> Same call is snoozed until its app is off the microphone for about 60 s
 ```
 
@@ -64,7 +64,7 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
   -> Settings window may stay closed
 
 Detected app leaves the microphone for about 3 s     // meetings.call-ended
-  -> "Zoom left the call" capsule: Keep Recording / Stop & Transcribe
+  -> "Zoom left the call" capsule: Keep recording / Stop & transcribe
   -> No timeout; nothing stops automatically
 ```
 
@@ -203,8 +203,8 @@ List (grouped Today / Yesterday / date)
     └── Recording (red dot) / Transcribing / Interrupted / Failed; Ready in detail
 Detail
 ├── Title, status chip, date · time · duration · app
-├── Actions: Copy Summary, Copy Transcript, Reveal Markdown, Summarize /
-│   Regenerate Summary, Rename, Delete (finished meetings only for the last four)
+├── Actions: Copy summary, Copy transcript, Reveal Markdown, Summarize /
+│   Regenerate summary, Rename, Delete (finished meetings only for the last four)
 ├── Errors at the top of the scroll area
 ├── Summary: one paragraph, at most two sentences
 └── Transcript: Them left, You right in accent; merged turns; timestamps;

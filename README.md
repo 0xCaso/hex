@@ -58,7 +58,7 @@ Or install manually:
 - **Accessibility** lets HEX paste into the foreground app. Drag the HEX tile into the list.
 - **Transcription model** downloads the speech model that runs locally.
 
-HEX checks for signed updates automatically. Use **HEX > Check for Updates...**
+HEX checks for signed updates automatically. Use **Hex > Check for Updates…**
 to check immediately.
 
 Organizations that manage app versions themselves can turn off in-app updates,
