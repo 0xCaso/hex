@@ -11,7 +11,8 @@ Panes compose components and name tokens. They never write a raw colour, type
 size, line height, font family, or radius. The test
 `design_tokens::tests::desktop_sources_use_tokens_instead_of_raw_styles` fails on
 `rgb(0x…)`, `rgba(0x…)`, `.text_size(`, `.line_height(px(`, `.font_family(`,
-`.rounded(px(`, `.rounded_sm/md/lg()`, and `.text_xs/sm/base/lg/xl()` in
+`.rounded(px(`, `.rounded_sm/md/lg()`, `.text_xs/sm/base/lg/xl()`, and
+`.truncate()` in
 `app_window`, `desktop_ui`, `desktop_transcription_picker`, `linux_app`,
 `meeting_watcher`, and `text_input`.
 
@@ -29,8 +30,9 @@ outside the system: its glossy capsule is hand-tuned in HUD Lab.
    step already owns.
 4. **Sentence case, one name.** Labels, buttons, section labels, and titles use
    sentence case. The product is "Hex" everywhere in the UI.
-5. **One icon set.** Use `Icon` / `NavigationIcon`: outline SF Symbols at medium
-   weight on macOS. Never draw an icon with text glyphs or letters.
+5. **One icon set.** Use `Icon` / `NavigationIcon`: line-weight SF Symbols at
+   medium weight on macOS, never `.fill` variants. Never draw an icon with text
+   glyphs or letters.
 6. **Verify by looking.** Capture every pane you touched with
    `scripts/capture-preview.sh` (see [Verification](#verification)).
 
@@ -184,8 +186,9 @@ Meeting capsules are pill-shaped. They use the shared buttons with
 - Use `Icon` (`ArrowRight`, `ChevronDown`, `Close`, `DragHandle`, `Globe`,
   `Plus`) via `icon(Icon, colour)` at `ICON_SIZE_SMALL`, or `sized_icon` for a
   different size. Use `NavigationIcon` for the sidebar.
-- On macOS these are outline SF Symbols at medium weight, monochrome. On Linux
-  they fall back to Heroicons (navigation) and matching glyphs (inline).
+- On macOS these are line-weight SF Symbols (no `.fill` variants) at medium
+  weight, monochrome. On Linux they fall back to Heroicons (navigation) and
+  matching glyphs (inline).
 - Colour icons with a text token: tertiary at rest, primary when selected or
   hovered.
 - A web page or other item without an app icon shows `Icon::Globe` inside the
@@ -235,9 +238,9 @@ Buttons         7 looks (header_button, canvas_button, compact_button, blue fill
 Control height  24 26 28 30 32 34 36 -> 30 (CONTROL_HEIGHT) / 24 (small)
 Section labels  16 ALL CAPS -> sentence case
 Product name    "HEX" in window title, menus, copy -> "Hex"
-Icons           filled and outline SF Symbols, "×" "+" "≡" "→" glyphs, letter
+Icons           mixed filled and line SF Symbols, "×" "+" "≡" "→" glyphs, letter
                 monograms -> one outline Icon set, globe for web pages
-Truncation      .truncate() clipped or wrapped in flex rows -> truncated_line
+Truncation      .truncate() clipped mid-glyph or kept a stale width -> truncated_line
 Pane geometry   header inset 32, list+detail bodies inset 20 (cards overhung the
                 header rule by 12 px) -> one PANE_GUTTER owned by pane_body
 ```

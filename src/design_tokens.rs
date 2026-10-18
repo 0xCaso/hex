@@ -243,7 +243,8 @@ mod tests {
     }
 
     /// Raw styling values belong here. A pane that writes a literal colour,
-    /// font size, line height, or radius bypasses the design system.
+    /// font size, line height, or radius, or truncates text by hand, bypasses
+    /// the design system.
     #[test]
     fn desktop_sources_use_tokens_instead_of_raw_styles() {
         const SOURCES: &[(&str, &str)] = &[
@@ -274,6 +275,8 @@ mod tests {
             ".text_base()",
             ".text_lg()",
             ".text_xl()",
+            // One-line text goes through `desktop_ui::truncated_line`.
+            ".truncate()",
         ];
         let mut violations = Vec::new();
         for (file, source) in SOURCES {

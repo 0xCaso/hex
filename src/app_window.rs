@@ -2701,6 +2701,7 @@ impl AppWindow {
                         .gap_5()
                         .child(pane_list(
                             "history-list",
+                            PANE_LIST_WIDTH,
                             if retention_off {
                                 Some("History is off. New dictations are not retained.")
                             } else if self.history_entries.is_empty()
@@ -4847,20 +4848,14 @@ impl AppWindow {
                     pane_content()
                         .flex_row()
                         .gap_5()
-                        .child(
-                            div()
-                                .id("modes-list")
-                                .w(px(PANE_LIST_WIDTH_COMPACT))
-                                .h_full()
-                                .flex_none()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    panel().id("mode-list-card").overflow_y_scroll().child(
-                                        div().p_2().flex().flex_col().gap_1().children(rows),
-                                    ),
-                                ),
-                        )
+                        .child(pane_list(
+                            "modes-list",
+                            PANE_LIST_WIDTH_COMPACT,
+                            None,
+                            "",
+                            None,
+                            rows,
+                        ))
                         .child(detail),
                 ),
             )
@@ -6271,6 +6266,7 @@ impl AppWindow {
 
         let list = pane_list(
             "meetings-list",
+            PANE_LIST_WIDTH,
             (visible.is_empty() && self.meetings_error.is_none()).then_some(if searching {
                 "No meetings match."
             } else {
@@ -6915,6 +6911,7 @@ impl AppWindow {
                                         .child(
                                             pane_list(
                                                 "commands-list",
+                                                PANE_LIST_WIDTH,
                                                 no_commands.then_some(if query.is_empty() {
                                                     "No commands yet."
                                                 } else {
@@ -7093,6 +7090,7 @@ impl AppWindow {
                         .gap_5()
                         .child(pane_list(
                             "activity-list",
+                            PANE_LIST_WIDTH,
                             (self.events.is_empty() && self.activity.error.is_none())
                                 .then_some("No activity yet."),
                             "Activity could not be loaded.",

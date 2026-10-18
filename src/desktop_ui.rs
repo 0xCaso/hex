@@ -26,13 +26,13 @@ pub(crate) enum NavigationIcon {
 }
 
 impl NavigationIcon {
-    /// Outline symbols only, so no sidebar item reads heavier than another.
+    /// Line-weight symbols only, so no sidebar item reads heavier than another.
     #[cfg(target_os = "macos")]
     fn sf_symbol(self) -> &'static str {
         match self {
             Self::Settings => "slider.horizontal.3",
             Self::Modes => "square.grid.2x2",
-            Self::VoiceAction => "wand.and.stars",
+            Self::VoiceAction => "sparkle",
             Self::Commands => "command",
             Self::History => "clock",
             Self::Meetings => "calendar",
@@ -89,7 +89,7 @@ fn navigation_icon(icon: NavigationIcon, selected: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// The one inline icon set. On macOS every icon is an outline SF Symbol at
+/// The one inline icon set. On macOS every icon is a line-weight SF Symbol at
 /// medium weight; Linux, without SF Symbols, falls back to a matching glyph.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icon {
@@ -309,11 +309,13 @@ pub(crate) fn pane_content() -> Div {
         .flex_col()
 }
 
-/// The list column of a list+detail pane: a [`PANE_LIST_WIDTH`] scrolling
-/// card with its empty notice and load error ahead of its rows. Callers
-/// decide when `empty` applies.
+/// The list column of a list+detail pane: a scrolling card `width` wide
+/// ([`PANE_LIST_WIDTH`], or [`PANE_LIST_WIDTH_COMPACT`] beside an editor) with
+/// its empty notice and load error ahead of its rows. Callers decide when
+/// `empty` applies.
 pub(crate) fn pane_list(
     id: impl Into<ElementId>,
+    width: f32,
     empty: Option<&'static str>,
     error_title: &'static str,
     error: Option<String>,
@@ -321,7 +323,7 @@ pub(crate) fn pane_list(
 ) -> Stateful<Div> {
     panel()
         .id(id)
-        .w(px(PANE_LIST_WIDTH))
+        .w(px(width))
         .h_full()
         .flex_none()
         .overflow_y_scroll()
@@ -330,9 +332,11 @@ pub(crate) fn pane_list(
             list.child(error_message(error_title, error))
         })
         .when(!rows.is_empty(), |list| {
+            // A scrolling card gives its content no definite width, which
+            // truncated rows need, so the column states its own.
             list.child(
                 div()
-                    .w(px(PANE_LIST_WIDTH - 2.0))
+                    .w(px(width - 2.0))
                     .p_2()
                     .flex()
                     .flex_col()
@@ -389,9 +393,12 @@ pub(crate) fn list_row_meta(text: impl IntoElement, selected: bool) -> Div {
 
 /// One line that ends in an ellipsis when it overflows.
 ///
-/// GPUI truncates only text first measured against a definite width, so the
-/// line is laid out absolutely inside a one-line box that takes the
-/// available width and contributes none of its own. Add `flex_1` in rows.
+/// GPUI truncates text against the width it is measured at. The line is laid
+/// out absolutely inside a one-line box, so it is measured only at the box's
+/// width and contributes no width of its own; add `flex_1` in rows. It wraps
+/// (clamped to one line) instead of using GPUI's `truncate`, because GPUI keeps
+/// the first measurement of non-wrapping text, and block ancestors sizing
+/// themselves to their content lay the line out at intermediate widths first.
 pub(crate) fn truncated_line(step: TypeStep, text: impl IntoElement) -> Div {
     div()
         .relative()
@@ -406,7 +413,9 @@ pub(crate) fn truncated_line(step: TypeStep, text: impl IntoElement) -> Div {
                 .top_0()
                 .left_0()
                 .right_0()
-                .truncate()
+                .overflow_hidden()
+                .text_ellipsis()
+                .line_clamp(1)
                 .child(text),
         )
 }
@@ -1098,45 +1107,160 @@ mod layout_tests {
 
     const LONG: &str = "The parser needs a retry when the socket drops during the reconnect";
 
-    /// A list-like row: truncating title beside a fixed timestamp, inside a
-    /// fixed-width column, as History and Meetings render it.
-    struct TruncatedRow {
+    /// Renders `build` around one measured text so a test can read how GPUI
+    /// shaped (and possibly truncated) it.
+    struct Probe {
+        text: &'static str,
+        build: fn(StyledText) -> AnyElement,
         layout: Rc<RefCell<Option<TextLayout>>>,
     }
 
-    impl Render for TruncatedRow {
+    impl Render for Probe {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let text = StyledText::new(LONG);
+            let text = StyledText::new(self.text);
             *self.layout.borrow_mut() = Some(text.layout().clone());
-            div().w(px(PANE_LIST_WIDTH)).flex().flex_col().child(
-                list_row(false)
-                    .flex_row()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(truncated_line(BODY, text))
-                            .child(list_row_meta("Dictation · Zed", false)),
-                    )
-                    .child(div().flex_none().child("1d ago")),
-            )
+            div().size_full().child((self.build)(text))
         }
     }
 
-    #[gpui::test]
-    fn truncated_line_ends_in_an_ellipsis_inside_flex_rows(cx: &mut TestAppContext) {
+    /// The shaped text and the share of its box it fills.
+    fn shape(
+        cx: &mut TestAppContext,
+        text: &'static str,
+        build: fn(StyledText) -> AnyElement,
+    ) -> (String, f32) {
         let layout = Rc::new(RefCell::new(None));
         let (_, cx) = cx.add_window_view({
             let layout = layout.clone();
-            |_, _| TruncatedRow { layout }
+            move |_, _| Probe {
+                text,
+                build,
+                layout,
+            }
         });
-        cx.simulate_resize(size(px(600.0), px(200.0)));
+        cx.simulate_resize(size(px(1000.0), px(400.0)));
         cx.run_until_parked();
-        let text = layout.borrow().as_ref().unwrap().text();
+        let layout = layout.borrow().clone().unwrap();
+        let shaped = layout.text();
+        let end = layout.position_for_index(shaped.len()).unwrap().x - layout.bounds().left();
+        (shaped, end / layout.bounds().size.width)
+    }
+
+    #[gpui::test]
+    fn truncated_line_fills_its_row_and_ends_in_an_ellipsis(cx: &mut TestAppContext) {
+        // History and Meetings list rows: a title beside a fixed timestamp.
+        let (text, filled) = shape(cx, LONG, |text| {
+            div()
+                .w(px(PANE_LIST_WIDTH))
+                .flex()
+                .flex_col()
+                .child(
+                    list_row(false)
+                        .flex_row()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(truncated_line(BODY, text))
+                                .child(list_row_meta("Dictation · Zed", false)),
+                        )
+                        .child(div().flex_none().child("1d ago")),
+                )
+                .into_any_element()
+        });
         assert!(text.ends_with('…'), "not truncated: {text:?}");
-        assert!(text.len() < LONG.len());
+        assert!(filled > 0.8, "{text:?} fills only {filled:.2} of its line");
+    }
+
+    #[gpui::test]
+    fn truncated_line_keeps_short_text_beside_a_tag(cx: &mut TestAppContext) {
+        // The meeting detail metadata row.
+        let (text, _) = shape(cx, "Today · 8:18 PM · 38 min · Zoom", |text| {
+            div()
+                .w(px(700.0))
+                .px_6()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(tag(Tone::Success, "Ready"))
+                        .child(truncated_line(FOOTNOTE, text).flex_1()),
+                )
+                .into_any_element()
+        });
+        assert_eq!(text, "Today · 8:18 PM · 38 min · Zoom");
+    }
+
+    #[gpui::test]
+    fn truncated_line_keeps_short_text_in_a_scrolling_list(cx: &mut TestAppContext) {
+        // The Modes list: rows inside a scrolling card.
+        let (text, _) = shape(cx, "Work notes", |text| {
+            pane_list(
+                "probe-list",
+                PANE_LIST_WIDTH_COMPACT,
+                None,
+                "",
+                None,
+                vec![
+                    list_row(true)
+                        .child(list_row_title(text, true))
+                        .into_any_element(),
+                ],
+            )
+            .into_any_element()
+        });
+        assert_eq!(text, "Work notes");
+    }
+
+    #[gpui::test]
+    fn truncated_line_survives_intrinsic_sizing_of_block_ancestors(cx: &mut TestAppContext) {
+        // A flex item's automatic minimum width lays its block subtree out at
+        // min-content width first; the line must still use its final width.
+        let (text, _) = shape(cx, "Uppercase transformation", |text| {
+            div()
+                .w(px(600.0))
+                .flex()
+                .child(
+                    div().flex_1().child(
+                        panel().child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .child(truncated_line(BODY, text).flex_1())
+                                .child(icon_button(ButtonKind::Ghost, Icon::Close)),
+                        ),
+                    ),
+                )
+                .into_any_element()
+        });
+        assert_eq!(text, "Uppercase transformation");
+    }
+
+    #[gpui::test]
+    fn truncated_line_keeps_short_text_in_a_disclosure(cx: &mut TestAppContext) {
+        // The OpenCode model picker trigger beside its Refresh button.
+        let (text, _) = shape(cx, "claude-sonnet-4-5", |text| {
+            div()
+                .w(px(500.0))
+                .flex()
+                .gap_3()
+                .child(
+                    disclosure_frame()
+                        .w_full()
+                        .flex_shrink()
+                        .child(truncated_line(FOOTNOTE, text).flex_1())
+                        .child(div().flex_none().child("Anthropic"))
+                        .child(icon(Icon::ChevronDown, TEXT_TERTIARY)),
+                )
+                .child(button(ButtonKind::Secondary, "Refresh"))
+                .into_any_element()
+        });
+        assert_eq!(text, "claude-sonnet-4-5");
     }
 }
