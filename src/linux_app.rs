@@ -11,6 +11,7 @@ use gpui::{
     WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
 };
 
+use crate::design_tokens::*;
 use crate::desktop_activity::DesktopActivity;
 use crate::desktop_host::{
     DesktopAction, DesktopHost, DesktopListenerSnapshot, DesktopShortcut, DesktopSnapshot,
@@ -22,10 +23,9 @@ use crate::desktop_transcription_picker::{
     render_transcription_picker, transcription_selection_is_active,
 };
 use crate::desktop_ui::{
-    LINE, MUTED, NavigationIcon, SIDEBAR_WIDTH, SURFACE, TEXT_SOFT, compact_button,
-    disclosure_button, hotkey_keycaps, navigation_item, pane_body, pane_content, pane_header,
-    segmented_control, segmented_item, settings_panel, settings_row, settings_section_label,
-    sidebar_frame, toggle, window_frame,
+    ButtonKind, NavigationIcon, button, disclosure_button, hotkey_keycaps, navigation_item,
+    pane_content, pane_header, pane_scroll_body, segmented_control, segmented_item, settings_panel,
+    settings_row, settings_section_label, sidebar_frame, status_dot, toggle, window_frame,
 };
 use crate::events::EventReader;
 use crate::linux_service::{
@@ -332,7 +332,7 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
             }) => {
                 let result = (|| -> Result<()> {
                     if stopping {
-                        return Err(color_eyre::eyre::eyre!("HEX service is stopping"));
+                        return Err(color_eyre::eyre::eyre!("Hex service is stopping"));
                     }
                     if let Some((owner, deadline)) = &mut editor {
                         if *owner == client {
@@ -405,7 +405,7 @@ pub fn open(start_hidden: bool, shutdown: &'static AtomicBool) -> Result<()> {
                     })
                 },
             )
-            .expect("could not open the HEX window");
+            .expect("could not open the Hex window");
         let app = window.update(cx, |_, _, cx| cx.entity()).unwrap();
         let hotkey_app = app.clone();
         cx.observe_keystrokes(move |event, _, cx| {
@@ -457,7 +457,7 @@ pub fn open(start_hidden: bool, shutdown: &'static AtomicBool) -> Result<()> {
         .detach();
         window
             .update(cx, |_, window, cx| {
-                window.set_window_title("HEX");
+                window.set_window_title("Hex");
                 let close_app = cx.entity().downgrade();
                 window.on_window_should_close(cx, move |_, cx| {
                     if close_app
@@ -1056,7 +1056,7 @@ impl DesktopHost for LinuxDesktopHost {
             }
             DesktopAction::RestartIntoUpdate => {
                 if let Err(error) = self.restart_into_update() {
-                    self.error = Some(format!("Could not restart HEX: {error:#}"));
+                    self.error = Some(format!("Could not restart Hex: {error:#}"));
                     return Err(error);
                 }
             }
@@ -1080,12 +1080,6 @@ impl DesktopHost for LinuxDesktopHost {
 impl LinuxApp {
     fn render_shared_navigation(&self) -> AnyElement {
         sidebar_frame()
-            .w(px(SIDEBAR_WIDTH))
-            .px(px(14.0))
-            .pt(px(52.0))
-            .pb_4()
-            .flex()
-            .flex_col()
             .child(
                 navigation_item(NavigationIcon::Settings, true)
                     .id("linux-nav-settings")
@@ -1114,7 +1108,7 @@ impl LinuxApp {
                     segmented_item(selected)
                         .id(("linux-sound-volume", index))
                         .child(label)
-                        .when(sound_volume_busy, |item| item.opacity(0.5))
+                        .when(sound_volume_busy, |item| item.opacity(DISABLED_OPACITY))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.quitting && !sound_volume_busy {
                                 let _ = this.host.set_sound_effect_volume(volume);
@@ -1123,27 +1117,25 @@ impl LinuxApp {
                         }))
                 }),
         );
-        let shortcut = if self.host.capturing_hotkey() {
-            div()
-                .w(px(180.0))
-                .h(px(34.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(rgb(TEXT_SOFT))
-                .bg(rgb(SURFACE))
-                .text_size(px(11.0))
-                .child(if running {
-                    "Stopping listener..."
-                } else {
-                    "Press a shortcut..."
-                })
-                .into_any_element()
-        } else {
-            hotkey_keycaps(snapshot.dictation_shortcut.clone(), 1.0)
-        };
+        let shortcut =
+            if self.host.capturing_hotkey() {
+                div()
+                    .h(px(CONTROL_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(status_dot(DANGER))
+                    .child(div().text_footnote().text_color(rgb(TEXT_SECONDARY)).child(
+                        if running {
+                            "Stopping listener…"
+                        } else {
+                            "Press a shortcut…"
+                        },
+                    ))
+                    .into_any_element()
+            } else {
+                hotkey_keycaps(snapshot.dictation_shortcut.clone(), 1.0)
+            };
         let update_ready = snapshot.update_status == DesktopUpdateStatus::ReadyToRestart;
         let transcription = &snapshot.transcription;
         let transcription_label = format!(
@@ -1159,25 +1151,18 @@ impl LinuxApp {
             .flex_col()
             .child(pane_header("Settings"))
             .child(
-                pane_body().child(div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .px_8()
-                    .pt_1()
-                    .pb_7()
-                    .child(
-                        div().w_full().flex().justify_center().child(
+                pane_scroll_body(
+                    "settings-scroll",
                             pane_content()
                                 .relative()
-                                .child(settings_section_label("LISTENER"))
+                                .child(settings_section_label("Listener"))
                                 .child(settings_panel().child(settings_row(
                                     "Dictation",
                                     "Global hotkey dictation",
                                     div().flex().items_center().gap_3()
-                                        .child(div().text_size(px(12.0)).text_color(rgb(MUTED))
+                                        .child(div().text_footnote().text_color(rgb(TEXT_TERTIARY))
                                             .child(snapshot.listener.status.clone()))
-                                        .child(compact_button(if running { "Stop" } else { "Start" })
+                                        .child(button(ButtonKind::Secondary, if running { "Stop" } else { "Start" })
                                         .id("linux-listener-toggle")
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if !this.quitting {
@@ -1192,25 +1177,25 @@ impl LinuxApp {
                                 )))
                                 .when_some(snapshot.listener.warning.clone(), |content, warning| {
                                     content.child(
-                                        div().id("linux-listener-warning").mt_3().p_3().rounded(px(6.0)).border_1().border_color(rgb(LINE))
-                                            .child(div().text_size(px(12.0)).child(warning))
-                                            .child(div().mt_2().text_size(px(12.0)).text_color(rgb(MUTED))
-                                                .child("Dictation still works. Release the hold shortcut or press the locked shortcut to finish. Free Escape in the other application; HEX retries on the next capture.")),
+                                        div().id("linux-listener-warning").mt_3().p_3().rounded(RADIUS_PANEL).border_1().border_color(rgb(LINE)).bg(rgb(SURFACE))
+                                            .child(div().text_footnote().child(warning))
+                                            .child(div().mt_2().text_footnote().text_color(rgb(TEXT_TERTIARY))
+                                                .child("Dictation still works. Release the hold shortcut or press the locked shortcut to finish. Free Escape in the other application; Hex retries on the next capture.")),
                                     )
                                 })
                                 .when_some(snapshot.operation_error.clone(), |content, error| {
                                     content.child(
-                                        div().mt_3().p_3().rounded(px(6.0)).border_1().border_color(rgb(LINE))
-                                            .child(div().text_size(px(12.0)).child(error))
+                                        div().mt_3().p_3().rounded(RADIUS_PANEL).border_1().border_color(rgb(DANGER_BORDER)).bg(rgb(DANGER_SURFACE))
+                                            .child(div().text_footnote().text_color(rgb(DANGER)).child(error))
                                             .child(div().mt_2().flex().gap_2()
-                                                .when(!running, |buttons| buttons.child(compact_button("Retry").id("linux-error-retry")
+                                                .when(!running, |buttons| buttons.child(button(ButtonKind::Secondary, "Retry").id("linux-error-retry")
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         if !this.quitting {
                                                             let _ = this.host.dispatch(DesktopAction::StartListening);
                                                             cx.notify();
                                                         }
                                                     }))))
-                                                .child(compact_button("Dismiss").id("linux-error-dismiss")
+                                                .child(button(ButtonKind::Secondary, "Dismiss").id("linux-error-dismiss")
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         let _ = this.host.dispatch(DesktopAction::ClearError);
                                                         cx.notify();
@@ -1218,9 +1203,9 @@ impl LinuxApp {
                                     )
                                 })
                                 .when_some(self.host.client.state.as_ref().and_then(|s| s.hud_limitation.clone()), |content, limitation| {
-                                    content.child(div().mt_3().text_size(px(12.0)).text_color(rgb(MUTED)).child(limitation))
+                                    content.child(div().mt_3().text_footnote().text_color(rgb(TEXT_TERTIARY)).child(limitation))
                                 })
-                                .child(settings_section_label("DICTATION"))
+                                .child(settings_section_label("Dictation"))
                                 .child(
                                     settings_panel()
                                         .child(settings_row(
@@ -1265,14 +1250,14 @@ impl LinuxApp {
                                         .when(editing, |panel| panel.child(settings_row(
                                             "Updating shortcut settings",
                                             "Listening resumes after the change if it was previously running.",
-                                            compact_button("Cancel").id("linux-cancel-shortcut")
+                                            button(ButtonKind::Secondary, "Cancel").id("linux-cancel-shortcut")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.host.cancel_settings_edit();
                                                     cx.notify();
                                                 })),
                                         ))),
                                 )
-                                .child(settings_section_label("BEHAVIOR"))
+                                .child(settings_section_label("Behavior"))
                                 .child(
                                     settings_panel().child(
                                         settings_row(
@@ -1281,7 +1266,7 @@ impl LinuxApp {
                                             toggle(if double_tap_lock { 1.0 } else { 0.0 }),
                                         )
                                         .id("double-tap-setting")
-                                        .when(editing, |row| row.opacity(0.5))
+                                        .when(editing, |row| row.opacity(DISABLED_OPACITY))
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 if !this.quitting && !editing {
@@ -1301,7 +1286,7 @@ impl LinuxApp {
                                             toggle(if paste_with_shift { 1.0 } else { 0.0 }),
                                         )
                                         .id("terminal-paste-setting")
-                                        .when(editing, |row| row.opacity(0.5))
+                                        .when(editing, |row| row.opacity(DISABLED_OPACITY))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if !this.quitting && !editing {
                                                 this.host.set_terminal_paste(!paste_with_shift);
@@ -1314,20 +1299,20 @@ impl LinuxApp {
                                         sound_volume,
                                     ).border_b_0()),
                                 )
-                                .child(settings_section_label("APPLICATION"))
+                                .child(settings_section_label("Application"))
                                 .child(
                                     settings_panel()
                                         .child(settings_row(
-                                            "HEX",
+                                            "Hex",
                                             "Private local dictation for Linux",
-                                            div().text_size(px(12.0)).text_color(rgb(MUTED)).child(
+                                            div().text_footnote().text_color(rgb(TEXT_TERTIARY)).child(
                                                 format!("Version {}", env!("CARGO_PKG_VERSION")),
                                             ),
                                         ))
                                         .child(settings_row(
-                                            "Close Settings",
+                                            "Close settings",
                                             "Dictation continues in the background service",
-                                            compact_button("Close")
+                                            button(ButtonKind::Secondary, "Close")
                                                 .id("linux-quit")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.request_quit();
@@ -1337,11 +1322,9 @@ impl LinuxApp {
                                         .when(update_ready, |panel| {
                                             panel.child(settings_row(
                                                 "Update ready",
-                                                "Restart into the verified Linux release.",
-                                                compact_button("Restart")
+                                                "Restart into the verified Linux release",
+                                                button(ButtonKind::Primary, "Restart")
                                                     .id("restart-update")
-                                                    .border_1()
-                                                    .border_color(rgb(LINE))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         let _ = this.host.dispatch(DesktopAction::RestartIntoUpdate);
                                                         cx.notify();
@@ -1349,8 +1332,7 @@ impl LinuxApp {
                                             ))
                                         }),
                                 ),
-                        ),
-                    )),
+                ),
             )
             .into_any_element()
     }
