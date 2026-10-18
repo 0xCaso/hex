@@ -3,7 +3,8 @@
 //! does which job.
 
 use gpui::{
-    AnyElement, Div, ElementId, FontWeight, IntoElement, Rgba, Stateful, div, prelude::*, px, rgb,
+    AnyElement, App, Div, ElementId, FontWeight, IntoElement, Pixels, Rgba, ShapedLine,
+    SharedString, Stateful, Window, canvas, div, prelude::*, px, rgb,
 };
 
 #[cfg(target_os = "linux")]
@@ -372,7 +373,7 @@ pub(crate) fn list_row(selected: bool) -> Div {
 }
 
 /// The title line of a [`list_row`].
-pub(crate) fn list_row_title(text: impl IntoElement, selected: bool) -> Div {
+pub(crate) fn list_row_title(text: impl Into<SharedString>, selected: bool) -> Div {
     truncated_line(BODY, text)
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(if selected {
@@ -383,7 +384,7 @@ pub(crate) fn list_row_title(text: impl IntoElement, selected: bool) -> Div {
 }
 
 /// The metadata line of a [`list_row`].
-pub(crate) fn list_row_meta(text: impl IntoElement, selected: bool) -> Div {
+pub(crate) fn list_row_meta(text: impl Into<SharedString>, selected: bool) -> Div {
     truncated_line(CAPTION, text).text_color(rgb(if selected {
         TEXT_SECONDARY
     } else {
@@ -391,33 +392,43 @@ pub(crate) fn list_row_meta(text: impl IntoElement, selected: bool) -> Div {
     }))
 }
 
-/// One line that ends in an ellipsis when it overflows.
+/// One line that ends in an ellipsis when it overflows. Add `flex_1` in rows.
 ///
-/// GPUI truncates text against the width it is measured at. The line is laid
-/// out absolutely inside a one-line box, so it is measured only at the box's
-/// width and contributes no width of its own; add `flex_1` in rows. It wraps
-/// (clamped to one line) instead of using GPUI's `truncate`, because GPUI keeps
-/// the first measurement of non-wrapping text, and block ancestors sizing
-/// themselves to their content lay the line out at intermediate widths first.
-pub(crate) fn truncated_line(step: TypeStep, text: impl IntoElement) -> Div {
+/// The line is shaped while painting, against the width its box finally
+/// receives. GPUI's own truncation measures text during layout, where
+/// ancestors sizing themselves to their content can hand it a provisional
+/// width that then sticks.
+pub(crate) fn truncated_line(step: TypeStep, text: impl Into<SharedString>) -> Div {
+    let text = text.into();
     div()
-        .relative()
         .w_full()
         .min_w_0()
         .h(px(step.line_height))
         .flex_shrink()
         .text_step(step)
         .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .line_clamp(1)
-                .child(text),
+            canvas(
+                move |bounds, window, cx| fit_line(text, bounds.size.width, window, cx),
+                |bounds, line, window, cx| {
+                    let _ = line.paint(bounds.origin, bounds.size.height, window, cx);
+                },
+            )
+            .size_full(),
         )
+}
+
+/// Shapes `text` in the inherited text style, cut to `width` with "…".
+fn fit_line(text: SharedString, width: Pixels, window: &mut Window, cx: &mut App) -> ShapedLine {
+    let style = window.text_style();
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    let mut runs = vec![style.to_run(text.len())];
+    let text = cx
+        .text_system()
+        .line_wrapper(style.font(), font_size)
+        .truncate_line(text, width, "…", &mut runs);
+    window
+        .text_system()
+        .shape_line(text, font_size, &runs, None)
 }
 
 /// A card: the elevated surface every grouped control and list sits on.
@@ -760,7 +771,7 @@ pub(crate) fn busy_label(label: impl IntoElement) -> Div {
 }
 
 /// A dropdown trigger: a secondary control with its value and a chevron.
-pub(crate) fn disclosure_button(label: impl IntoElement) -> Div {
+pub(crate) fn disclosure_button(label: impl Into<SharedString>) -> Div {
     disclosure_frame()
         .w(px(DISCLOSURE_WIDTH))
         .child(truncated_line(FOOTNOTE, label).flex_1())
@@ -1047,8 +1058,7 @@ mod tests {
 #[cfg(all(test, target_os = "macos"))]
 mod layout_tests {
     use super::*;
-    use gpui::{Context, Render, StyledText, TestAppContext, TextLayout, Window, size};
-    use std::{cell::RefCell, rc::Rc};
+    use gpui::{Context, Render, TestAppContext, Window, size};
 
     struct SettingsRow;
 
@@ -1107,54 +1117,61 @@ mod layout_tests {
 
     const LONG: &str = "The parser needs a retry when the socket drops during the reconnect";
 
-    /// Renders `build` around one measured text so a test can read how GPUI
-    /// shaped (and possibly truncated) it.
-    struct Probe {
-        text: &'static str,
-        build: fn(StyledText) -> AnyElement,
-        layout: Rc<RefCell<Option<TextLayout>>>,
-    }
+    struct Blank;
 
-    impl Render for Probe {
+    impl Render for Blank {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let text = StyledText::new(self.text);
-            *self.layout.borrow_mut() = Some(text.layout().clone());
-            div().size_full().child((self.build)(text))
+            div()
         }
     }
 
-    /// The shaped text and the share of its box it fills.
-    fn shape(
-        cx: &mut TestAppContext,
-        text: &'static str,
-        build: fn(StyledText) -> AnyElement,
-    ) -> (String, f32) {
-        let layout = Rc::new(RefCell::new(None));
-        let (_, cx) = cx.add_window_view({
-            let layout = layout.clone();
-            move |_, _| Probe {
-                text,
-                build,
-                layout,
-            }
+    #[gpui::test]
+    fn fit_line_cuts_only_overflowing_text_with_an_ellipsis(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Blank);
+        cx.update(|window, cx| {
+            let cut = fit_line(LONG.into(), px(120.0), window, cx);
+            assert!(cut.text.ends_with('…'), "not cut: {:?}", cut.text);
+            assert!(
+                cut.width <= px(120.0),
+                "{:?} is wider than its box",
+                cut.width
+            );
+            let whole = fit_line("Work notes".into(), px(400.0), window, cx);
+            assert_eq!(whole.text.as_ref(), "Work notes");
         });
+    }
+
+    /// Renders `build` and reports the width of the element it marks `line`.
+    struct Probe(fn() -> AnyElement);
+
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child((self.0)())
+        }
+    }
+
+    fn line_width(cx: &mut TestAppContext, build: fn() -> AnyElement) -> f32 {
+        let (_, cx) = cx.add_window_view(move |_, _| Probe(build));
         cx.simulate_resize(size(px(1000.0), px(400.0)));
         cx.run_until_parked();
-        let layout = layout.borrow().clone().unwrap();
-        let shaped = layout.text();
-        let end = layout.position_for_index(shaped.len()).unwrap().x - layout.bounds().left();
-        (shaped, end / layout.bounds().size.width)
+        f32::from(cx.debug_bounds("line").unwrap().size.width)
+    }
+
+    fn line(step: TypeStep, text: &'static str) -> Div {
+        truncated_line(step, text).debug_selector(|| "line".into())
     }
 
     #[gpui::test]
-    fn truncated_line_fills_its_row_and_ends_in_an_ellipsis(cx: &mut TestAppContext) {
-        // History and Meetings list rows: a title beside a fixed timestamp.
-        let (text, filled) = shape(cx, LONG, |text| {
-            div()
-                .w(px(PANE_LIST_WIDTH))
-                .flex()
-                .flex_col()
-                .child(
+    fn truncated_line_takes_the_row_beside_a_timestamp(cx: &mut TestAppContext) {
+        // History and Meetings list rows.
+        let width = line_width(cx, || {
+            pane_list(
+                "probe-list",
+                PANE_LIST_WIDTH,
+                None,
+                "",
+                None,
+                vec![
                     list_row(false)
                         .flex_row()
                         .gap_3()
@@ -1164,21 +1181,22 @@ mod layout_tests {
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .child(truncated_line(BODY, text))
+                                .child(line(BODY, LONG))
                                 .child(list_row_meta("Dictation · Zed", false)),
                         )
-                        .child(div().flex_none().child("1d ago")),
-                )
-                .into_any_element()
+                        .child(div().flex_none().child("1d ago"))
+                        .into_any_element(),
+                ],
+            )
+            .into_any_element()
         });
-        assert!(text.ends_with('…'), "not truncated: {text:?}");
-        assert!(filled > 0.8, "{text:?} fills only {filled:.2} of its line");
+        assert!(width > 180.0 && width < PANE_LIST_WIDTH, "{width}");
     }
 
     #[gpui::test]
-    fn truncated_line_keeps_short_text_beside_a_tag(cx: &mut TestAppContext) {
+    fn truncated_line_takes_the_row_beside_a_tag(cx: &mut TestAppContext) {
         // The meeting detail metadata row.
-        let (text, _) = shape(cx, "Today · 8:18 PM · 38 min · Zoom", |text| {
+        let width = line_width(cx, || {
             div()
                 .w(px(700.0))
                 .px_6()
@@ -1190,39 +1208,18 @@ mod layout_tests {
                         .items_center()
                         .gap_2()
                         .child(tag(Tone::Success, "Ready"))
-                        .child(truncated_line(FOOTNOTE, text).flex_1()),
+                        .child(line(FOOTNOTE, "Today · 8:18 PM · 38 min · Zoom").flex_1()),
                 )
                 .into_any_element()
         });
-        assert_eq!(text, "Today · 8:18 PM · 38 min · Zoom");
-    }
-
-    #[gpui::test]
-    fn truncated_line_keeps_short_text_in_a_scrolling_list(cx: &mut TestAppContext) {
-        // The Modes list: rows inside a scrolling card.
-        let (text, _) = shape(cx, "Work notes", |text| {
-            pane_list(
-                "probe-list",
-                PANE_LIST_WIDTH_COMPACT,
-                None,
-                "",
-                None,
-                vec![
-                    list_row(true)
-                        .child(list_row_title(text, true))
-                        .into_any_element(),
-                ],
-            )
-            .into_any_element()
-        });
-        assert_eq!(text, "Work notes");
+        assert!(width > 500.0, "{width}");
     }
 
     #[gpui::test]
     fn truncated_line_survives_intrinsic_sizing_of_block_ancestors(cx: &mut TestAppContext) {
-        // A flex item's automatic minimum width lays its block subtree out at
-        // min-content width first; the line must still use its final width.
-        let (text, _) = shape(cx, "Uppercase transformation", |text| {
+        // A flex item's automatic minimum width sizes its block subtree to
+        // content first: the transformation rows in Modes.
+        let width = line_width(cx, || {
             div()
                 .w(px(600.0))
                 .flex()
@@ -1232,35 +1229,13 @@ mod layout_tests {
                             div()
                                 .flex()
                                 .items_center()
-                                .child(truncated_line(BODY, text).flex_1())
+                                .child(line(BODY, "Smart punctuation").flex_1())
                                 .child(icon_button(ButtonKind::Ghost, Icon::Close)),
                         ),
                     ),
                 )
                 .into_any_element()
         });
-        assert_eq!(text, "Uppercase transformation");
-    }
-
-    #[gpui::test]
-    fn truncated_line_keeps_short_text_in_a_disclosure(cx: &mut TestAppContext) {
-        // The OpenCode model picker trigger beside its Refresh button.
-        let (text, _) = shape(cx, "claude-sonnet-4-5", |text| {
-            div()
-                .w(px(500.0))
-                .flex()
-                .gap_3()
-                .child(
-                    disclosure_frame()
-                        .w_full()
-                        .flex_shrink()
-                        .child(truncated_line(FOOTNOTE, text).flex_1())
-                        .child(div().flex_none().child("Anthropic"))
-                        .child(icon(Icon::ChevronDown, TEXT_TERTIARY)),
-                )
-                .child(button(ButtonKind::Secondary, "Refresh"))
-                .into_any_element()
-        });
-        assert_eq!(text, "claude-sonnet-4-5");
+        assert!(width > 500.0, "{width}");
     }
 }
