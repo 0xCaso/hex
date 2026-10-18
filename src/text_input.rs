@@ -9,12 +9,12 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::desktop_ui::{
-    ACCENT, CANVAS, LINE, MULTILINE_INPUT_HEIGHT, MUTED, TEXT, TEXT_INPUT_HEIGHT,
+use crate::design_tokens::{
+    ACCENT, BODY, CANVAS, CONTROL_HEIGHT, LINE, MULTILINE_INPUT_HEIGHT, RADIUS_CONTROL, SELECTION,
+    TEXT_PRIMARY, TEXT_TERTIARY, Typography,
 };
 
 const FOCUS: u32 = ACCENT;
-const SELECTION: u32 = 0x3b5cf655;
 
 actions!(
     text_input,
@@ -1060,7 +1060,7 @@ impl Element for TextElement {
         let selected_range = input.selected_range.clone();
         let style = window.text_style();
         let (display_text, color) = if content.is_empty() {
-            (input.placeholder.clone(), rgb(MUTED).into())
+            (input.placeholder.clone(), rgb(TEXT_TERTIARY).into())
         } else {
             (content, style.color)
         };
@@ -1131,7 +1131,7 @@ impl Element for TextElement {
                         point(bounds.left() + caret.x, bounds.top() + caret.y - scroll_y),
                         size(px(1.), layout.line_height),
                     ),
-                    rgb(TEXT),
+                    rgb(TEXT_PRIMARY),
                 )
             });
             let selections = if selected_range.is_empty() {
@@ -1173,7 +1173,7 @@ impl Element for TextElement {
                         ),
                         size(px(1.), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(TEXT),
+                    rgb(TEXT_PRIMARY),
                 )),
             )
         } else {
@@ -1373,18 +1373,17 @@ impl Render for TextInput {
             .h(px(if self.multiline {
                 MULTILINE_INPUT_HEIGHT
             } else {
-                TEXT_INPUT_HEIGHT
+                CONTROL_HEIGHT
             }))
-            .px(px(10.))
-            .py(px(7.))
+            .px_2p5()
+            .py(px((CONTROL_HEIGHT - 2.0 - BODY.line_height) / 2.0))
             .overflow_hidden()
-            .rounded_sm()
+            .rounded(RADIUS_CONTROL)
             .border_1()
             .border_color(rgb(border))
             .bg(rgb(CANVAS))
-            .text_color(rgb(TEXT))
-            .text_size(px(14.))
-            .line_height(px(20.))
+            .text_color(rgb(TEXT_PRIMARY))
+            .text_body()
             .child(TextElement { input: cx.entity() })
     }
 }

@@ -53,7 +53,7 @@ for _ in 0..<200 {
         }
         let title = window[kCGWindowName as String] as? String
         let bounds = window[kCGWindowBounds as String] as? [String: CGFloat]
-        return (title == nil || title == "" || title == "HEX")
+        return (title == nil || title == "" || title == "Hex")
             && (bounds?["Width"] ?? 0) >= 800
             && (bounds?["Height"] ?? 0) >= 400
     }

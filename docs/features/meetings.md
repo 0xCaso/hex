@@ -10,9 +10,9 @@ Linked checks are locators unless an executed result is recorded below.
 ## How To Get To It
 
 ```ts
-Settings > MEETINGS > Meetings (beta)               // meetings.opt-in; off by default
+Settings > Meetings > Meetings (beta)               // meetings.opt-in; off by default
 ├── On -> Meetings pane, menu-bar items, call detection, Option-Control-V
-│   ├── Screen & System Audio Recording missing -> "Open Settings" row
+│   ├── Screen & System Audio Recording missing -> "Open settings" row
 │   ├── Transcript folder -> ~/Documents/Hex Meetings by default; Reveal / choose
 │   └── Summarize with Apple Intelligence -> on by default; one-line availability
 └── Off -> Controller idles; no microphone-activity inspection, pane, or shortcut
@@ -35,8 +35,8 @@ Zoom / Teams / Slack huddle / FaceTime / browser call uses the microphone
   -> 4 stable observations (about 2 s)              // meetings.detect
   -> Capsule below the menu bar, focus-free          // meetings.offer
      ├── Record -> Start recording
-     ├── Not Now -> Close
-     └── 20 s countdown -> Close                     // never records on timeout
+     ├── Not now -> Close
+     └── 20 s timeout -> Close                       // never records on timeout
   -> Same call is snoozed until its app is off the microphone for about 60 s
 ```
 
@@ -64,7 +64,7 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
   -> Settings window may stay closed
 
 Detected app leaves the microphone for about 3 s     // meetings.call-ended
-  -> "Zoom left the call" capsule: Keep Recording / Stop & Transcribe
+  -> "Zoom left the call" capsule: Keep recording / Stop & transcribe
   -> No timeout; nothing stops automatically
 ```
 
@@ -197,14 +197,18 @@ Option-Control-V -> Paste meeting turns added since the last paste
 ### Meetings Pane
 
 ```ts
-Header: Search meetings (title, app, notes, final transcript) + Start / Stop
+Header: Search meetings (title, app, notes, final transcript) + Start recording
+        (the pane's one Primary button) / Stop & transcribe (Secondary, red dot,
+        elapsed time)
 List (grouped Today / Yesterday / date)
 └── Row: title (generated when present) · time · length · app · status chip
     └── Recording (red dot) / Transcribing / Interrupted / Failed; Ready in detail
 Detail
 ├── Title, status chip, date · time · duration · app
-├── Actions: Copy Summary, Copy Transcript, Reveal Markdown, Summarize /
-│   Regenerate Summary, Rename, Delete (finished meetings only for the last four)
+├── Actions: Copy transcript, Rename (finished only), "…" overflow menu
+│   └── Copy summary (stays open to show "Copied"), Reveal Markdown, Summarize /
+│       Regenerate summary ("Summarizing…" disabled while running), separator,
+│       Delete… (finished meetings only for the last three)
 ├── Errors at the top of the scroll area
 ├── Summary: one paragraph, at most two sentences
 └── Transcript: Them left, You right in accent; merged turns; timestamps;
@@ -213,7 +217,8 @@ Detail
 Rename -> inline field; Enter or Save          // meetings.rename
   -> manifest title; Markdown heading only while it reads the old title
   -> file name unchanged; empty title refused
-Delete -> "Trash Recording & Markdown" (or "Trash Recording") / Cancel
+Delete… (overflow menu) -> "Trash recording & Markdown" (or "Trash recording")
+  / Cancel, which replace the action row until answered
   -> exported Markdown, then Application Support/meetings/<id>, to the Trash
   -> refused while recording, transcribing, or writing notes   // meetings.delete
 ```
@@ -226,10 +231,11 @@ both stay recoverable from the Trash. Sources: `render_meetings` in
 `renaming_updates_the_manifest_and_an_unedited_markdown_heading`,
 `retitling_replaces_only_a_matching_first_heading`,
 `meeting_search_delete_and_rename_work_on_the_selected_meeting`, and the GPUI
-layout check `meeting_turns_alternate_sides_inside_the_detail`.
+layout checks `meeting_turns_alternate_sides_inside_the_detail` and
+`meeting_overflow_menu_opens_beside_the_visible_actions`.
 
 Preview: `scripts/capture-preview.sh OUT meetings [--meeting-recording]
-[--confirm-meeting-delete] [--meetings-empty]`.
+[--confirm-meeting-delete] [--open-meeting-actions] [--meetings-empty]`.
 
 Checks: `markdown_lists_metadata_and_labeled_turns` and
 `export_never_overwrites_and_uses_safe_names`.
@@ -270,7 +276,7 @@ Final publication complete                               // meetings.notes
 Unavailable (not eligible / Apple Intelligence off / model not ready / macOS < 26)
   -> Settings row says why; nothing runs
 Meetings pane -> title in list and detail; Summary paragraph above the transcript;
-  "Summarize" / "Regenerate Summary" / "Summarizing..."
+  "Summarize" / "Regenerate summary" / "Summarizing…" in the overflow menu
 Transcript ready capsule -> "Ready · <title>" once a provisional or final title
   exists; subtitle "Summarizing with Apple Intelligence…", then the summary
 ```

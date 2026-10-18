@@ -21,6 +21,7 @@ use crate::app_settings::{
 };
 use crate::application_catalog::InstalledApplication;
 use crate::commands::{CommandConfig, CommandInfo, CommandScope};
+use crate::design_tokens::*;
 use crate::desktop_activity::DesktopActivity;
 use crate::desktop_transcription_picker::{
     ModelDeletion, TranscriptionPickerDelegate, TranscriptionPickerModel,
@@ -29,16 +30,16 @@ use crate::desktop_transcription_picker::{
     transcription_selection_is_active,
 };
 use crate::desktop_ui::{
-    ACCENT, ACCENT_SOFT, ACCENT_SURFACE, CANVAS, CONTROL_HEIGHT, DANGER_BORDER, DANGER_SURFACE,
-    FAINT, LINE, MUTED, NEGATIVE, NavigationIcon, PANE_CONTENT_WIDTH, PANE_LIST_WIDTH,
-    PANEL_RADIUS, POSITIVE, POSITIVE_SURFACE, SECTION_GAP, SIDEBAR_WIDTH, SURFACE, SURFACE_HOVER,
-    SURFACE_SELECTED, TEXT, TEXT_INPUT_HEIGHT, TEXT_SOFT, canvas_button, compact_button,
-    compact_header_plus_button, compact_panel, compact_panel_header, compact_plus_button,
-    compact_section_label, disclosure_button, empty_message, error_message, header_button,
-    hotkey_keycaps, list_row, listener_status, mix_color, navigation_item, pane_body, pane_content,
-    pane_header, pane_header_with_action, pane_list, section_label, segmented_control,
-    segmented_item, settings_copy, settings_panel, settings_row, settings_section_label,
-    sidebar_frame, sliding_segmented_control, sliding_segmented_item, toggle, window_frame,
+    ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, danger_menu_item, detail_body,
+    detail_header, detail_placeholder, detail_row, detail_title, disabled_menu_item,
+    disclosure_button, disclosure_frame, dropdown_menu, empty_state, error_message, error_panel,
+    hotkey_keycaps, icon, icon_button, inline_error, list_row, list_row_meta, list_row_title,
+    list_section_label, listener_status, menu, menu_item, menu_separator, mix_color,
+    navigation_item, pane_body, pane_content, pane_detail, pane_header, pane_header_with_action,
+    pane_list, pane_scroll_body, panel, panel_header, section_label, segmented_control,
+    segmented_item, settings_copy, settings_row, settings_section_label, sidebar_frame,
+    sliding_segmented_control, sliding_segmented_item, small_button, status_dot, tag, toggle,
+    truncated_line, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender, HudTuning};
@@ -71,7 +72,11 @@ const WINDOW_HEIGHT: f32 = 700.0;
 const MINIMUM_WIDTH: f32 = 860.0;
 const MINIMUM_HEIGHT: f32 = 560.0;
 const HOTKEY_MIN_WIDTH: f32 = 148.0;
-const HOTKEY_SIDE_SELECTOR_WIDTH: f32 = 116.0;
+/// Left / Either / Right segment widths.
+const HOTKEY_SIDE_WIDTHS: [f32; 3] = [40.0, 50.0, 40.0];
+/// The side segments plus the control's 2 px padding and 1 px border per side.
+const HOTKEY_SIDE_SELECTOR_WIDTH: f32 =
+    HOTKEY_SIDE_WIDTHS[0] + HOTKEY_SIDE_WIDTHS[1] + HOTKEY_SIDE_WIDTHS[2] + 6.0;
 const OPENCODE_INSTALL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_OPENCODE_ERROR_BYTES: usize = 4 * 1024;
@@ -83,21 +88,9 @@ fn sidebar_update_button(
     preview: bool,
 ) -> Option<gpui::Stateful<Div>> {
     (status == crate::sparkle::UpdateStatus::UpdateAvailable).then(|| {
-        div()
-            .id("check-for-updates-sidebar")
-            .h(px(30.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .rounded_sm()
-            .text_size(px(12.0))
-            .flex_none()
-            .bg(rgb(ACCENT))
-            .text_color(rgb(TEXT))
-            .font_weight(FontWeight::SEMIBOLD)
-            .cursor_pointer()
-            .hover(|button| button.bg(mix_color(rgb(ACCENT), rgb(TEXT), 0.12)))
+        button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
             .child("Update")
+            .id("check-for-updates-sidebar")
             .on_click(move |_, window, cx| {
                 if !preview {
                     window.dispatch_action(Box::new(CheckForUpdates), cx);
@@ -118,92 +111,42 @@ fn microphone_picker_menu(
     dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
     let choose = Rc::new(choose);
-    div()
+    dropdown_menu()
         .id("microphone-picker")
         .debug_selector(|| "microphone-picker".into())
-        .absolute()
-        .top(px(CONTROL_HEIGHT + 4.0))
         .right_0()
-        .w(px(220.0))
+        .w(px(DISCLOSURE_WIDTH))
         .max_h(px(240.0))
-        .p_2()
         .overflow_y_scroll()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(LINE))
-        .bg(rgb(SURFACE))
-        .shadow_lg()
-        .occlude()
         .on_mouse_down_out(dismiss)
         .children(choices.into_iter().enumerate().map(|(index, device)| {
             let is_selected = selected == device;
             let label = device.clone().unwrap_or_else(|| "Automatic".into());
             let choose = choose.clone();
-            div()
+            menu_item(is_selected)
                 .id(("microphone-choice", index))
                 .debug_selector(move || format!("microphone-choice-{index}"))
-                .w_full()
-                .h(px(34.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .justify_between()
-                .rounded_sm()
-                .text_size(px(12.0))
-                .text_color(if is_selected {
-                    rgb(TEXT)
-                } else {
-                    rgb(TEXT_SOFT)
-                })
-                .when(is_selected, |row| row.bg(rgb(SURFACE_SELECTED)))
-                .hover(|row| row.bg(rgb(SURFACE_HOVER)))
-                .child(label)
+                .child(truncated_line(FOOTNOTE, label))
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     choose(&device, window, cx);
                 })
         }))
-        .when_some(error, |picker, error| {
-            picker.child(
-                div()
-                    .px_3()
-                    .pt_2()
-                    .text_size(px(11.0))
-                    .text_color(rgb(NEGATIVE))
-                    .child(error),
-            )
-        })
+        .when_some(error, |picker, error| picker.child(inline_error(error)))
 }
 
-fn settings_pane(content: Div) -> AnyElement {
-    settings_pane_titled("Settings", "settings-scroll", content)
-}
-
-fn settings_pane_titled(title: &'static str, scroll_id: &'static str, content: Div) -> AnyElement {
+fn settings_pane(title: &'static str, scroll_id: &'static str, content: Div) -> AnyElement {
     div()
         .size_full()
         .flex()
         .flex_col()
         .child(pane_header(title))
-        .child(
-            div()
-                .id(scroll_id)
-                .flex_1()
-                .overflow_y_scroll()
-                .px_8()
-                .pt_1()
-                .pb_7()
-                .child(
-                    div().w_full().flex().justify_center().child(
-                        content
-                            .w_full()
-                            .max_w(px(PANE_CONTENT_WIDTH))
-                            .min_w_0()
-                            .relative()
-                            .debug_selector(|| "settings-content".into()),
-                    ),
-                ),
-        )
+        .child(pane_scroll_body(
+            scroll_id,
+            content
+                .relative()
+                .debug_selector(|| "settings-content".into()),
+        ))
         .into_any_element()
 }
 
@@ -378,7 +321,7 @@ fn open_new(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("HEX".into()),
+                title: Some("Hex".into()),
                 appears_transparent: true,
                 ..Default::default()
             }),
@@ -439,6 +382,7 @@ pub struct AppWindowPreview {
     pub screen_recording_missing: bool,
     pub meeting_recording: bool,
     pub confirm_meeting_delete: bool,
+    pub open_meeting_actions: bool,
     pub meetings_empty: bool,
 }
 
@@ -611,6 +555,7 @@ struct TranscriptLine {
 struct MeetingPreview {
     recording: bool,
     confirm_delete: bool,
+    open_actions: bool,
     empty: bool,
 }
 
@@ -697,16 +642,17 @@ impl Render for TransformationDrag {
             .child(
                 div()
                     .w(px(180.0))
-                    .h(px(34.0))
+                    .h(px(CONTROL_HEIGHT))
                     .px_3()
                     .flex()
                     .items_center()
-                    .rounded(px(6.0))
+                    .rounded(RADIUS_CONTROL)
                     .border_1()
-                    .border_color(rgb(0x505050))
+                    .border_color(rgb(LINE_STRONG))
                     .bg(rgb(SURFACE_SELECTED))
-                    .text_size(px(11.0))
-                    .text_color(rgb(TEXT))
+                    .shadow_lg()
+                    .text_body()
+                    .text_color(rgb(TEXT_PRIMARY))
                     .child(self.name.clone()),
             )
     }
@@ -766,10 +712,10 @@ fn opencode_unavailable_copy(
             title: "Checking for OpenCode",
             description: match feature {
                 OpenCodeFeature::VoiceAction => {
-                    "Voice Action will be available after HEX connects to OpenCode."
+                    "Voice Action will be available after Hex connects to OpenCode."
                 }
                 OpenCodeFeature::Transformation => {
-                    "OpenCode transformation will be available after HEX connects to OpenCode."
+                    "OpenCode transformation will be available after Hex connects to OpenCode."
                 }
             },
             error: None,
@@ -797,7 +743,7 @@ fn opencode_unavailable_copy(
         }),
         ModelCatalogState::Failed(error) => Some(OpenCodeUnavailableCopy {
             title: "OpenCode is unavailable",
-            description: "HEX could not load the OpenCode model catalog.",
+            description: "Hex could not load the OpenCode model catalog.",
             error: Some(error.clone()),
             can_retry: true,
             retry_label: "Retry",
@@ -1071,6 +1017,8 @@ pub struct AppWindow {
     meeting_search_text: HashMap<String, String>,
     meeting_rename: Option<(String, ProcessingInput)>,
     meeting_delete_armed: Option<String>,
+    /// The detail's overflow menu of less common meeting actions is open.
+    meeting_actions_open: bool,
     meeting_action_error: Option<String>,
     meeting_copied: Option<(String, &'static str)>,
     /// Deterministic transcripts for the Meetings preview.
@@ -1185,6 +1133,7 @@ impl AppWindow {
             .map(|preview| MeetingPreview {
                 recording: preview.meeting_recording,
                 confirm_delete: preview.confirm_meeting_delete,
+                open_actions: preview.open_meeting_actions,
                 empty: preview.meetings_empty,
             });
         let preview_choices = crate::transcription_models::choices_for_runtime;
@@ -1624,6 +1573,7 @@ impl AppWindow {
             meeting_search_text: HashMap::new(),
             meeting_rename: None,
             meeting_delete_armed: None,
+            meeting_actions_open: false,
             meeting_action_error: None,
             meeting_copied: None,
             meeting_preview_transcripts: None,
@@ -2390,6 +2340,7 @@ impl AppWindow {
         if self.selected_meeting.as_deref() != Some(id.as_str()) {
             self.meeting_rename = None;
             self.meeting_delete_armed = None;
+            self.meeting_actions_open = false;
             self.meeting_action_error = None;
             self.meeting_copied = None;
         }
@@ -2521,6 +2472,7 @@ impl AppWindow {
             if preview.confirm_delete {
                 self.meeting_delete_armed = Some(id);
             }
+            self.meeting_actions_open = preview.open_actions;
         }
     }
 
@@ -2642,41 +2594,36 @@ impl AppWindow {
 
     fn render_history(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let retention = self.settings.history_retention;
-        let search = div().w(px(220.0)).child(self.history_search.entity.clone());
-        let retention_control = header_button(format!("Keep: {}", retention.label()))
-            .id("history-retention")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.history_retention_open = true;
-                cx.notify();
-            }));
+        let search = div()
+            .w(px(SEARCH_FIELD_WIDTH))
+            .child(self.history_search.entity.clone());
+        let retention_control = button(
+            ButtonKind::Secondary,
+            format!("Keep: {}", retention.label()),
+        )
+        .id("history-retention")
+        .child(icon(Icon::ChevronDown, TEXT_TERTIARY))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.history_retention_open = true;
+            cx.notify();
+        }));
         let retention_control = div().relative().child(retention_control).when(
             self.history_retention_open,
             |control| {
                 control.child(deferred(
-                    div()
+                    dropdown_menu()
                         .id("history-retention-menu")
-                        .absolute()
-                        .top(px(36.0))
                         .right_0()
-                        .w(px(160.0))
-                        .p_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(LINE))
-                        .bg(rgb(SURFACE))
-                        .occlude()
+                        .w(px(MENU_WIDTH))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.history_retention_open = false;
                             cx.notify();
                         }))
                         .children(HistoryRetention::ALL.into_iter().enumerate().map(
                             |(index, choice)| {
-                                compact_button(choice.label())
+                                menu_item(choice == retention)
                                     .id(("history-retention-choice", index))
-                                    .w_full()
-                                    .when(choice == retention, |item| {
-                                        item.bg(rgb(SURFACE_SELECTED))
-                                    })
+                                    .child(choice.label())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
                                         this.history_retention_open = false;
@@ -2688,24 +2635,18 @@ impl AppWindow {
                 ))
             },
         );
-        let clear = header_button(if self.history_clear_armed {
-            "Really clear all?"
+        let clear = if self.history_clear_armed {
+            button(ButtonKind::Danger, "Really clear all?")
         } else {
-            "Clear all"
-        })
+            button(ButtonKind::Secondary, "Clear all")
+        }
         .id("history-clear")
-        .when(self.history_clear_armed, |button| {
-            button
-                .border_color(rgb(DANGER_BORDER))
-                .bg(rgb(DANGER_SURFACE))
-                .text_color(rgb(NEGATIVE))
-        })
         .on_click(cx.listener(|this, _, _, cx| this.clear_history(cx)))
         .into_any_element();
         let header_action = div()
             .flex()
             .items_center()
-            .gap_3()
+            .gap_2()
             .child(search)
             .child(retention_control)
             .child(clear)
@@ -2733,24 +2674,9 @@ impl AppWindow {
                         .min_w(px(0.0))
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .w_full()
-                                .overflow_x_hidden()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(if selected { TEXT } else { TEXT_SOFT }))
-                                .line_height(px(18.0))
-                                .truncate()
-                                .child(preview),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(if selected { TEXT_SOFT } else { FAINT }))
-                                .child(meta),
-                        ),
+                        .gap_0p5()
+                        .child(list_row_title(preview, selected))
+                        .child(list_row_meta(meta, selected)),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected_history = Some(id);
@@ -2767,12 +2693,13 @@ impl AppWindow {
             .flex_col()
             .child(pane_header_with_action("History", Some(header_action)))
             .child(
-                pane_body().p_5().child(
+                pane_body().child(
                     pane_content()
                         .flex_row()
                         .gap_5()
-                        .child(pane_list_card(
+                        .child(pane_list(
                             "history-list",
+                            PANE_LIST_WIDTH,
                             if retention_off {
                                 Some("History is off. New dictations are not retained.")
                             } else if self.history_entries.is_empty()
@@ -2786,15 +2713,7 @@ impl AppWindow {
                             self.history_error.clone(),
                             rows,
                         ))
-                        .child(
-                            compact_panel()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .h_full()
-                                .flex()
-                                .flex_col()
-                                .child(self.render_history_detail(cx)),
-                        ),
+                        .child(pane_detail(self.render_history_detail(cx))),
                 ),
             )
             .into_any_element()
@@ -2811,12 +2730,8 @@ impl AppWindow {
         let copied = self.history_copied == Some(id);
         let show_raw = entry.raw_text.trim() != entry.final_text.trim();
         let action_button = |label: &'static str, id_suffix: &'static str| {
-            canvas_button()
+            button(ButtonKind::Secondary, label)
                 .id(SharedString::from(format!("history-action-{id_suffix}")))
-                .h(px(30.0))
-                .px_3()
-                .text_size(px(12.0))
-                .child(label)
         };
         let mut latency = format!(
             "{} ms audio · {} ms inference",
@@ -2825,97 +2740,70 @@ impl AppWindow {
         if entry.total_ms > 0 {
             latency.push_str(&format!(" · {} ms total", entry.total_ms));
         }
+        let section = |label: &'static str, first: bool| {
+            div()
+                .w_full()
+                .when(!first, |section| {
+                    section.mt_5().pt_5().border_t_1().border_color(rgb(LINE))
+                })
+                .child(section_label(label))
+        };
         div()
-            .id("history-detail")
             .flex_1()
             .min_w(px(0.0))
             .h_full()
-            .overflow_y_scroll()
-            .px_6()
-            .py_6()
+            .flex()
+            .flex_col()
+            .child(detail_header(
+                detail_title(entry.kind.label()),
+                vec![event_age(entry.timestamp_ms).into_any_element()],
+                vec![
+                    action_button(if copied { "Copied" } else { "Copy" }, "copy")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.copy_history_entry(id, cx)),
+                        )
+                        .into_any_element(),
+                    action_button("Delete", "delete")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.delete_history_entry(id, cx)),
+                        )
+                        .into_any_element(),
+                ],
+            ))
             .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
+                detail_body("history-detail")
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_size(px(18.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(entry.kind.label()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(FAINT))
-                                    .child(event_age(entry.timestamp_ms)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pt_4()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                action_button(if copied { "Copied" } else { "Copy" }, "copy")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.copy_history_entry(id, cx)
-                                    })),
-                            )
-                            .child(action_button("Delete", "delete").on_click(cx.listener(
-                                move |this, _, _, cx| this.delete_history_entry(id, cx),
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .mt_5()
-                            .pt_5()
-                            .border_t_1()
-                            .border_color(rgb(LINE))
-                            .child(section_label("Final text"))
-                            .child(
-                                div()
-                                    .pt_3()
-                                    .text_size(px(12.0))
-                                    .line_height(px(19.0))
-                                    .text_color(rgb(TEXT))
-                                    .child(entry.final_text.clone()),
-                            ),
+                        section("Final text", true).child(
+                            div()
+                                .pt_2()
+                                .text_body()
+                                .text_color(rgb(TEXT_PRIMARY))
+                                .child(entry.final_text.clone()),
+                        ),
                     )
                     .when(show_raw, |detail| {
                         detail.child(
-                            div()
-                                .mt_5()
-                                .pt_5()
-                                .border_t_1()
-                                .border_color(rgb(LINE))
-                                .child(section_label("Raw transcript"))
-                                .child(
-                                    div()
-                                        .pt_3()
-                                        .text_size(px(12.0))
-                                        .line_height(px(19.0))
-                                        .text_color(rgb(MUTED))
-                                        .child(entry.raw_text.clone()),
-                                ),
+                            section("Raw transcript", false).child(
+                                div()
+                                    .pt_2()
+                                    .text_body()
+                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .child(entry.raw_text.clone()),
+                            ),
                         )
                     })
                     .child(
                         div()
+                            .w_full()
                             .mt_5()
-                            .pt_5()
+                            .flex()
+                            .flex_col()
                             .border_t_1()
                             .border_color(rgb(LINE))
-                            .when_some(entry.application.clone(), |detail, application| {
-                                detail.child(detail_row("Application", application))
+                            .when_some(entry.application.clone(), |rows, application| {
+                                rows.child(detail_row("Application", application))
                             })
-                            .when_some(entry.processing.clone(), |detail, processing| {
+                            .when_some(entry.processing.clone(), |rows, processing| {
                                 let mut summary = format!(
                                     "{} · {} ms",
                                     processing.profile, processing.latency_ms
@@ -2923,7 +2811,7 @@ impl AppWindow {
                                 if let Some(fallback) = &processing.fallback {
                                     summary.push_str(&format!(" · fell back: {fallback}"));
                                 }
-                                detail.child(detail_row("Processing", summary))
+                                rows.child(detail_row("Processing", summary))
                             })
                             .child(detail_row("Latency", latency)),
                     ),
@@ -2949,13 +2837,7 @@ impl AppWindow {
         });
 
         sidebar_frame()
-            .w(px(SIDEBAR_WIDTH))
-            .px(px(14.0))
-            .pt(px(52.0))
-            .pb_4()
-            .flex()
-            .flex_col()
-            .child(div().flex().flex_col().gap(px(2.0)).children(items))
+            .child(div().flex().flex_col().gap_0p5().children(items))
             .child(div().flex_1())
             .child(
                 div()
@@ -2964,14 +2846,14 @@ impl AppWindow {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .h(px(30.0))
+                    .h(px(CONTROL_HEIGHT))
                     .mt_3()
                     .child(
                         div()
                             .flex_none()
-                            .pl_2()
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
+                            .pl_3()
+                            .text_caption()
+                            .text_color(rgb(TEXT_TERTIARY))
                             .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
                     )
                     .children(sidebar_update_button(self.update_status, self.preview)),
@@ -3014,7 +2896,7 @@ impl AppWindow {
             self.hotkey_capture,
             HotkeyCaptureState::Saved { kind: active, .. } if active == kind
         ) {
-            rgb(POSITIVE_SURFACE)
+            rgb(SUCCESS_SURFACE)
         } else {
             rgb(DANGER_SURFACE)
         };
@@ -3056,7 +2938,7 @@ impl AppWindow {
                             .size(px(5.0 + pulse * 3.0))
                             .ml_2()
                             .rounded_full()
-                            .bg(rgb(NEGATIVE))
+                            .bg(rgb(DANGER))
                             .opacity(0.6 + pulse * 0.4),
                     )
                     .when(!modifiers.is_empty() && message.is_none(), |content| {
@@ -3071,29 +2953,18 @@ impl AppWindow {
                     })
                     .child(
                         div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(TEXT_SOFT))
+                            .text_footnote()
+                            .text_color(rgb(TEXT_SECONDARY))
                             .child(label),
                     )
                     .child(
-                        div()
+                        small_button(ButtonKind::Secondary, "Cancel")
                             .id(match kind {
                                 HotkeyKind::Dictation => "cancel-dictation-hotkey-capture",
                                 HotkeyKind::Edit => "cancel-edit-hotkey-capture",
                                 HotkeyKind::PasteLast => "cancel-paste-last-hotkey-capture",
                             })
-                            .h(px(26.0))
                             .ml_1()
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .rounded(px(4.0))
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
-                            .hover(|button| {
-                                button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_SOFT))
-                            })
-                            .child("Cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.cancel_hotkey_capture(cx);
@@ -3105,13 +2976,7 @@ impl AppWindow {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_SOFT))
-                        .child("Saved"),
-                )
+                .child(tag(Tone::Success, "Saved"))
                 .child(hotkey_keycaps(binding_keycaps.clone(), 1.0))
                 .into_any_element(),
             HotkeyCaptureState::Idle
@@ -3123,8 +2988,8 @@ impl AppWindow {
                 .child(hotkey_keycaps(binding_keycaps, 1.0))
                 .child(
                     div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(TEXT_SOFT))
+                        .text_footnote()
+                        .text_color(rgb(TEXT_SECONDARY))
                         .child("Change shortcut"),
                 )
                 .into_any_element(),
@@ -3138,16 +3003,16 @@ impl AppWindow {
             .track_focus(&self.hotkey_focus)
             .w(px(control_width))
             .min_w(px(HOTKEY_MIN_WIDTH))
-            .h(px(32.0))
-            .px(px(4.0))
+            .h(px(CONTROL_HEIGHT))
+            .px(px(2.0))
             .flex()
             .items_center()
             .overflow_hidden()
-            .rounded(px(6.0))
+            .rounded(RADIUS_CONTROL)
             .border_1()
             .border_color(mix_color(
                 rgb(LINE),
-                rgb(TEXT_SOFT),
+                rgb(TEXT_SECONDARY),
                 control_intensity * 0.55,
             ))
             .bg(mix_color(
@@ -3187,7 +3052,7 @@ impl AppWindow {
         side_animation.set_enabled(side.is_some());
         let side_position = side_animation.render_position(window).clamp(0.0, 1.0);
         let selected = side.unwrap_or(ModifierSide::Either);
-        let side_widths = [34.0, 44.0, 34.0];
+        let side_widths = HOTKEY_SIDE_WIDTHS;
         let side_selection_spring =
             &mut self.hotkey_side_selection_springs[hotkey_kind_index(kind)];
         side_selection_spring.set_target(hotkey_side_index(selected) as f32);
@@ -3213,8 +3078,7 @@ impl AppWindow {
                             let candidate = hotkey_side_binding(&self.settings, kind, side);
                             sliding_segmented_item(side_widths[index], selected == side)
                                 .id(("hotkey-side", hotkey_kind_index(kind) * 3 + index))
-                                .text_size(px(10.0))
-                                .when(candidate.is_none(), |item| item.opacity(0.35))
+                                .when(candidate.is_none(), |item| item.opacity(DISABLED_OPACITY))
                                 .child(label)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let Some(candidate) =
@@ -3410,7 +3274,7 @@ impl AppWindow {
                 div()
                     .id(("text-replacement", index))
                     .w_full()
-                    .px_3()
+                    .px_4()
                     .py_2()
                     .flex()
                     .items_center()
@@ -3424,13 +3288,7 @@ impl AppWindow {
                             .min_w(px(0.0))
                             .child(inputs.matched_phrase.entity.clone()),
                     )
-                    .child(
-                        div()
-                            .px_1()
-                            .text_size(px(11.0))
-                            .text_color(rgb(FAINT))
-                            .child("→"),
-                    )
+                    .child(icon(Icon::ArrowRight, TEXT_TERTIARY))
                     .child(
                         div()
                             .flex_1()
@@ -3438,14 +3296,8 @@ impl AppWindow {
                             .child(inputs.output.entity.clone()),
                     )
                     .child(
-                        compact_button("×")
+                        icon_button(ButtonKind::Ghost, Icon::Close)
                             .id(("remove-text-replacement", index))
-                            .size(px(30.0))
-                            .px_0()
-                            .justify_center()
-                            .flex_none()
-                            .text_size(px(14.0))
-                            .text_color(rgb(MUTED))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.update_mode_settings(selection, cx, |mode| {
                                     mode.replacements.remove(index);
@@ -3458,7 +3310,8 @@ impl AppWindow {
             })
             .collect::<Vec<_>>();
 
-        let add = compact_header_plus_button()
+        let add = icon_button(ButtonKind::Ghost, Icon::Plus)
+            .mr(px(-SPACE_2))
             .id("add-mode-replacement")
             .on_click(cx.listener(move |this, _, window, cx| {
                 let replacement = TextReplacement::default();
@@ -3473,15 +3326,15 @@ impl AppWindow {
             }))
             .into_any_element();
 
-        compact_panel()
-            .child(compact_panel_header("Corrections", Some(add)))
+        panel()
+            .child(panel_header("Corrections", Some(add)))
             .when(replacement_count == 0, |panel| {
                 panel.child(
                     div()
                         .px_3()
                         .py_3()
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
+                        .text_footnote()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child("No corrections in this mode."),
                 )
             })
@@ -3610,23 +3463,23 @@ impl AppWindow {
         let warning_count = warnings.len();
         Some(
             div()
-                .child(settings_section_label("PERMISSIONS NEEDED"))
-                .child(
-                    settings_panel().children(warnings.into_iter().enumerate().map(
-                        |(index, warning)| {
-                            let (name, description) = permission_warning_copy(warning.kind);
-                            let action = header_button(permission_action_label(warning.action))
-                                .id(permission_warning_id(warning.kind))
-                                .bg(rgb(CANVAS))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.perform_permission_action(warning);
-                                    cx.notify();
-                                }));
-                            settings_row(name, description, action)
-                                .when(index + 1 == warning_count, |row| row.border_b_0())
-                        },
-                    )),
-                )
+                .child(settings_section_label("Permissions needed"))
+                .child(panel().children(warnings.into_iter().enumerate().map(
+                    |(index, warning)| {
+                        let (name, description) = permission_warning_copy(warning.kind);
+                        let action = button(
+                            ButtonKind::Secondary,
+                            permission_action_label(warning.action),
+                        )
+                        .id(permission_warning_id(warning.kind))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.perform_permission_action(warning);
+                            cx.notify();
+                        }));
+                        settings_row(name, description, action)
+                            .when(index + 1 == warning_count, |row| row.border_b_0())
+                    },
+                )))
                 .into_any_element(),
         )
     }
@@ -3644,11 +3497,8 @@ impl AppWindow {
                 .flatten()
         })?;
         let action = if dictation_notice.is_some() {
-            compact_button("Choose model")
+            button(ButtonKind::Primary, "Choose model")
                 .id("choose-required-model")
-                .bg(rgb(ACCENT))
-                .text_color(rgb(TEXT))
-                .font_weight(FontWeight::MEDIUM)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.transcription_picker_language =
                         Some(this.settings.transcription.language.clone());
@@ -3664,9 +3514,8 @@ impl AppWindow {
                     matches!(self.command_model_status, CommandModelStatus::Failed),
                     |controls| {
                         controls.child(
-                            header_button("Retry")
+                            button(ButtonKind::Secondary, "Retry")
                                 .id("retry-command-model")
-                                .bg(rgb(CANVAS))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if !this.preview {
                                         cx.dispatch_action(&RetryCommands);
@@ -3676,9 +3525,8 @@ impl AppWindow {
                     },
                 )
                 .child(
-                    header_button("Turn off commands")
+                    button(ButtonKind::Secondary, "Turn off commands")
                         .id("disable-unavailable-commands")
-                        .bg(rgb(CANVAS))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Err(error) = this.developer_set_commands_enabled(false, cx) {
                                 tracing::warn!(%error, "could not disable voice commands");
@@ -3694,21 +3542,16 @@ impl AppWindow {
                 .flex()
                 .justify_center()
                 .flex_shrink_0()
-                .px_8()
+                .px(px(PANE_GUTTER))
                 .pt_6()
                 .child(
-                    div()
-                        .w_full()
+                    panel()
                         .max_w(px(PANE_CONTENT_WIDTH))
                         .px_4()
-                        .py_3p5()
+                        .py_3()
                         .flex()
                         .items_center()
                         .gap_4()
-                        .rounded(px(PANEL_RADIUS))
-                        .border_1()
-                        .border_color(rgb(LINE))
-                        .bg(rgb(SURFACE))
                         .child(
                             div()
                                 .flex_1()
@@ -3788,7 +3631,6 @@ impl AppWindow {
                 .map(|(index, (label, volume))| {
                     sliding_segmented_item(34.0, selected_volume == index)
                         .id(("sound-volume", index))
-                        .text_size(px(10.0))
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.update_settings(cx, |settings| {
@@ -3808,7 +3650,8 @@ impl AppWindow {
         );
         let launch_at_login_control = if self.launch_at_login_status.is_none() {
             div()
-                .text_color(rgb(MUTED))
+                .text_footnote()
+                .text_color(rgb(TEXT_TERTIARY))
                 .child(if self.login_item_worker.is_some() {
                     "Checking…"
                 } else {
@@ -3816,7 +3659,7 @@ impl AppWindow {
                 })
                 .into_any_element()
         } else if self.launch_at_login_status == Some(LoginItemStatus::RequiresApproval) {
-            compact_button("Open Settings")
+            button(ButtonKind::Secondary, "Open settings")
                 .id("launch-at-login-approval")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.request_login_item(LoginItemRequest::OpenSettings);
@@ -3910,7 +3753,7 @@ impl AppWindow {
                         .items_center()
                         .gap_2()
                         .child(
-                            header_button("Cancel")
+                            button(ButtonKind::Secondary, "Cancel")
                                 .id("cancel-release-microphone")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.pending_microphone_policy = None;
@@ -3918,10 +3761,8 @@ impl AppWindow {
                                 })),
                         )
                         .child(
-                            header_button("Release microphone")
+                            button(ButtonKind::Primary, "Release microphone")
                                 .id("confirm-release-microphone")
-                                .bg(rgb(SURFACE_SELECTED))
-                                .text_color(rgb(TEXT))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if let Err(error) = this.update_microphone_policy(
                                         MicrophonePolicyChange::DisableCommandsAndRelease,
@@ -3934,214 +3775,204 @@ impl AppWindow {
                 )
         });
         settings_pane(
+            "Settings",
+            "settings-scroll",
             div()
-                                    .children(permission_warnings)
-                                    .child(settings_section_label("DICTATION"))
-                                    .child(
-                                        settings_panel()
-                                    .child(settings_row(
-                                        "Local transcription",
-                                        "Language and on-device speech model",
-                                        transcription_control,
-                                    ))
-                                    .child(settings_row(
-                                        "Microphone",
-                                        "Input device for dictation and commands",
-                                        div()
-                                            .relative()
-                                            .flex_none()
-                                            .child(
-                                                disclosure_button(microphone_label)
-                                                    .id("microphone-setting")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.toggle_microphone_picker(cx)
-                                                    })),
-                                            )
-                                            .children(microphone_picker.map(deferred)),
-                                    ))
-                                    .when(
-                                        transcription_model.supports_recognition_hints,
-                                        |settings| {
-                                            settings.child(settings_row(
-                                                "Recognition hints",
-                                                "Names and terms to prime the speech model",
-                                                div()
-                                                    .w(px(320.0))
-                                                    .flex_none()
-                                                    .child(
-                                                        self.transcription_hints.entity.clone(),
-                                                    ),
-                                            ))
-                                        },
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Dictation shortcut",
-                                            "Hold to dictate, release to transcribe",
-                                            hotkey_control,
-                                        )
-                                        .border_b_0()
-                                        .id("dictation-hotkey-setting"),
-                                    ),
-                            )
-                            .child(settings_section_label("BEHAVIOR"))
-                            .child(
-                                settings_panel()
-                                    .child(
-                                        settings_row(
-                                            "While dictating",
-                                            "Mute or pause other audio during dictation",
-                                            audio_behavior,
-                                        )
-                                        .id("recording-audio-setting"),
-                                    )
-                                    .child(settings_row(
-                                        "Microphone mode",
-                                        if self.settings.release_microphone_while_idle {
-                                            "Opens only while holding the shortcut. Disables pre-roll and commands."
-                                        } else {
-                                            "Keeps the microphone open for instant start and pre-roll."
-                                        },
-                                        microphone_mode,
-                                    ))
-                                    .children(microphone_confirmation)
-                                    .child(
-                                        settings_row(
-                                            "Double-tap to lock",
-                                            "Double-tap the shortcut for hands-free dictation",
-                                            toggle(double_tap_position),
-                                        )
-                                        .id("double-tap-setting")
+                .children(permission_warnings)
+                .child(settings_section_label("Dictation"))
+                .child(
+                    panel()
+                        .child(settings_row(
+                            "Local transcription",
+                            "Language and on-device speech model",
+                            transcription_control,
+                        ))
+                        .child(settings_row(
+                            "Microphone",
+                            "Input device for dictation and commands",
+                            div()
+                                .relative()
+                                .flex_none()
+                                .child(
+                                    disclosure_button(microphone_label)
+                                        .id("microphone-setting")
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            let enabled = !this.settings.double_tap_lock;
-                                            this.set_double_tap_lock(enabled, cx);
+                                            this.toggle_microphone_picker(cx)
                                         })),
-                                    )
-                                    .child(
-                                        div()
-                                            .h(px(72.0 * double_tap_only_visibility))
-                                            .overflow_hidden()
-                                            .opacity(double_tap_only_visibility)
-                                            .child(
-                                                settings_row(
-                                                    "Double-tap only",
-                                                    "Wait for two complete shortcut taps before recording",
-                                                    toggle(if self.settings.double_tap_only { 1.0 } else { 0.0 }),
-                                                )
-                                                .id("double-tap-only-setting")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    let enabled = !this.settings.double_tap_only;
-                                                    this.set_double_tap_only(enabled, cx);
-                                                })),
-                                            ),
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Transcribe during pauses",
-                                            "Finish long dictations sooner by transcribing at each pause",
-                                            toggle(incremental_position),
-                                        )
-                                        .id("incremental-transcription-setting")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            let enabled = !this.settings.incremental_transcription;
-                                            if this.update_settings(cx, |settings| {
-                                                settings.incremental_transcription = enabled
-                                            }) {
-                                                this.incremental_toggle.set_enabled(enabled);
-                                            }
-                                        })),
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Paste last dictation",
-                                            "Re-paste the most recent dictation",
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(paste_last_control)
-                                                .when(self.settings.paste_last_hotkey.is_some(), |row| {
-                                                    row.child(
-                                                        canvas_button()
-                                                            .id("disable-paste-last-hotkey")
-                                                            .h(px(32.0))
-                                                            .px_2p5()
-                                                            .text_size(px(11.0))
-                                                            .text_color(rgb(MUTED))
-                                                            .child("Clear")
-                                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                                this.update_settings(cx, |settings| settings.paste_last_hotkey = None);
-                                                            })),
-                                                    )
-                                                }),
-                                        )
-                                        .border_b_0()
-                                        .id("paste-last-hotkey-setting"),
-                                    )
-                            )
-                            .child(settings_section_label("MEETINGS"))
-                            .child(meetings_section)
-                            .child(settings_section_label("APPLICATION"))
-                            .child(
-                                settings_panel()
-                                    .child(
-                                        settings_row(
-                                            "Launch at login",
-                                            "Start HEX when you log in",
-                                            launch_at_login_control,
-                                        )
-                                        .id("launch-at-login-setting")
-                                        .when(
-                                            matches!(self.launch_at_login_status, Some(LoginItemStatus::Enabled | LoginItemStatus::Disabled))
-                                                && (self.preview || self.login_item_worker.is_some()),
-                                            |row| {
-                                                row.on_click(cx.listener(
-                                                    |this, _, _, cx| {
-                                                        let enabled = !this.launch_at_login_toggle.enabled();
-                                                        this.set_launch_at_login(enabled, cx);
-                                                    },
-                                                ))
-                                            },
+                                )
+                                .children(microphone_picker.map(deferred)),
+                        ))
+                        .when(
+                            transcription_model.supports_recognition_hints,
+                            |settings| {
+                                settings.child(settings_row(
+                                    "Recognition hints",
+                                    "Names and terms to prime the speech model",
+                                    div()
+                                        .w(px(320.0))
+                                        .flex_none()
+                                        .child(
+                                            self.transcription_hints.entity.clone(),
                                         ),
+                                ))
+                            },
+                        )
+                        .child(
+                            settings_row(
+                                "Dictation shortcut",
+                                "Hold to dictate, release to transcribe",
+                                hotkey_control,
+                            )
+                            .border_b_0()
+                            .id("dictation-hotkey-setting"),
+                        ),
+                )
+                .child(settings_section_label("Behavior"))
+                .child(
+                    panel()
+                        .child(
+                            settings_row(
+                                "While dictating",
+                                "Mute or pause other audio during dictation",
+                                audio_behavior,
+                            )
+                            .id("recording-audio-setting"),
+                        )
+                        .child(settings_row(
+                            "Microphone mode",
+                            if self.settings.release_microphone_while_idle {
+                                "Opens only while holding the shortcut. Disables pre-roll and commands."
+                            } else {
+                                "Keeps the microphone open for instant start and pre-roll"
+                            },
+                            microphone_mode,
+                        ))
+                        .children(microphone_confirmation)
+                        .child(
+                            settings_row(
+                                "Double-tap to lock",
+                                "Double-tap the shortcut for hands-free dictation",
+                                toggle(double_tap_position),
+                            )
+                            .id("double-tap-setting")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let enabled = !this.settings.double_tap_lock;
+                                this.set_double_tap_lock(enabled, cx);
+                            })),
+                        )
+                        .child(
+                            div()
+                                .h(px(SETTINGS_ROW_MIN_HEIGHT * double_tap_only_visibility))
+                                .overflow_hidden()
+                                .opacity(double_tap_only_visibility)
+                                .child(
+                                    settings_row(
+                                        "Double-tap only",
+                                        "Wait for two complete shortcut taps before recording",
+                                        toggle(if self.settings.double_tap_only { 1.0 } else { 0.0 }),
                                     )
-                                    .when_some(
-                                        self.launch_at_login_error.clone(),
-                                        |settings, error| {
-                                            settings.child(
-                                                div()
-                                                    .px_4()
-                                                    .py_2()
-                                                    .text_size(px(11.0))
-                                                    .text_color(rgb(NEGATIVE))
-                                                    .child(error),
-                                            )
+                                    .id("double-tap-only-setting")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let enabled = !this.settings.double_tap_only;
+                                        this.set_double_tap_only(enabled, cx);
+                                    })),
+                                ),
+                        )
+                        .child(
+                            settings_row(
+                                "Transcribe during pauses",
+                                "Finish long dictations sooner by transcribing at each pause",
+                                toggle(incremental_position),
+                            )
+                            .id("incremental-transcription-setting")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let enabled = !this.settings.incremental_transcription;
+                                if this.update_settings(cx, |settings| {
+                                    settings.incremental_transcription = enabled
+                                }) {
+                                    this.incremental_toggle.set_enabled(enabled);
+                                }
+                            })),
+                        )
+                        .child(
+                            settings_row(
+                                "Paste last dictation",
+                                "Re-paste the most recent dictation",
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(paste_last_control)
+                                    .when(self.settings.paste_last_hotkey.is_some(), |row| {
+                                        row.child(
+                                            button(ButtonKind::Secondary, "Clear")
+                                                .id("disable-paste-last-hotkey")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.update_settings(cx, |settings| settings.paste_last_hotkey = None);
+                                                })),
+                                        )
+                                    }),
+                            )
+                            .border_b_0()
+                            .id("paste-last-hotkey-setting"),
+                        )
+                )
+                .child(settings_section_label("Meetings"))
+                .child(meetings_section)
+                .child(settings_section_label("Application"))
+                .child(
+                    panel()
+                        .child(
+                            settings_row(
+                                "Launch at login",
+                                "Start Hex when you log in",
+                                launch_at_login_control,
+                            )
+                            .id("launch-at-login-setting")
+                            .when(
+                                matches!(self.launch_at_login_status, Some(LoginItemStatus::Enabled | LoginItemStatus::Disabled))
+                                    && (self.preview || self.login_item_worker.is_some()),
+                                |row| {
+                                    row.on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            let enabled = !this.launch_at_login_toggle.enabled();
+                                            this.set_launch_at_login(enabled, cx);
                                         },
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Show Dock icon",
-                                            "Keep HEX in the menu bar when Settings is closed",
-                                            toggle(dock_icon_position),
-                                        )
-                                        .id("dock-icon-setting")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if !this.update_settings(cx, |settings| settings.show_dock_icon = !settings.show_dock_icon) {
-                                                return;
-                                            }
-                                            this.dock_icon_toggle
-                                                .set_enabled(this.settings.show_dock_icon);
-                                        })),
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Sound volume",
-                                            "Recording, cancellation, and error tones",
-                                            sound_volume,
-                                        )
-                                        .border_b_0()
-                                        .id("sound-effects-setting"),
-                                    ),
+                                    ))
+                                },
                             ),
+                        )
+                        .when_some(
+                            self.launch_at_login_error.clone(),
+                            |settings, error| {
+                                settings.child(inline_error(error))
+                            },
+                        )
+                        .child(
+                            settings_row(
+                                "Show Dock icon",
+                                "Keep Hex in the menu bar when Settings is closed",
+                                toggle(dock_icon_position),
+                            )
+                            .id("dock-icon-setting")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.update_settings(cx, |settings| settings.show_dock_icon = !settings.show_dock_icon) {
+                                    return;
+                                }
+                                this.dock_icon_toggle
+                                    .set_enabled(this.settings.show_dock_icon);
+                            })),
+                        )
+                        .child(
+                            settings_row(
+                                "Sound volume",
+                                "Recording, cancellation, and error tones",
+                                sound_volume,
+                            )
+                            .border_b_0()
+                            .id("sound-effects-setting"),
+                        ),
+                ),
         )
     }
 
@@ -4155,11 +3986,10 @@ impl AppWindow {
             .map(|relative| format!("~/{}", relative.display()))
             .unwrap_or_else(|_| folder.display().to_string());
         let permission_control = if self.screen_recording_permitted {
-            setup_ready_badge()
+            tag(Tone::Success, "Ready").into_any_element()
         } else {
-            header_button("Open Settings")
+            button(ButtonKind::Secondary, "Open settings")
                 .id("meeting-screen-recording")
-                .bg(rgb(CANVAS))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if !crate::meeting::request_screen_recording() {
                         crate::meeting::open_screen_recording_settings();
@@ -4169,7 +3999,7 @@ impl AppWindow {
                 }))
                 .into_any_element()
         };
-        settings_panel()
+        panel()
             .child(
                 settings_row(
                     "Meetings (beta)",
@@ -4201,7 +4031,7 @@ impl AppWindow {
                         if self.screen_recording_permitted {
                             "Captures the other participants' audio"
                         } else {
-                            "Required to hear the other participants. Allow HEX, then reopen it."
+                            "Required to hear the other participants. Allow Hex, then reopen it."
                         },
                         permission_control,
                     ))
@@ -4213,13 +4043,8 @@ impl AppWindow {
                             .items_center()
                             .gap_2()
                             .child(
-                                canvas_button()
+                                button(ButtonKind::Secondary, "Reveal")
                                     .id("reveal-meeting-folder")
-                                    .h(px(32.0))
-                                    .px_2p5()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(MUTED))
-                                    .child("Reveal")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         let folder =
                                             this.settings.meetings.resolved_output_folder();
@@ -4258,14 +4083,7 @@ impl AppWindow {
                         })),
                     )
                     .when_some(self.meeting_folder_error.clone(), |panel, error| {
-                        panel.child(
-                            div()
-                                .px_4()
-                                .py_2()
-                                .text_size(px(11.0))
-                                .text_color(rgb(NEGATIVE))
-                                .child(error),
-                        )
+                        panel.child(inline_error(error))
                     })
             })
     }
@@ -4318,18 +4136,16 @@ impl AppWindow {
     fn render_setup(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let status = self.setup_status;
         let microphone = match status.microphone {
-            PermissionState::Ready => setup_ready_badge(),
-            PermissionState::NeedsRequest => header_button("Allow")
+            PermissionState::Ready => tag(Tone::Success, "Ready").into_any_element(),
+            PermissionState::NeedsRequest => button(ButtonKind::Secondary, "Allow")
                 .id("setup-microphone")
-                .bg(rgb(CANVAS))
                 .on_click(cx.listener(|_this, _, _, cx| {
                     crate::onboarding::request_microphone();
                     cx.notify();
                 }))
                 .into_any_element(),
-            PermissionState::NeedsSettings => header_button("Open Settings")
+            PermissionState::NeedsSettings => button(ButtonKind::Secondary, "Open settings")
                 .id("setup-microphone")
-                .bg(rgb(CANVAS))
                 .on_click(cx.listener(|_this, _, _, cx| {
                     crate::onboarding::open_permission_settings("microphone");
                     cx.notify();
@@ -4343,15 +4159,14 @@ impl AppWindow {
                 if self.settings.commands_enabled {
                     "Hear commands and dictation."
                 } else {
-                    "Record dictation while you hold the shortcut."
+                    "Record dictation while you hold the shortcut"
                 },
                 microphone,
             ));
         }
         if status.input_monitoring != PermissionState::Ready {
-            let input_monitoring = header_button("Grant Access")
+            let input_monitoring = button(ButtonKind::Secondary, "Grant access")
                 .id("setup-input-monitoring")
-                .bg(rgb(CANVAS))
                 .on_click(cx.listener(|_this, _, _, cx| {
                     crate::permission_guide::show_input_monitoring();
                     cx.notify();
@@ -4359,14 +4174,13 @@ impl AppWindow {
                 .into_any_element();
             permission_items.push((
                 "Input Monitoring",
-                "Recognize the dictation shortcut anywhere.",
+                "Recognize the dictation shortcut anywhere",
                 input_monitoring,
             ));
         }
         if status.accessibility != PermissionState::Ready {
-            let accessibility = header_button("Grant Access")
+            let accessibility = button(ButtonKind::Secondary, "Grant access")
                 .id("setup-accessibility")
-                .bg(rgb(CANVAS))
                 .on_click(cx.listener(|_this, _, _, cx| {
                     crate::permission_guide::show_accessibility();
                     cx.notify();
@@ -4377,7 +4191,7 @@ impl AppWindow {
                 if self.settings.commands_enabled {
                     "Paste text and run keyboard commands."
                 } else {
-                    "Paste completed dictation into the foreground app."
+                    "Paste completed dictation into the foreground app"
                 },
                 accessibility,
             ));
@@ -4395,13 +4209,10 @@ impl AppWindow {
         let model_notice =
             dictation_model_notice(status, self.transcription_status.model.is_some());
         let models = if models_ready {
-            setup_ready_badge()
+            tag(Tone::Success, "Ready").into_any_element()
         } else {
-            compact_button("Choose model")
+            button(ButtonKind::Primary, "Choose model")
                 .id("setup-models")
-                .bg(rgb(ACCENT))
-                .text_color(rgb(TEXT))
-                .font_weight(FontWeight::SEMIBOLD)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.transcription_picker_language =
                         Some(this.settings.transcription.language.clone());
@@ -4421,7 +4232,7 @@ impl AppWindow {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x000000dd))
+            .bg(rgba(SCRIM))
             .child(
                 div()
                     .id("setup")
@@ -4430,7 +4241,7 @@ impl AppWindow {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .rounded(px(PANEL_RADIUS + 2.0))
+                    .rounded(RADIUS_MODAL)
                     .border_1()
                     .border_color(rgb(LINE))
                     .bg(rgb(CANVAS))
@@ -4439,16 +4250,11 @@ impl AppWindow {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .child(div().text_headline().child("Set up Hex"))
                             .child(
                                 div()
-                                    .text_size(px(18.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Set up HEX"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(MUTED))
+                                    .text_footnote()
+                                    .text_color(rgb(TEXT_TERTIARY))
                                     .child("Grant permissions and choose a local model to start dictating."),
                             ),
                     )
@@ -4458,8 +4264,8 @@ impl AppWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(setup_group_label("PERMISSIONS NEEDED"))
-                                .child(settings_panel().children(permission_rows)),
+                                .child(section_label("Permissions needed").px_4())
+                                .child(panel().children(permission_rows)),
                         )
                     })
                     .child(
@@ -4467,9 +4273,9 @@ impl AppWindow {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(setup_group_label("LOCAL MODELS"))
+                            .child(section_label("Local models").px_4())
                             .child(
-                                settings_panel().child(
+                                panel().child(
                                     settings_row(
                                         if let Some((title, _)) = model_notice {
                                             title
@@ -4490,9 +4296,8 @@ impl AppWindow {
                     .when(crate::DEVELOPER_FEATURES_ENABLED, |setup| {
                         setup.child(
                             div()
-                                .text_size(px(10.0))
-                                .line_height(px(16.0))
-                                .text_color(rgb(FAINT))
+                                .text_footnote()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .child("Meeting recording requests Screen & System Audio Recording separately when you use it."),
                         )
                     }),
@@ -4502,7 +4307,7 @@ impl AppWindow {
 
     fn render_voice_action(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let enabled = self.settings.voice_action.enabled;
-        let (status, description) = voice_action_status_copy(enabled);
+        let description = voice_action_description(enabled);
         let position = self
             .voice_action_inputs
             .enabled_toggle
@@ -4511,13 +4316,6 @@ impl AppWindow {
             .id("voice-action-enabled")
             .flex()
             .items_center()
-            .gap_3()
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .child(status),
-            )
             .child(toggle(position))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.cancel_hotkey_capture(cx);
@@ -4556,19 +4354,11 @@ impl AppWindow {
             )
             .mt_4();
             Some(
-                settings_panel()
+                panel()
                     .p_4()
                     .child(settings_copy(copy.title, copy.description))
                     .when_some(copy.error, |card, error| {
-                        card.child(
-                            div()
-                                .mt_3()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(DANGER_BORDER))
-                                .bg(rgb(DANGER_SURFACE))
-                                .child(error_message("OpenCode reported:", error)),
-                        )
+                        card.child(error_panel("OpenCode reported:", error).mt_3())
                     })
                     .when(show_actions, |card| card.child(actions))
                     .into_any_element(),
@@ -4576,26 +4366,25 @@ impl AppWindow {
         } else {
             Some(self.render_voice_action_processing(window, cx))
         };
-        settings_pane_titled(
+        settings_pane(
             "Voice Action",
             "voice-action-scroll",
             div()
-                .child(settings_section_label("VOICE ACTION"))
-                .child(settings_panel().child(
+                .child(panel().mt_6().child(
                     settings_row("Enable Voice Action", description, enabled_control).border_b_0(),
                 ))
                 .when_some(self.voice_action_inputs.error.clone(), |column, error| {
                     column.child(error_message("Could not update Voice Action:", error))
                 })
-                .child(settings_section_label("CAPTURE"))
+                .child(settings_section_label("Capture"))
                 .child(
-                    settings_panel().child(
+                    panel().child(
                         settings_row(
                             "Shortcut",
                             if enabled {
-                                "Hold to speak; selected text is included automatically."
+                                "Hold to speak; selected text is included automatically"
                             } else {
-                                "Saved for when Voice Action is enabled."
+                                "Saved for when Voice Action is enabled"
                             },
                             hotkey,
                         )
@@ -4605,7 +4394,7 @@ impl AppWindow {
                 )
                 .when_some(processing, |column, processing| {
                     column
-                        .child(settings_section_label("PROCESSING"))
+                        .child(settings_section_label("Processing"))
                         .child(processing)
                 }),
         )
@@ -4719,7 +4508,7 @@ impl AppWindow {
         let entity = cx.new(|cx| {
             TextInput::multiline(
                 cx,
-                "Names and terms Whisper should expect, e.g. OpenCode, Effect...",
+                "Names and terms Whisper should expect, e.g. OpenCode, Effect…",
                 initial,
             )
         });
@@ -4848,7 +4637,7 @@ impl AppWindow {
                 cx,
             ),
             prompt: Self::multiline_processing_input(
-                "Describe how OpenCode should rewrite your dictation...",
+                "Describe how OpenCode should rewrite your dictation…",
                 &processing.prompt,
                 cx,
             ),
@@ -4964,13 +4753,8 @@ impl AppWindow {
     }
 
     fn render_modes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let compact = window.viewport_size().width < px(980.0);
-        let mode_list_width = if compact { 196.0 } else { 220.0 };
-        let add = compact_header_plus_button()
+        let add = icon_button(ButtonKind::Secondary, Icon::Plus)
             .id("add-dictation-mode")
-            .border_1()
-            .border_color(rgb(LINE))
-            .bg(rgb(SURFACE))
             .on_click(cx.listener(|this, _, window, cx| {
                 if let Some(selection) = this.add_mode(cx) {
                     this.select_mode(selection, window, cx);
@@ -5036,28 +4820,18 @@ impl AppWindow {
                 Some(add.into_any_element()),
             ))
             .child(
-                pane_body().p_5().child(
+                pane_body().child(
                     pane_content()
                         .flex_row()
                         .gap_5()
-                        .child(
-                            div()
-                                .id("modes-list")
-                                .w(px(mode_list_width))
-                                .h_full()
-                                .flex_none()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    compact_panel()
-                                        .id("mode-list-card")
-                                        .overflow_y_scroll()
-                                        .child(
-                                            div().p_2().flex().flex_col().gap_1().children(rows),
-                                        ),
-                                ),
-                        )
+                        .child(pane_list(
+                            "modes-list",
+                            PANE_LIST_WIDTH_COMPACT,
+                            None,
+                            "",
+                            None,
+                            rows,
+                        ))
                         .child(detail),
                 ),
             )
@@ -5067,27 +4841,14 @@ impl AppWindow {
     fn render_mode_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let position = self.mode_context_menu?;
         Some(
-            div()
+            menu()
                 .absolute()
                 .left(position.x)
                 .top(position.y)
-                .w(px(148.0))
-                .p_1()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(rgb(0x444444))
-                .bg(rgb(0x252525))
+                .w(px(MENU_WIDTH))
                 .child(
-                    div()
+                    danger_menu_item()
                         .id("context-delete-mode")
-                        .h(px(30.0))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .rounded(px(5.0))
-                        .text_size(px(11.0))
-                        .text_color(rgb(NEGATIVE))
-                        .hover(|item| item.bg(rgb(SURFACE_HOVER)))
                         .child("Delete mode…")
                         .on_mouse_down(
                             MouseButton::Left,
@@ -5126,11 +4887,11 @@ impl AppWindow {
         let application_picker =
             (!is_default).then(|| self.render_application_picker(selection, cx));
         let basics = if is_default {
-            compact_panel()
+            panel()
                 .child(
                     div()
-                        .min_h(px(64.0))
-                        .px_3()
+                        .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+                        .px_4()
                         .py_2()
                         .flex()
                         .flex_col()
@@ -5142,11 +4903,11 @@ impl AppWindow {
                 )
                 .into_any_element()
         } else {
-            compact_panel()
+            panel()
                 .child(
                     div()
-                        .min_h(px(54.0))
-                        .px_3()
+                        .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+                        .px_4()
                         .py_2()
                         .flex()
                         .items_center()
@@ -5156,20 +4917,19 @@ impl AppWindow {
                         .border_color(rgb(LINE))
                         .child(
                             div()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT))
+                                .text_body()
+                                .font_weight(FontWeight::MEDIUM)
                                 .child("Name"),
                         )
-                        .child(div().w(px(300.0)).flex_none().child(name)),
+                        .child(div().max_w(px(MODE_FIELD_WIDTH)).flex_1().child(name)),
                 )
                 .when_some(application_picker, |panel, picker| {
                     panel.child(div().border_b_1().border_color(rgb(LINE)).child(picker))
                 })
                 .child(
                     div()
-                        .min_h(px(64.0))
-                        .px_3()
+                        .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+                        .px_4()
                         .py_2()
                         .flex()
                         .items_center()
@@ -5179,18 +4939,25 @@ impl AppWindow {
                             "Web pages",
                             "Switch when a domain is active in Brave",
                         ))
-                        .child(div().max_w(px(300.0)).flex_1().child(browser_hosts)),
+                        .child(
+                            div()
+                                .max_w(px(MODE_FIELD_WIDTH))
+                                .flex_1()
+                                .child(browser_hosts),
+                        ),
                 )
                 .into_any_element()
         };
 
         let processing_toggle = div()
             .id("mode-processing-toggle")
-            .h(px(28.0))
+            .h(px(CONTROL_HEIGHT))
             .flex()
             .items_center()
             .child(toggle(processing_position))
-            .when(!processing_can_toggle, |control| control.opacity(0.42))
+            .when(!processing_can_toggle, |control| {
+                control.opacity(DISABLED_OPACITY)
+            })
             .when(processing_can_toggle, |control| {
                 control.on_click(cx.listener(move |this, _, _, cx| {
                     let enabled = !this.selected_mode_settings().post_processing.enabled;
@@ -5225,7 +4992,7 @@ impl AppWindow {
             )
             .items_center();
             div()
-                .px_3()
+                .px_4()
                 .py_3()
                 .flex()
                 .items_start()
@@ -5239,37 +5006,35 @@ impl AppWindow {
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap_0p5()
                         .child(
                             div()
-                                .text_size(px(11.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT_SOFT))
+                                .text_body()
+                                .font_weight(FontWeight::MEDIUM)
                                 .child(copy.title),
                         )
                         .child(
                             div()
-                                .text_size(px(10.0))
-                                .line_height(px(16.0))
+                                .text_footnote()
                                 .text_color(rgb(if copy.error.is_some() {
-                                    NEGATIVE
+                                    DANGER
                                 } else {
-                                    FAINT
+                                    TEXT_TERTIARY
                                 }))
                                 .child(copy.error.unwrap_or_else(|| copy.description.into())),
                         ),
                 )
                 .when(show_actions, |notice| notice.child(actions))
         });
-        let processing = compact_panel()
+        let processing = panel()
             .child(
-                compact_panel_header("OpenCode transformation", Some(processing_toggle)).when(
+                panel_header("OpenCode transformation", Some(processing_toggle)).when(
                     !processing_enabled && processing_unavailable.is_none(),
                     |header| header.border_b_0(),
                 ),
             )
             .when_some(processing_settings, |panel, settings| {
-                panel.child(div().px_3().pb_3().child(settings))
+                panel.child(div().px_4().pb_4().child(settings))
             })
             .when_some(processing_unavailable, |panel, unavailable| {
                 panel.child(unavailable)
@@ -5277,46 +5042,39 @@ impl AppWindow {
             .into_any_element();
 
         let remove = (!is_default).then(|| {
-            let action =
-                if self.mode_delete_armed {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(compact_button("Cancel").id("cancel-remove-mode").on_click(
-                            cx.listener(|this, _, _, cx| {
+            let action = if self.mode_delete_armed {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        button(ButtonKind::Secondary, "Cancel")
+                            .id("cancel-remove-mode")
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.mode_delete_armed = false;
                                 cx.notify();
-                            }),
-                        ))
-                        .child(
-                            compact_button("Confirm delete")
-                                .id("confirm-remove-mode")
-                                .border_1()
-                                .border_color(rgb(DANGER_BORDER))
-                                .bg(rgb(DANGER_SURFACE))
-                                .text_color(rgb(NEGATIVE))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let ModeSelection::Custom(index) = this.selected_mode else {
-                                        return;
-                                    };
-                                    this.delete_mode(index, cx);
-                                })),
-                        )
-                        .into_any_element()
-                } else {
-                    compact_button("Delete mode")
-                        .id("remove-selected-mode")
-                        .border_1()
-                        .border_color(rgb(DANGER_BORDER))
-                        .bg(rgb(DANGER_SURFACE))
-                        .text_color(rgb(NEGATIVE))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.mode_delete_armed = true;
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                };
+                            })),
+                    )
+                    .child(
+                        button(ButtonKind::Danger, "Confirm delete")
+                            .id("confirm-remove-mode")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let ModeSelection::Custom(index) = this.selected_mode else {
+                                    return;
+                                };
+                                this.delete_mode(index, cx);
+                            })),
+                    )
+                    .into_any_element()
+            } else {
+                button(ButtonKind::Danger, "Delete mode")
+                    .id("remove-selected-mode")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.mode_delete_armed = true;
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            };
             div()
                 .pt_2()
                 .flex()
@@ -5335,14 +5093,11 @@ impl AppWindow {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(700.0))
                     .flex()
                     .flex_col()
-                    .gap(px(SECTION_GAP))
-                    .pb_5()
+                    .gap_2()
                     .child(basics)
-                    .child(div().h(px(4.0)))
-                    .child(compact_section_label("TEXT PROCESSING"))
+                    .child(section_label("Text processing").pt_2().px_4())
                     .child(corrections)
                     .child(processing)
                     .child(transformations)
@@ -5378,8 +5133,9 @@ impl AppWindow {
                 let drop_id = id.clone();
                 div()
                     .id(("mode-transformation", target_index))
-                    .h(px(36.0))
-                    .px_2()
+                    .h(px(CONTROL_HEIGHT + SPACE_2))
+                    .pl_2()
+                    .pr_1()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -5406,37 +5162,26 @@ impl AppWindow {
                     .child(
                         div()
                             .id(("drag-mode-transformation", target_index))
-                            .w(px(20.0))
+                            .w_5()
                             .h_full()
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(12.0))
-                            .text_color(rgb(FAINT))
-                            .child("⠿")
+                            .cursor_grab()
+                            .child(icon(Icon::DragHandle, TEXT_DISABLED))
                             .on_drag(drag, |drag, position, _, cx| {
                                 cx.new(|_| drag.clone().at(position))
                             }),
                     )
                     .child(
-                        div()
+                        truncated_line(BODY, name)
                             .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_x_hidden()
-                            .text_size(px(11.0))
-                            .text_color(rgb(TEXT_SOFT))
-                            .truncate()
-                            .child(name),
+                            .text_color(rgb(TEXT_SECONDARY)),
                     )
                     .child(
-                        compact_button("×")
+                        icon_button(ButtonKind::Ghost, Icon::Close)
                             .id(("remove-mode-transformation", target_index))
-                            .size(px(28.0))
-                            .px_0()
-                            .justify_center()
-                            .text_size(px(14.0))
-                            .text_color(rgb(MUTED))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.update_mode_settings(selection, cx, |mode| {
                                     mode.transformations
@@ -5459,8 +5204,8 @@ impl AppWindow {
                     let description = transformation.description.clone();
                     div()
                         .id(("available-mode-transformation", index))
-                        .min_h(px(40.0))
-                        .px_3()
+                        .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+                        .px_4()
                         .py_2()
                         .flex()
                         .items_center()
@@ -5475,28 +5220,22 @@ impl AppWindow {
                                 .min_w(px(0.0))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(TEXT_SOFT))
+                                        .text_body()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(TEXT_SECONDARY))
                                         .child(name),
                                 )
                                 .when_some(description, |copy, description| {
                                     copy.child(
                                         div()
-                                            .pt_1()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(FAINT))
+                                            .pt_0p5()
+                                            .text_footnote()
+                                            .text_color(rgb(TEXT_TERTIARY))
                                             .child(description),
                                     )
                                 }),
                         )
-                        .child(
-                            canvas_button()
-                                .h(px(24.0))
-                                .px_2()
-                                .text_size(px(10.0))
-                                .child("Add"),
-                        )
+                        .child(small_button(ButtonKind::Secondary, "Add"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.update_mode_settings(selection, cx, |mode| {
                                 mode.transformations.push(id.clone());
@@ -5511,15 +5250,12 @@ impl AppWindow {
         let available_empty = available_rows.is_empty();
         let catalog_empty = catalog.is_empty();
         let add = (!catalog_empty).then(|| {
-            let button = if self.transformation_picker_open {
-                compact_button("Done")
-                    .h(px(28.0))
-                    .mr(px(-7.0))
-                    .text_size(px(10.0))
+            let control = if self.transformation_picker_open {
+                small_button(ButtonKind::Secondary, "Done")
             } else {
-                compact_header_plus_button()
+                icon_button(ButtonKind::Ghost, Icon::Plus).mr(px(-SPACE_2))
             };
-            button
+            control
                 .id("toggle-transformation-picker")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.transformation_picker_open = !this.transformation_picker_open;
@@ -5528,8 +5264,8 @@ impl AppWindow {
                 .into_any_element()
         });
 
-        compact_panel()
-            .child(compact_panel_header("Transformations", add).when(
+        panel()
+            .child(panel_header("Transformations", add).when(
                 selected.is_empty() && !self.transformation_picker_open,
                 |header| header.border_b_0(),
             ))
@@ -5541,10 +5277,10 @@ impl AppWindow {
                             div()
                                 .border_t_1()
                                 .border_color(rgb(LINE))
-                                .px_3()
+                                .px_4()
                                 .py_3()
-                                .text_size(px(10.0))
-                                .text_color(rgb(MUTED))
+                                .text_footnote()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .child("Every registered transformation is already included."),
                         )
                     })
@@ -5564,35 +5300,26 @@ impl AppWindow {
             let name = name.clone();
             div()
                 .id(("selected-application", index))
-                .h(px(30.0))
+                .h(px(CONTROL_HEIGHT_SMALL))
                 .pl_1()
-                .pr_1()
                 .flex()
                 .items_center()
-                .gap_1()
-                .rounded_sm()
+                .gap_1p5()
+                .rounded(RADIUS_SMALL)
                 .bg(rgb(SURFACE_SELECTED))
-                .border_1()
-                .border_color(rgb(LINE))
-                .child(application_icon(application, Some(name.as_str()), 20.0))
+                .text_caption()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(TEXT_SECONDARY))
+                .child(application_icon(
+                    application,
+                    Some(name.as_str()),
+                    ICON_SIZE + 2.0,
+                ))
+                .child(name.clone())
                 .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(TEXT_SOFT))
-                        .child(name.clone()),
-                )
-                .child(
-                    div()
+                    icon_button(ButtonKind::Ghost, Icon::Close)
                         .id(("remove-selected-application", index))
-                        .size(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_sm()
-                        .text_size(px(14.0))
-                        .text_color(rgb(FAINT))
-                        .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_SOFT)))
-                        .child("×")
+                        .size(px(CONTROL_HEIGHT_SMALL))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.remove_mode_application(selection, &name, cx);
                         })),
@@ -5622,42 +5349,25 @@ impl AppWindow {
                         .path
                         .parent()
                         .map_or_else(String::new, |path| path.display().to_string());
-                    div()
+                    list_row(index == self.application_picker_highlight)
                         .id(("available-application", index))
-                        .w_full()
-                        .px_2()
-                        .py_2()
-                        .flex()
+                        .flex_row()
                         .items_center()
                         .gap_3()
-                        .border_b_1()
-                        .border_color(rgb(LINE))
-                        .when(index == self.application_picker_highlight, |row| {
-                            row.bg(rgb(SURFACE_SELECTED))
-                        })
-                        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
-                        .child(application_icon(Some(&application), Some(&name), 30.0))
+                        .child(application_icon(
+                            Some(&application),
+                            Some(&name),
+                            CONTROL_HEIGHT,
+                        ))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w(px(0.0))
                                 .flex()
                                 .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(TEXT_SOFT))
-                                        .child(name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(rgb(FAINT))
-                                        .overflow_hidden()
-                                        .child(location),
-                                ),
+                                .gap_0p5()
+                                .child(list_row_title(name.clone(), false))
+                                .child(list_row_meta(location, false)),
                         )
                         .on_mouse_down(
                             MouseButton::Left,
@@ -5667,7 +5377,7 @@ impl AppWindow {
                         )
                 });
         let picker_status = match &self.application_catalog {
-            ApplicationCatalogState::Loading => Some("Finding applications on this Mac...".into()),
+            ApplicationCatalogState::Loading => Some("Finding applications on this Mac…".into()),
             ApplicationCatalogState::Loaded(applications) if applications.is_empty() => {
                 Some("No applications found.".into())
             }
@@ -5678,20 +5388,24 @@ impl AppWindow {
         };
         let tray = self.application_picker_open.then(|| {
             div()
-                .mt_2()
+                .mx_4()
+                .mb_4()
                 .p_2()
-                .rounded_sm()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .rounded(RADIUS_CONTROL)
                 .border_1()
                 .border_color(rgb(LINE))
-                .bg(rgb(SURFACE))
+                .bg(rgb(CANVAS))
                 .child(self.application_search.entity.clone())
                 .when_some(picker_status, |tray, status| {
                     tray.child(
                         div()
                             .px_2()
                             .py_3()
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
+                            .text_footnote()
+                            .text_color(rgb(TEXT_TERTIARY))
                             .child(status),
                     )
                 })
@@ -5709,33 +5423,15 @@ impl AppWindow {
                         .items_center()
                         .justify_between()
                         .child(
-                            div()
+                            small_button(ButtonKind::Secondary, "Choose from Finder…")
                                 .id("choose-application-bundle")
-                                .h(px(28.0))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .rounded_sm()
-                                .text_size(px(11.0))
-                                .text_color(rgb(TEXT_SOFT))
-                                .hover(|button| button.bg(rgb(SURFACE_HOVER)))
-                                .child("Choose from Finder...")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.choose_application(selection, cx);
                                 })),
                         )
                         .child(
-                            div()
+                            small_button(ButtonKind::Secondary, "Done")
                                 .id("close-application-picker")
-                                .h(px(28.0))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .rounded_sm()
-                                .text_size(px(11.0))
-                                .text_color(rgb(MUTED))
-                                .hover(|button| button.bg(rgb(SURFACE_HOVER)))
-                                .child("Done")
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.close_application_picker(cx);
                                     window.blur();
@@ -5749,8 +5445,8 @@ impl AppWindow {
             .flex_col()
             .child(
                 div()
-                    .min_h(px(64.0))
-                    .px_3()
+                    .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+                    .px_4()
                     .py_2()
                     .flex()
                     .items_center()
@@ -5762,10 +5458,9 @@ impl AppWindow {
                     ))
                     .child(
                         div()
-                            .max_w(px(300.0))
+                            .max_w(px(MODE_FIELD_WIDTH))
                             .min_h(px(CONTROL_HEIGHT))
                             .flex_1()
-                            .p_1()
                             .flex()
                             .flex_wrap()
                             .items_center()
@@ -5773,12 +5468,8 @@ impl AppWindow {
                             .gap_1()
                             .children(selected_rows)
                             .child(
-                                compact_plus_button()
+                                icon_button(ButtonKind::Secondary, Icon::Plus)
                                     .id("open-application-picker")
-                                    .size(px(30.0))
-                                    .border_1()
-                                    .border_color(rgb(LINE))
-                                    .bg(rgb(CANVAS))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.application_picker_highlight = 0;
                                         this.application_picker_open = true;
@@ -5797,12 +5488,7 @@ impl AppWindow {
                     ),
             )
             .when_some(self.application_picker_error.clone(), |picker, error| {
-                picker.child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(NEGATIVE))
-                        .child(error),
-                )
+                picker.child(inline_error(error))
             })
             .when_some(tray, |picker, tray| picker.child(tray))
             .into_any_element()
@@ -5972,7 +5658,7 @@ impl AppWindow {
         let presentation = model_presentation(&self.model_catalog, selected_model);
         let (catalog_status, default_label, matches, variants) = match &self.model_catalog {
             ModelCatalogState::Loading => {
-                ("Loading OpenCode...".into(), None, Vec::new(), Vec::new())
+                ("Loading OpenCode…".into(), None, Vec::new(), Vec::new())
             }
             ModelCatalogState::Missing => (
                 "OpenCode beta required".into(),
@@ -6022,12 +5708,8 @@ impl AppWindow {
         };
         let suggestions =
             (focused && (!matches.is_empty() || default_label.is_some())).then(|| {
-                div()
+                menu()
                     .mt_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .bg(rgb(SURFACE))
                     .when_some(default_label.clone(), |list, label| {
                         list.child(
                             model_choice_row(
@@ -6077,28 +5759,13 @@ impl AppWindow {
             let choices = std::iter::once(None)
                 .chain(variants.iter().cloned().map(Some))
                 .collect::<Vec<_>>();
-            div()
+            menu()
                 .mt_1()
-                .p_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(SURFACE))
                 .children(choices.into_iter().enumerate().map(|(index, variant)| {
                     let selected = effective_variant == variant.as_deref();
                     let label = variant.clone().unwrap_or_else(|| "Default".into());
-                    div()
+                    menu_item(selected)
                         .id(("model-variant", index))
-                        .w_full()
-                        .h(px(28.0))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .rounded_sm()
-                        .text_size(px(11.0))
-                        .text_color(if selected { rgb(TEXT) } else { rgb(TEXT_SOFT) })
-                        .when(selected, |row| row.bg(rgb(SURFACE_SELECTED)))
-                        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.variant_picker_open = None;
@@ -6125,58 +5792,27 @@ impl AppWindow {
             .when_some(variant_list, |control, list| control.child(list));
         let model_control = if let Some(presentation) = presentation.filter(|_| !focused) {
             let model_input = model.clone();
-            canvas_button()
+            disclosure_frame()
                 .id("selected-model")
                 .w_full()
-                .h(px(TEXT_INPUT_HEIGHT))
-                .px_3()
-                .justify_between()
-                .gap_2()
+                .flex_shrink()
                 .child(
-                    div()
+                    truncated_line(FOOTNOTE, presentation.name)
                         .flex_1()
-                        .min_w(px(0.0))
-                        .overflow_x_hidden()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT))
-                                .truncate()
-                                .child(presentation.name),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(MUTED))
-                                .truncate()
-                                .child(presentation.provider),
-                        ),
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(TEXT_PRIMARY)),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .when(presentation.is_default, |right| {
-                            right.child(
-                                div()
-                                    .px_1p5()
-                                    .py(px(1.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(SURFACE_SELECTED))
-                                    .text_size(px(9.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(TEXT_SOFT))
-                                    .child("Default"),
-                            )
-                        })
-                        .child(div().text_size(px(10.0)).text_color(rgb(MUTED)).child("⌄")),
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
+                        .child(presentation.provider),
                 )
+                .when(presentation.is_default, |control| {
+                    control.child(tag(Tone::Neutral, "Default"))
+                })
+                .child(icon(Icon::ChevronDown, TEXT_TERTIARY))
                 .on_click(cx.listener(move |_, _, window, cx| {
                     model_input.focus_handle(cx).focus(window);
                     cx.notify();
@@ -6187,12 +5823,8 @@ impl AppWindow {
         };
         let refresh_control =
             matches!(&self.model_catalog, ModelCatalogState::Loaded(_)).then(|| {
-                canvas_button()
+                button(ButtonKind::Secondary, "Refresh")
                     .id("refresh-opencode-models")
-                    .h(px(TEXT_INPUT_HEIGHT))
-                    .px_3()
-                    .text_size(px(12.0))
-                    .child("Refresh")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.reload_model_catalog();
                         cx.notify();
@@ -6225,7 +5857,7 @@ impl AppWindow {
             .gap_2()
             .when(copy.can_retry, |actions| {
                 actions.child(
-                    header_button(copy.retry_label)
+                    button(ButtonKind::Secondary, copy.retry_label)
                         .id(retry_id)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.reload_model_catalog();
@@ -6235,7 +5867,7 @@ impl AppWindow {
             })
             .when(copy.can_open_setup, |actions| {
                 actions.child(
-                    header_button(setup_label)
+                    button(ButtonKind::Secondary, setup_label)
                         .id(setup_id)
                         .on_click(|_, _, _| open_opencode_beta_docs()),
                 )
@@ -6268,7 +5900,7 @@ impl AppWindow {
                     .when_some(refresh_control, |row, refresh| row.child(refresh)),
             )
             .when_some(suggestions, |field, suggestions| field.child(suggestions));
-        settings_panel()
+        panel()
             .child(
                 settings_row("OpenCode model", catalog_status, model_field)
                     .when(!has_variants, |row| row.border_b_0()),
@@ -6333,7 +5965,8 @@ impl AppWindow {
                                 matches!(&self.model_catalog, ModelCatalogState::Missing),
                                 |field| {
                                     field.child(
-                                        compact_button("Install OpenCode")
+                                        button(ButtonKind::Secondary, "Install OpenCode")
+                                            .mt_2()
                                             .id("install-opencode-beta")
                                             .on_click(|_, _, _| open_opencode_beta_docs()),
                                     )
@@ -6354,13 +5987,7 @@ impl AppWindow {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT_SOFT))
-                                .child("Thinking"),
-                        )
+                        .child(field_label("Thinking"))
                         .child(div().flex().child(variant_control)),
                 )
             })
@@ -6516,26 +6143,35 @@ impl AppWindow {
     }
 
     fn render_meetings(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let action = match meeting::active(&self.meetings).map(|meeting| meeting.status) {
-            _ if self.meeting_stop_pending => meeting_progress_action("Finalizing..."),
-            Some(MeetingStatus::Transcribing) => meeting_progress_action("Finalizing..."),
-            Some(MeetingStatus::Starting) => meeting_progress_action("Starting..."),
-            Some(MeetingStatus::Recording) => {
-                meeting_action_button("stop-meeting", "Stop & Transcribe")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.meeting_stop_pending = true;
-                        if let Err(error) = this.meeting_requests.try_send(MeetingRequest::Stop) {
-                            this.meeting_stop_pending = false;
-                            log_meeting_request_error(error);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            }
+        let active_meeting = meeting::active(&self.meetings);
+        let action = match active_meeting.map(|meeting| meeting.status) {
+            _ if self.meeting_stop_pending => busy_label("Finalizing…").into_any_element(),
+            Some(MeetingStatus::Transcribing) => busy_label("Finalizing…").into_any_element(),
+            Some(MeetingStatus::Starting) => busy_label("Starting…").into_any_element(),
+            // Recording is a state, not the screen's main action: a neutral
+            // button in the same red-dot language as the Recording tag.
+            Some(MeetingStatus::Recording) => button(ButtonKind::Secondary, status_dot(DANGER))
+                .child("Stop & transcribe")
+                .children(active_meeting.map(|meeting| {
+                    div()
+                        .text_color(rgb(TEXT_TERTIARY))
+                        .child(meeting::format_duration(meeting_duration(meeting)))
+                }))
+                .id("stop-meeting")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.meeting_stop_pending = true;
+                    if let Err(error) = this.meeting_requests.try_send(MeetingRequest::Stop) {
+                        this.meeting_stop_pending = false;
+                        log_meeting_request_error(error);
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
             _ if self.meeting_refresh_started_ms.is_some() => {
-                meeting_progress_action("Starting...")
+                busy_label("Starting…").into_any_element()
             }
-            _ => meeting_action_button("start-meeting", "Start Recording")
+            _ => button(ButtonKind::Primary, "Start recording")
+                .id("start-meeting")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.meeting_refresh_started_ms = Some(now_ms());
                     if let Err(error) = this.meeting_requests.try_send(MeetingRequest::Start) {
@@ -6549,8 +6185,12 @@ impl AppWindow {
         let header_action = div()
             .flex()
             .items_center()
-            .gap_3()
-            .child(div().w(px(220.0)).child(self.meeting_search.entity.clone()))
+            .gap_2()
+            .child(
+                div()
+                    .w(px(SEARCH_FIELD_WIDTH))
+                    .child(self.meeting_search.entity.clone()),
+            )
             .child(action)
             .into_any_element();
 
@@ -6562,13 +6202,7 @@ impl AppWindow {
         for (index, meeting) in visible.iter().enumerate() {
             let day = meeting::day_label(meeting.created_at_ms, now);
             if current_day.as_ref() != Some(&day) {
-                rows.push(
-                    compact_section_label(day.clone())
-                        .pt(px(if rows.is_empty() { 4.0 } else { 12.0 }))
-                        .pb_1()
-                        .px_3()
-                        .into_any_element(),
-                );
+                rows.push(list_section_label(day.clone(), rows.is_empty()).into_any_element());
                 current_day = Some(day);
             }
             let id = meeting.id.clone();
@@ -6588,15 +6222,7 @@ impl AppWindow {
                             .items_center()
                             .gap_2()
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_x_hidden()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(if selected { TEXT } else { TEXT_SOFT }))
-                                    .truncate()
-                                    .child(meeting::display_title(meeting)),
+                                list_row_title(meeting::display_title(meeting), selected).flex_1(),
                             )
                             .when_some(
                                 meeting_status_chip(
@@ -6607,15 +6233,7 @@ impl AppWindow {
                                 |row, chip| row.child(chip),
                             ),
                     )
-                    .child(
-                        div()
-                            .w_full()
-                            .overflow_x_hidden()
-                            .text_size(px(10.0))
-                            .text_color(rgb(if selected { TEXT_SOFT } else { FAINT }))
-                            .truncate()
-                            .child(meta.join(" · ")),
-                    )
+                    .child(list_row_meta(meta.join(" · "), selected))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select_meeting(id.clone());
                         cx.notify();
@@ -6624,8 +6242,9 @@ impl AppWindow {
             );
         }
 
-        let list = pane_list_card(
+        let list = pane_list(
             "meetings-list",
+            PANE_LIST_WIDTH,
             (visible.is_empty() && self.meetings_error.is_none()).then_some(if searching {
                 "No meetings match."
             } else {
@@ -6641,36 +6260,24 @@ impl AppWindow {
             .flex()
             .flex_col()
             .child(pane_header_with_action("Meetings", Some(header_action)))
-            .when_some(self.meeting_runtime_error.clone(), |pane, error| {
-                pane.child(
-                    div().flex().justify_center().px_8().child(
-                        div()
-                            .w_full()
-                            .max_w(px(PANE_CONTENT_WIDTH))
-                            .py_3()
-                            .border_b_1()
-                            .border_color(rgb(LINE))
-                            .text_size(px(12.0))
-                            .text_color(rgb(NEGATIVE))
-                            .child(error),
-                    ),
-                )
-            })
             .child(
-                pane_body().p_5().child(
+                pane_body().child(
                     pane_content()
                         .id("meetings-workspace")
-                        .flex_row()
-                        .gap_5()
-                        .child(list)
+                        .gap_3()
+                        .when_some(self.meeting_runtime_error.clone(), |column, error| {
+                            column.child(
+                                error_panel("Meeting could not be recorded.", error).flex_none(),
+                            )
+                        })
                         .child(
-                            compact_panel()
+                            div()
                                 .flex_1()
-                                .min_w(px(0.0))
-                                .h_full()
+                                .min_h(px(0.0))
                                 .flex()
-                                .flex_col()
-                                .child(self.render_meeting_detail(cx)),
+                                .gap_5()
+                                .child(list)
+                                .child(pane_detail(self.render_meeting_detail(cx))),
                         ),
                 ),
             )
@@ -6699,29 +6306,33 @@ impl AppWindow {
                 .as_ref()
                 .is_some_and(|(copied_id, copied)| copied_id == &id && *copied == what)
         };
-        let action = |key: &'static str, label: &'static str| {
-            canvas_button()
-                .id(SharedString::from(format!("meeting-action-{key}")))
-                .h(px(28.0))
-                .px_3()
-                .flex_none()
-                .text_size(px(12.0))
-                .child(label)
+        let action_of = |kind: ButtonKind, key: &'static str, label: &'static str| {
+            button(kind, label).id(SharedString::from(format!("meeting-action-{key}")))
+        };
+        let action =
+            |key: &'static str, label: &'static str| action_of(ButtonKind::Secondary, key, label);
+        let menu_action = |key: &'static str, item: Div| {
+            item.id(SharedString::from(format!("meeting-action-{key}")))
         };
 
+        // Copy transcript and Rename stay visible; the rest live in the
+        // overflow menu, with Delete last.
         let mut actions: Vec<AnyElement> = Vec::new();
+        let mut menu_items: Vec<AnyElement> = Vec::new();
         if let Some(notes) = meeting.notes.clone() {
             let id = id.clone();
-            actions.push(
-                action(
+            menu_items.push(
+                menu_action(
                     "copy-notes",
-                    if copied("notes") {
+                    menu_item(false).child(if copied("notes") {
                         "Copied"
                     } else {
-                        "Copy Summary"
-                    },
+                        "Copy summary"
+                    }),
                 )
+                // Stays open so "Copied" confirms the copy.
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
                     this.copy_meeting_text(id.clone(), "notes", meeting::notes_markdown(&notes), cx)
                 }))
                 .into_any_element(),
@@ -6736,7 +6347,7 @@ impl AppWindow {
                     if copied("transcript") {
                         "Copied"
                     } else {
-                        "Copy Transcript"
+                        "Copy transcript"
                     },
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -6750,23 +6361,33 @@ impl AppWindow {
                 .into_any_element(),
             );
         }
+        if !active && self.meeting_rename.is_none() {
+            let (id, title) = (id.clone(), title.clone());
+            actions.push(
+                action("rename", "Rename")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_meeting_rename(id.clone(), title.clone(), window, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
         if !active {
             let export_path = meeting.export_path.clone().filter(|path| path.exists());
             let reveal_id = id.clone();
-            actions.push(
-                action(
+            menu_items.push(
+                menu_action(
                     "reveal",
-                    if export_path.is_some() {
+                    menu_item(false).child(if export_path.is_some() {
                         "Reveal Markdown"
                     } else {
-                        "Reveal Files"
-                    },
-                )
-                .on_click(
-                    cx.listener(move |_, _, _, _| {
-                        reveal_meeting(&reveal_id, export_path.as_deref())
+                        "Reveal files"
                     }),
                 )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.meeting_actions_open = false;
+                    reveal_meeting(&reveal_id, export_path.as_deref());
+                    cx.notify();
+                }))
                 .into_any_element(),
             );
         }
@@ -6775,19 +6396,24 @@ impl AppWindow {
             && self.apple_intelligence_availability().is_available()
         {
             if notes_running {
-                actions.push(meeting_progress_action("Summarizing..."));
+                menu_items.push(
+                    disabled_menu_item()
+                        .child("Summarizing…")
+                        .into_any_element(),
+                );
             } else {
                 let id = id.clone();
-                actions.push(
-                    action(
+                menu_items.push(
+                    menu_action(
                         "notes",
-                        if meeting.notes.is_some() {
-                            "Regenerate Summary"
+                        menu_item(false).child(if meeting.notes.is_some() {
+                            "Regenerate summary"
                         } else {
                             "Summarize"
-                        },
+                        }),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.meeting_actions_open = false;
                         if let Err(error) = this
                             .meeting_requests
                             .try_send(MeetingRequest::Summarize(id.clone()))
@@ -6800,55 +6426,80 @@ impl AppWindow {
                 );
             }
         }
-        if !active && self.meeting_rename.is_none() {
-            let (id, title) = (id.clone(), title.clone());
-            actions.push(
-                action("rename", "Rename")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_meeting_rename(id.clone(), title.clone(), window, cx)
+        let armed = self.meeting_delete_armed.as_deref() == Some(id.as_str());
+        if !active && !notes_running && !armed {
+            let delete_id = id.clone();
+            if !menu_items.is_empty() {
+                menu_items.push(menu_separator().into_any_element());
+            }
+            menu_items.push(
+                menu_action("delete", danger_menu_item().child("Delete…"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.meeting_actions_open = false;
+                        this.trash_meeting(delete_id.clone(), cx)
                     }))
                     .into_any_element(),
             );
         }
-        if !active && !notes_running {
-            let armed = self.meeting_delete_armed.as_deref() == Some(id.as_str());
+        if !menu_items.is_empty() {
+            let trigger = icon_button(ButtonKind::Secondary, Icon::Ellipsis)
+                .id("meeting-action-more")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.meeting_actions_open = true;
+                    cx.notify();
+                }));
+            actions.push(
+                div()
+                    .relative()
+                    .child(trigger)
+                    .when(self.meeting_actions_open, |more| {
+                        more.child(deferred(
+                            dropdown_menu()
+                                .id("meeting-actions-menu")
+                                .debug_selector(|| "meeting-actions-menu".into())
+                                .left_0()
+                                .w(px(MENU_WIDTH))
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.meeting_actions_open = false;
+                                    cx.notify();
+                                }))
+                                .children(menu_items),
+                        ))
+                    })
+                    .into_any_element(),
+            );
+        }
+        if !active && !notes_running && armed {
+            // The confirmation takes the whole row until it is answered.
+            actions.clear();
             let delete_id = id.clone();
             actions.push(
-                action(
+                action_of(
+                    ButtonKind::Danger,
                     "delete",
-                    match (
-                        armed,
-                        meeting
-                            .export_path
-                            .as_ref()
-                            .is_some_and(|path| path.exists()),
-                    ) {
-                        (false, _) => "Delete",
-                        (true, true) => "Trash Recording & Markdown",
-                        (true, false) => "Trash Recording",
+                    if meeting
+                        .export_path
+                        .as_ref()
+                        .is_some_and(|path| path.exists())
+                    {
+                        "Trash recording & Markdown"
+                    } else {
+                        "Trash recording"
                     },
                 )
-                .when(armed, |button| {
-                    button
-                        .border_color(rgb(DANGER_BORDER))
-                        .bg(rgb(DANGER_SURFACE))
-                        .text_color(rgb(NEGATIVE))
-                })
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.trash_meeting(delete_id.clone(), cx)),
                 )
                 .into_any_element(),
             );
-            if armed {
-                actions.push(
-                    action("cancel-delete", "Cancel")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.meeting_delete_armed = None;
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                );
-            }
+            actions.push(
+                action("cancel-delete", "Cancel")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.meeting_delete_armed = None;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
         }
 
         let title_row: AnyElement = match &self.meeting_rename {
@@ -6868,12 +6519,7 @@ impl AppWindow {
                     })),
                 )
                 .into_any_element(),
-            _ => div()
-                .text_size(px(20.0))
-                .line_height(px(26.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(title)
-                .into_any_element(),
+            _ => detail_title(title).into_any_element(),
         };
 
         let mut meta = vec![
@@ -6884,50 +6530,54 @@ impl AppWindow {
         meta.extend(meeting.app.clone());
 
         let errors = [
-            self.meeting_action_error.clone(),
-            meeting.error.clone(),
+            self.meeting_action_error
+                .clone()
+                .map(|error| ("Meeting could not be updated.", error)),
+            meeting
+                .error
+                .clone()
+                .map(|error| ("Recording failed.", error)),
             meeting
                 .export_error
                 .clone()
-                .map(|error| format!("Markdown not saved: {error}")),
+                .map(|error| ("Markdown not saved.", error)),
             meeting
                 .notes_error
                 .clone()
                 .filter(|_| !notes_running)
-                .map(|error| format!("Notes: {error}")),
+                .map(|error| ("Notes could not be written.", error)),
             meeting
                 .live_transcription_error
                 .clone()
                 .filter(|_| active)
-                .map(|error| format!("Live draft unavailable: {error}")),
+                .map(|error| ("Live draft unavailable.", error)),
         ]
         .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .flatten();
 
         let notes = meeting.notes.clone().map(render_meeting_notes).or_else(|| {
             notes_running.then(|| {
                 div()
                     .pb_5()
-                    .text_size(px(12.0))
-                    .text_color(rgb(MUTED))
-                    .child("Writing a title and summary with Apple Intelligence...")
+                    .text_footnote()
+                    .text_color(rgb(TEXT_TERTIARY))
+                    .child("Writing a title and summary with Apple Intelligence…")
             })
         });
 
         let transcript = match &self.meeting_transcript {
-            MeetingTranscript::Empty => empty_message("No transcript selected."),
+            MeetingTranscript::Empty => empty_state("No transcript selected."),
             MeetingTranscript::Loaded(lines) if lines.is_empty() => {
-                empty_message(match meeting.status {
-                    MeetingStatus::Starting => "Preparing local audio capture...",
+                empty_state(match meeting.status {
+                    MeetingStatus::Starting => "Preparing local audio capture…",
                     MeetingStatus::Recording if meeting.live_transcription_error.is_some() => {
                         "Live transcription is unavailable. Audio is still recording safely."
                     }
                     MeetingStatus::Recording if self.meeting_stop_pending => {
-                        "Building the final transcript..."
+                        "Building the final transcript…"
                     }
-                    MeetingStatus::Recording => "Listening for speech...",
-                    MeetingStatus::Transcribing => "Building the final transcript...",
+                    MeetingStatus::Recording => "Listening for speech…",
+                    MeetingStatus::Transcribing => "Building the final transcript…",
                     MeetingStatus::Complete => "No speech was transcribed.",
                     MeetingStatus::Interrupted | MeetingStatus::Failed => {
                         "No recoverable transcript is available."
@@ -6952,10 +6602,10 @@ impl AppWindow {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .text_size(px(11.0))
-                            .text_color(rgb(FAINT))
-                            .child(div().size(px(6.0)).rounded_full().bg(rgb(NEGATIVE)))
-                            .child("Listening..."),
+                            .text_caption()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .child(status_dot(DANGER))
+                            .child("Listening…"),
                     )
                 })
                 .into_any_element(),
@@ -6965,13 +6615,13 @@ impl AppWindow {
         };
         let transcript_label = match meeting.status {
             MeetingStatus::Starting | MeetingStatus::Recording if !self.meeting_stop_pending => {
-                "LIVE TRANSCRIPT"
+                "Live transcript"
             }
             MeetingStatus::Starting | MeetingStatus::Recording | MeetingStatus::Transcribing => {
-                "DRAFT TRANSCRIPT"
+                "Draft transcript"
             }
-            MeetingStatus::Complete => "TRANSCRIPT",
-            MeetingStatus::Interrupted | MeetingStatus::Failed => "RECOVERED DRAFT",
+            MeetingStatus::Complete => "Transcript",
+            MeetingStatus::Interrupted | MeetingStatus::Failed => "Recovered draft",
         };
 
         div()
@@ -6982,78 +6632,21 @@ impl AppWindow {
             .overflow_hidden()
             .flex()
             .flex_col()
+            .child(detail_header(
+                title_row,
+                meeting_status_chip(meeting.status, self.meeting_stop_pending, true)
+                    .map(IntoElement::into_any_element)
+                    .into_iter()
+                    .chain([truncated_line(FOOTNOTE, meta.join(" · "))
+                        .flex_1()
+                        .into_any_element()])
+                    .collect(),
+                actions,
+            ))
             .child(
-                div()
-                    .px_6()
-                    .pt_5()
-                    .pb_4()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(rgb(LINE))
-                    .child(title_row)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
-                            .when_some(
-                                meeting_status_chip(
-                                    meeting.status,
-                                    self.meeting_stop_pending,
-                                    true,
-                                ),
-                                |row, chip| row.child(chip),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_x_hidden()
-                                    .truncate()
-                                    .child(meta.join(" · ")),
-                            ),
-                    )
-                    .when(!actions.is_empty(), |header| {
-                        header.child(
-                            div()
-                                .debug_selector(|| "meeting-actions".into())
-                                .pt_2()
-                                .flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .children(actions),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .id("meeting-transcript")
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
+                detail_body("meeting-transcript")
                     .track_scroll(&self.meeting_transcript_scroll)
-                    .px_6()
-                    .pt_5()
-                    .pb_6()
-                    .children(errors.into_iter().map(|error| {
-                        div()
-                            .mb_4()
-                            .px_3()
-                            .py_2()
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(rgb(DANGER_BORDER))
-                            .bg(rgb(DANGER_SURFACE))
-                            .text_size(px(11.0))
-                            .line_height(px(17.0))
-                            .text_color(rgb(NEGATIVE))
-                            .child(error)
-                    }))
+                    .children(errors.map(|(message, error)| error_panel(message, error).mb_4()))
                     .when_some(notes, |content, notes| content.child(notes))
                     .child(
                         div()
@@ -7061,10 +6654,8 @@ impl AppWindow {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(compact_section_label(transcript_label).px_0())
-                            .when(recording, |label| {
-                                label.child(div().size(px(6.0)).rounded_full().bg(rgb(NEGATIVE)))
-                            }),
+                            .child(section_label(transcript_label))
+                            .when(recording, |label| label.child(status_dot(DANGER))),
                     )
                     .child(transcript),
             )
@@ -7084,24 +6675,16 @@ impl AppWindow {
             .or_else(|| self.personal_commands_status.last_reload_error.clone());
         let open_config = config_path.clone();
         let config_control = match workspace_state {
-            PersonalWorkspaceState::Missing => header_button("Create Config")
+            PersonalWorkspaceState::Missing => button(ButtonKind::Secondary, "Create config")
                 .id("personal-commands-create")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.provision_personal_workspace();
                     cx.notify();
                 }))
                 .into_any_element(),
-            PersonalWorkspaceState::Creating => div()
-                .h(px(30.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .text_size(px(12.0))
-                .text_color(rgb(MUTED))
-                .child("Creating Config...")
-                .into_any_element(),
+            PersonalWorkspaceState::Creating => busy_label("Creating config…").into_any_element(),
             PersonalWorkspaceState::Ready | PersonalWorkspaceState::Error => {
-                header_button("Edit Config")
+                button(ButtonKind::Secondary, "Edit config")
                     .id("personal-commands-open-config")
                     .on_click(move |_, _, _| open_path(&open_config))
                     .into_any_element()
@@ -7116,7 +6699,7 @@ impl AppWindow {
             let workspace = self.personal_workspace.display();
             let config = config_path.display();
             let prompt = format!(
-                "Help me configure my HEX custom voice commands.\n\n\
+                "Help me configure my Hex custom voice commands.\n\n\
                  Workspace: {workspace}\n\
                  Config: {config}\n\n\
                  Read AGENTS.md and .agents/skills/personal-commands/SKILL.md in the workspace \
@@ -7124,11 +6707,14 @@ impl AppWindow {
                  hex.config.ts, and run `bun run check` from the workspace when finished. You \
                  may add npm packages when a command needs them."
             );
-            header_button(if copied {
-                "Copied"
-            } else {
-                "Copy agent prompt"
-            })
+            button(
+                ButtonKind::Secondary,
+                if copied {
+                    "Copied"
+                } else {
+                    "Copy agent prompt"
+                },
+            )
             .id("personal-commands-copy-prompt")
             .on_click(cx.listener(move |this, _, _, cx| {
                 match arboard::Clipboard::new()
@@ -7148,40 +6734,42 @@ impl AppWindow {
         let commands_toggle_control = if self.pending_microphone_policy
             == Some(MicrophonePolicyChange::KeepReadyAndEnableCommands)
         {
-            compact_button("Keep Microphone Ready & Enable Commands")
-                .id("confirm-enable-commands")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    if let Err(error) = this.update_microphone_policy(
-                        MicrophonePolicyChange::KeepReadyAndEnableCommands,
-                        cx,
-                    ) {
-                        tracing::error!(%error, "could not update microphone policy");
-                    }
-                }))
-                .into_any_element()
+            button(
+                ButtonKind::Primary,
+                "Keep microphone ready & enable commands",
+            )
+            .id("confirm-enable-commands")
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                if let Err(error) = this.update_microphone_policy(
+                    MicrophonePolicyChange::KeepReadyAndEnableCommands,
+                    cx,
+                ) {
+                    tracing::error!(%error, "could not update microphone policy");
+                }
+            }))
+            .into_any_element()
         } else {
             div()
                 .flex()
                 .items_center()
-                .gap_3()
-                .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                    if self.settings.commands_enabled {
-                        "Enabled"
-                    } else {
-                        "Off"
-                    },
-                ))
+                .gap_2()
+                .child(
+                    div()
+                        .text_footnote()
+                        .text_color(rgb(TEXT_SECONDARY))
+                        .child("Voice commands"),
+                )
                 .child(toggle(commands_position))
                 .into_any_element()
         };
         let commands_control = div()
             .flex()
             .items_center()
-            .gap_3()
+            .gap_2()
             .child(config_control)
             .when_some(copy_prompt, |controls, prompt| controls.child(prompt))
-            .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(LINE)))
+            .child(div().mx_1().w(px(1.0)).h_5().bg(rgb(LINE)))
             .child(
                 div()
                     .id("commands-enabled")
@@ -7234,14 +6822,7 @@ impl AppWindow {
             });
         let mut groups: Vec<AnyElement> = Vec::new();
         for task in tasks {
-            groups.push(
-                compact_section_label(task.clone())
-                    .px_3()
-                    .pt_3()
-                    .pb_1()
-                    .text_color(rgb(MUTED))
-                    .into_any_element(),
-            );
+            groups.push(list_section_label(task.clone(), groups.is_empty()).into_any_element());
             groups.extend(
                 visible
                     .iter()
@@ -7253,25 +6834,9 @@ impl AppWindow {
                         let selected = effective_selected.as_deref() == Some(command_id.as_str());
                         list_row(selected)
                             .id(("command", index))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .overflow_x_hidden()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT))
-                                    .truncate()
-                                    .child(command.phrase),
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .overflow_x_hidden()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(if selected { TEXT_SOFT } else { FAINT }))
-                                    .truncate()
-                                    .child(command.description),
-                            )
+                            .gap_0p5()
+                            .child(list_row_title(command.phrase, selected))
+                            .child(list_row_meta(command.description, selected))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.selected_command = Some(command_id.clone());
                                 cx.notify();
@@ -7282,22 +6847,19 @@ impl AppWindow {
         }
 
         let no_commands = groups.is_empty();
-        let commands_list_width = PANE_LIST_WIDTH;
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(pane_header_with_action("Commands", Some(commands_control)))
             .child(
-                pane_body().p_5().child(
+                pane_body().child(
                     pane_content()
                         .gap_3()
                         .when_some(last_error, |column, error| {
                             column.child(
-                                compact_panel().flex_none().child(error_message(
-                                    "Personal commands are not loading.",
-                                    error,
-                                )),
+                                error_panel("Personal commands are not loading.", error)
+                                    .flex_none(),
                             )
                         })
                         .child(
@@ -7308,7 +6870,7 @@ impl AppWindow {
                                 .gap_5()
                                 .child(
                                     div()
-                                        .w(px(commands_list_width))
+                                        .w(px(PANE_LIST_WIDTH))
                                         .h_full()
                                         .flex_none()
                                         .flex()
@@ -7320,61 +6882,28 @@ impl AppWindow {
                                                 .child(self.command_search.entity.clone()),
                                         )
                                         .child(
-                                            compact_panel()
-                                                .id("commands-list")
-                                                .flex_1()
-                                                .min_h(px(0.0))
-                                                .overflow_y_scroll()
-                                                .when(no_commands, |card| {
-                                                    card.child(empty_message(if query.is_empty() {
-                                                        "No commands yet."
-                                                    } else {
-                                                        "No matching commands."
-                                                    }))
-                                                })
-                                                .child(
-                                                    div()
-                                                        .w(px(commands_list_width - 2.0))
-                                                        .p_2()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .children(groups),
-                                                ),
+                                            pane_list(
+                                                "commands-list",
+                                                PANE_LIST_WIDTH,
+                                                no_commands.then_some(if query.is_empty() {
+                                                    "No commands yet."
+                                                } else {
+                                                    "No matching commands."
+                                                }),
+                                                "",
+                                                None,
+                                                groups,
+                                            )
+                                            .flex_1()
+                                            .min_h(px(0.0)),
                                         ),
                                 )
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .h_full()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .h(px(TEXT_INPUT_HEIGHT))
-                                                .flex_none()
-                                                .flex()
-                                                .items_center()
-                                                .justify_end()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(10.0))
-                                                        .text_color(rgb(FAINT))
-                                                        .child(format!("Context: {context_label}")),
-                                                ),
-                                        )
-                                        .child(
-                                            compact_panel()
-                                                .id("command-detail")
-                                                .flex_1()
-                                                .min_h(px(0.0))
-                                                .overflow_y_scroll()
-                                                .child(self.render_command_detail(
-                                                    effective_selected.as_deref(),
-                                                )),
-                                        ),
+                                    pane_detail(self.render_command_detail(
+                                        effective_selected.as_deref(),
+                                        &context_label,
+                                    ))
+                                    .id("command-detail"),
                                 ),
                         ),
                 ),
@@ -7382,7 +6911,7 @@ impl AppWindow {
             .into_any_element()
     }
 
-    fn render_command_detail(&self, selected: Option<&str>) -> AnyElement {
+    fn render_command_detail(&self, selected: Option<&str>, context_label: &str) -> AnyElement {
         let Some(command) =
             selected.and_then(|id| self.commands.iter().find(|command| command.id == id))
         else {
@@ -7394,26 +6923,21 @@ impl AppWindow {
             command.aliases.join("\n")
         };
         div()
-            .p_5()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(detail_header(
+                detail_title(command.phrase.clone()),
+                vec![command.description.clone().into_any_element()],
+                Vec::new(),
+            ))
             .child(
-                div()
-                    .text_size(px(15.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(command.phrase.clone()),
-            )
-            .child(
-                div()
-                    .pt_2()
-                    .text_size(px(12.0))
-                    .text_color(rgb(MUTED))
-                    .child(command.description.clone()),
-            )
-            .child(
-                div()
-                    .pt_4()
+                detail_body("command-detail-body")
+                    .pt_1()
                     .child(detail_row("Task", command.task.clone()))
                     .child(detail_row("Context", command_scope(&command.scope)))
-                    .child(detail_row("Aliases", aliases)),
+                    .child(detail_row("Aliases", aliases))
+                    .child(detail_row("Current context", context_label.to_string())),
             )
             .into_any_element()
     }
@@ -7464,7 +6988,7 @@ impl AppWindow {
     }
 
     fn render_activity(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let refresh = header_button("Refresh")
+        let refresh = button(ButtonKind::Secondary, "Refresh")
             .id("refresh-activity")
             .on_click(cx.listener(|this, _, _, cx| {
                 this.reload_events();
@@ -7500,14 +7024,15 @@ impl AppWindow {
                     age,
                     div()
                         .flex_1()
-                        .text_size(if boundary { px(11.0) } else { px(12.0) })
-                        .font_weight(if boundary {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::NORMAL
+                        .map(|text| {
+                            if boundary {
+                                text.text_caption()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(TEXT_TERTIARY))
+                            } else {
+                                text.text_body().text_color(rgb(TEXT_SECONDARY))
+                            }
                         })
-                        .text_color(if boundary { rgb(FAINT) } else { rgb(TEXT_SOFT) })
-                        .line_height(px(18.0))
                         .child(summary),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -7524,27 +7049,20 @@ impl AppWindow {
             .flex_col()
             .child(pane_header_with_action("Activity", Some(header_action)))
             .child(
-                pane_body().p_5().child(
+                pane_body().child(
                     pane_content()
                         .flex_row()
                         .gap_5()
-                        .child(pane_list_card(
+                        .child(pane_list(
                             "activity-list",
+                            PANE_LIST_WIDTH,
                             (self.events.is_empty() && self.activity.error.is_none())
                                 .then_some("No activity yet."),
                             "Activity could not be loaded.",
                             self.activity.error.clone(),
                             rows,
                         ))
-                        .child(
-                            compact_panel()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .h_full()
-                                .flex()
-                                .flex_col()
-                                .child(self.render_event_detail()),
-                        ),
+                        .child(pane_detail(self.render_event_detail())),
                 ),
             )
             .into_any_element()
@@ -7563,13 +7081,7 @@ impl AppWindow {
             .overflow_y_scroll()
             .px_6()
             .py_6()
-            .child(
-                div()
-                    .text_size(px(18.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .line_height(px(24.0))
-                    .child(event_summary(event)),
-            )
+            .child(div().text_headline().child(event_summary(event)))
             .child(
                 div()
                     .pt_6()
@@ -7588,10 +7100,10 @@ impl AppWindow {
                     .child(section_label("Raw event"))
                     .child(
                         div()
-                            .pt_3()
-                            .text_size(px(11.0))
-                            .line_height(px(18.0))
-                            .text_color(rgb(MUTED))
+                            .pt_2()
+                            .text_footnote()
+                            .text_monospace()
+                            .text_color(rgb(TEXT_TERTIARY))
                             .child(raw),
                     ),
             )
@@ -7749,9 +7261,9 @@ impl AppWindow {
                 div()
                     .flex()
                     .justify_between()
-                    .text_size(px(12.0))
+                    .text_footnote()
                     .child(label)
-                    .child(div().text_color(rgb(MUTED)).child(display)),
+                    .child(div().text_color(rgb(TEXT_TERTIARY)).child(display)),
             )
             .child(
                 div()
@@ -7767,7 +7279,7 @@ impl AppWindow {
                             .top(px(7.0))
                             .h(px(4.0))
                             .rounded_full()
-                            .bg(rgb(0x303030)),
+                            .bg(rgb(SURFACE_SELECTED)),
                     )
                     .child(
                         div()
@@ -7788,7 +7300,7 @@ impl AppWindow {
                             .size(px(14.0))
                             .rounded_full()
                             .border_2()
-                            .border_color(rgb(TEXT))
+                            .border_color(rgb(TEXT_PRIMARY))
                             .bg(rgb(SURFACE_SELECTED)),
                     )
                     .on_mouse_down(
@@ -7850,27 +7362,22 @@ impl AppWindow {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .rounded(px(PANEL_RADIUS))
+                        .rounded(RADIUS_PANEL)
                         .border_1()
                         .border_color(rgb(if selected { ACCENT } else { LINE }))
                         .bg(rgb(if selected { ACCENT_SURFACE } else { SURFACE }))
                         .hover(|card| card.bg(rgb(SURFACE_HOVER)))
+                        .child(div().text_caption().text_color(rgb(ACCENT_TEXT)).child(key))
                         .child(
                             div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(ACCENT_SOFT))
-                                .child(key),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_body()
+                                .font_weight(FontWeight::MEDIUM)
                                 .child(name),
                         )
                         .child(
                             div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(MUTED))
+                                .text_caption()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .child(description),
                         )
                         .on_click(
@@ -7913,125 +7420,78 @@ impl AppWindow {
             .child(pane_header_with_action(
                 "HUD Lab",
                 Some(
-                    header_button(if copied { "Copied" } else { "Copy preset" })
-                        .id("copy-hud-preset")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let _ = clipboard.set_text(this.hud_preset());
-                                this.hud_copied = true;
-                                cx.notify();
-                            }
-                        }))
-                        .into_any_element(),
+                    button(
+                        ButtonKind::Secondary,
+                        if copied { "Copied" } else { "Copy preset" },
+                    )
+                    .id("copy-hud-preset")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(this.hud_preset());
+                            this.hud_copied = true;
+                            cx.notify();
+                        }
+                    }))
+                    .into_any_element(),
                 ),
             ))
-            .child(
-                pane_body().child(
-                    div()
-                        .id("hud-lab-scroll")
-                        .flex_1()
-                        .overflow_y_scroll()
-                        .px_8()
-                        .py_6()
-                        .child(
-                            div().w_full().flex().justify_center().child(
-                                pane_content()
-                                    .gap_6()
+            .child(pane_scroll_body(
+                "hud-lab-scroll",
+                pane_content()
+                    .pt_6()
+                    .gap_6()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_4()
+                            .child(segmented_control().children([
+                                state_button(HudDemoState::Recording, "Recording", 0),
+                                state_button(HudDemoState::Transcribing, "Transcribing", 1),
+                                state_button(HudDemoState::Processing, "Processing", 2),
+                            ]))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
                                     .child(
                                         div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_4()
-                                            .child(segmented_control().children([
-                                                state_button(
-                                                    HudDemoState::Recording,
-                                                    "Recording",
-                                                    0,
-                                                ),
-                                                state_button(
-                                                    HudDemoState::Transcribing,
-                                                    "Transcribing",
-                                                    1,
-                                                ),
-                                                state_button(
-                                                    HudDemoState::Processing,
-                                                    "Processing",
-                                                    2,
-                                                ),
-                                            ]))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(11.0))
-                                                            .text_color(rgb(MUTED))
-                                                            .child("Queued"),
-                                                    )
-                                                    .child(
-                                                        segmented_control().children(queue_buttons),
-                                                    ),
-                                            ),
+                                            .text_caption()
+                                            .text_color(rgb(TEXT_TERTIARY))
+                                            .child("Queued"),
                                     )
-                                    .child(div().flex().gap_3().children(style_cards))
-                                    .child(div().flex().child(
-                                        div().flex().flex_col().gap_4().children([
-                                            self.render_hud_slider(
-                                                HudControl::LineCount,
-                                                "Line count",
-                                                cx,
-                                            ),
-                                            self.render_hud_slider(
-                                                HudControl::Curvature,
-                                                "Curvature",
-                                                cx,
-                                            ),
-                                            self.render_hud_slider(HudControl::Speed, "Speed", cx),
-                                            self.render_hud_slider(
-                                                HudControl::Blur,
-                                                "Highlight blur",
-                                                cx,
-                                            ),
-                                            self.render_hud_slider(
-                                                HudControl::Glow,
-                                                "Line glow",
-                                                cx,
-                                            ),
-                                            self.render_hud_slider(
-                                                HudControl::Depth,
-                                                "Sphere depth",
-                                                cx,
-                                            ),
-                                            self.render_hud_slider(
-                                                HudControl::LightAngle,
-                                                "Light angle",
-                                                cx,
-                                            ),
-                                            self.render_hud_slider(
-                                                HudControl::Outline,
-                                                "Sphere outline",
-                                                cx,
-                                            ),
-                                        ]),
-                                    ))
-                                    .child(
-                                        div()
-                                            .p_3()
-                                            .rounded(px(PANEL_RADIUS))
-                                            .border_1()
-                                            .border_color(rgb(LINE))
-                                            .bg(rgb(SURFACE))
-                                            .font_family("SF Mono")
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(TEXT_SOFT))
-                                            .child(preset),
-                                    ),
+                                    .child(segmented_control().children(queue_buttons)),
                             ),
-                        ),
-                ),
-            )
+                    )
+                    .child(div().flex().gap_3().children(style_cards))
+                    .child(
+                        div()
+                            .flex()
+                            .child(div().flex().flex_col().gap_4().children([
+                                self.render_hud_slider(HudControl::LineCount, "Line count", cx),
+                                self.render_hud_slider(HudControl::Curvature, "Curvature", cx),
+                                self.render_hud_slider(HudControl::Speed, "Speed", cx),
+                                self.render_hud_slider(HudControl::Blur, "Highlight blur", cx),
+                                self.render_hud_slider(HudControl::Glow, "Line glow", cx),
+                                self.render_hud_slider(HudControl::Depth, "Sphere depth", cx),
+                                self.render_hud_slider(HudControl::LightAngle, "Light angle", cx),
+                                self.render_hud_slider(HudControl::Outline, "Sphere outline", cx),
+                            ])),
+                    )
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded(RADIUS_PANEL)
+                            .border_1()
+                            .border_color(rgb(LINE))
+                            .bg(rgb(SURFACE))
+                            .text_monospace()
+                            .text_caption()
+                            .text_color(rgb(TEXT_SECONDARY))
+                            .child(preset),
+                    ),
+            ))
             .into_any_element()
     }
 }
@@ -8179,7 +7639,7 @@ impl Render for AppWindow {
                     .when_some(self.settings_load_error.clone(), |column, error| {
                         column.child(
                             div()
-                                .px_5()
+                                .px(px(PANE_GUTTER))
                                 .py_2()
                                 .debug_selector(|| "settings-error".into())
                                 .child(error_message("Settings error:", error)),
@@ -8266,17 +7726,11 @@ fn preview_history() -> Option<History> {
     Some(History::new(store))
 }
 
-fn voice_action_status_copy(enabled: bool) -> (&'static str, &'static str) {
+fn voice_action_description(enabled: bool) -> &'static str {
     if enabled {
-        (
-            "Enabled",
-            "Use the shortcut below with OpenCode to run spoken instructions.",
-        )
+        "Use the shortcut below with OpenCode to run spoken instructions"
     } else {
-        (
-            "Off",
-            "Off by default. Its saved shortcut is not reserved until you enable Voice Action.",
-        )
+        "Off by default. Its saved shortcut is not reserved until you enable Voice Action."
     }
 }
 
@@ -8427,7 +7881,7 @@ fn hotkey_keycaps_width(keycap_count: usize) -> f32 {
     if keycap_count == 0 {
         0.0
     } else {
-        34.0 * keycap_count as f32 + 3.0 * keycap_count.saturating_sub(1) as f32
+        KEYCAP_WIDTH * keycap_count as f32 + 3.0 * keycap_count.saturating_sub(1) as f32
     }
 }
 
@@ -8482,34 +7936,17 @@ fn mode_row(
     let subtitle = subtitle.into();
     let has_activations = !applications.is_empty() || !browser_hosts.is_empty();
     list_row(selected)
-        .min_h(px(52.0))
-        .items_start()
-        .justify_center()
-        .child(
-            div()
-                .w_full()
-                .overflow_x_hidden()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT))
-                .truncate()
-                .child(title),
-        )
+        .gap_1()
+        .child(list_row_title(title, selected))
         .when(has_activations, |row| {
             row.child(mode_activation_icons(applications, browser_hosts, catalog))
         })
         .when(!has_activations, |row| {
-            row.child(
-                div()
-                    .w_full()
-                    .overflow_x_hidden()
-                    .text_size(px(10.0))
-                    .text_color(rgb(if selected { TEXT_SOFT } else { FAINT }))
-                    .truncate()
-                    .child(subtitle),
-            )
+            row.child(list_row_meta(subtitle, selected))
         })
 }
+
+const ACTIVATION_ICON_SIZE: f32 = 18.0;
 
 fn mode_activation_icons(
     applications: &[String],
@@ -8521,52 +7958,34 @@ fn mode_activation_icons(
     let mut icons = Vec::with_capacity(visible + usize::from(total > visible));
     for name in applications.iter().take(visible) {
         let application = catalog.application_named(name);
-        icons.push(application_icon(application, Some(name), 18.0));
+        icons.push(application_icon(
+            application,
+            Some(name),
+            ACTIVATION_ICON_SIZE,
+        ));
     }
-    for host in browser_hosts
+    for _ in browser_hosts
         .iter()
         .take(visible.saturating_sub(icons.len()))
     {
-        let initial = host
-            .chars()
-            .find(|character| character.is_alphanumeric())
-            .map(|character| character.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into());
         icons.push(
             div()
-                .size(px(18.0))
+                .size(px(ACTIVATION_ICON_SIZE))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(4.0))
-                .border_1()
-                .border_color(rgb(0x3f3f3f))
-                .bg(rgb(0x282828))
-                .text_size(px(8.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT_SOFT))
-                .child(initial)
+                .rounded(icon_radius(ACTIVATION_ICON_SIZE))
+                .bg(rgb(SURFACE_SELECTED))
+                .child(icon(Icon::Globe, TEXT_SECONDARY))
                 .into_any_element(),
         );
     }
     if total > visible {
-        icons.push(
-            div()
-                .h(px(18.0))
-                .px_1()
-                .flex()
-                .items_center()
-                .rounded(px(4.0))
-                .bg(rgb(0x303030))
-                .text_size(px(8.0))
-                .text_color(rgb(MUTED))
-                .child(format!("+{}", total - visible))
-                .into_any_element(),
-        );
+        icons.push(tag(Tone::Neutral, format!("+{}", total - visible)).into_any_element());
     }
     div()
-        .h(px(18.0))
+        .h(px(ACTIVATION_ICON_SIZE))
         .flex()
         .items_center()
         .gap_1()
@@ -8582,7 +8001,7 @@ fn application_icon(
     if let Some(icon) = application.and_then(|application| application.icon.as_ref()) {
         return img(icon.clone())
             .size(px(size))
-            .rounded(px(size * 0.22))
+            .rounded(icon_radius(size))
             .into_any_element();
     }
     let initial = fallback_name
@@ -8591,14 +8010,21 @@ fn application_icon(
         .unwrap_or_else(|| "?".into());
     div()
         .size(px(size))
+        .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(size * 0.22))
-        .bg(rgb(0x343434))
-        .text_size(px(size * 0.42))
+        .rounded(icon_radius(size))
+        .bg(rgb(SURFACE_SELECTED))
+        .map(|monogram| {
+            if size >= CONTROL_HEIGHT {
+                monogram.text_body()
+            } else {
+                monogram.text_caption()
+            }
+        })
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(TEXT_SOFT))
+        .text_color(rgb(TEXT_SECONDARY))
         .child(initial)
         .into_any_element()
 }
@@ -8729,28 +8155,13 @@ fn model_choice_row(
     subtitle: impl Into<String>,
     highlighted: bool,
 ) -> Div {
-    div()
-        .w_full()
-        .px_3()
-        .py_2()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .border_b_1()
-        .border_color(rgb(LINE))
-        .when(highlighted, |row| row.bg(rgb(SURFACE_SELECTED)))
-        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
+    menu_item(highlighted)
+        .child(truncated_line(FOOTNOTE, title.into()).flex_1())
         .child(
             div()
-                .text_size(px(12.0))
-                .text_color(rgb(TEXT_SOFT))
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .text_size(px(10.0))
-                .text_color(rgb(FAINT))
+                .flex_none()
+                .text_caption()
+                .text_color(rgb(TEXT_TERTIARY))
                 .child(subtitle.into()),
         )
 }
@@ -8772,22 +8183,25 @@ fn settings_control(
                 .items_center()
                 .justify_between()
                 .gap_2()
+                .child(field_label(label))
                 .child(
                     div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_SOFT))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(FAINT))
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child(description.into()),
                 ),
         )
         .child(control)
         .into_any_element()
+}
+
+/// The label above a stacked form field.
+fn field_label(label: &'static str) -> Div {
+    div()
+        .text_footnote()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(TEXT_SECONDARY))
+        .child(label)
 }
 
 fn input_text(input: &ProcessingInput, cx: &App) -> String {
@@ -8890,43 +8304,19 @@ fn command_model_notice(status: &CommandModelStatus) -> Option<(&'static str, &'
     }
 }
 
-fn setup_group_label(label: &'static str) -> Div {
-    div()
-        .px_1()
-        .text_size(px(10.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(MUTED))
-        .child(label)
-}
-
-fn setup_ready_badge() -> AnyElement {
-    div()
-        .h(px(28.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .rounded_sm()
-        .bg(rgb(POSITIVE_SURFACE))
-        .text_size(px(11.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(POSITIVE))
-        .child("Ready")
-        .into_any_element()
-}
-
 const fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'static str) {
     match kind {
         PermissionKind::Microphone => (
             "Microphone access is off",
-            "HEX cannot record dictation until microphone access is restored.",
+            "Hex cannot record dictation until microphone access is restored.",
         ),
         PermissionKind::InputMonitoring => (
             "Input Monitoring is off",
-            "HEX cannot recognize the dictation shortcut in other apps.",
+            "Hex cannot recognize the dictation shortcut in other apps.",
         ),
         PermissionKind::Accessibility => (
             "Accessibility is off",
-            "HEX cannot paste completed dictation into the foreground app.",
+            "Hex cannot paste completed dictation into the foreground app.",
         ),
     }
 }
@@ -8934,9 +8324,9 @@ const fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'stati
 const fn permission_action_label(action: PermissionAction) -> &'static str {
     match action {
         PermissionAction::RequestMicrophone => "Allow",
-        PermissionAction::OpenMicrophoneSettings => "Open Settings",
+        PermissionAction::OpenMicrophoneSettings => "Open settings",
         PermissionAction::OpenInputMonitoringSettings
-        | PermissionAction::OpenAccessibilitySettings => "Grant Access",
+        | PermissionAction::OpenAccessibilitySettings => "Grant access",
     }
 }
 
@@ -9031,46 +8421,6 @@ fn is_function_key(label: &str) -> bool {
         .is_some_and(|number| (1..=20).contains(&number))
 }
 
-fn detail_placeholder(message: &'static str) -> AnyElement {
-    div()
-        .flex_1()
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(12.0))
-        .text_color(rgb(FAINT))
-        .child(message)
-        .into_any_element()
-}
-
-fn detail_row(label: &'static str, value: impl Into<String>) -> AnyElement {
-    div()
-        .py_3()
-        .flex()
-        .items_start()
-        .gap_4()
-        .border_b_1()
-        .border_color(rgb(LINE))
-        .child(
-            div()
-                .w(px(92.0))
-                .flex_none()
-                .text_size(px(11.0))
-                .text_color(rgb(FAINT))
-                .child(label),
-        )
-        .child(
-            div()
-                .flex_1()
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .text_color(rgb(TEXT_SOFT))
-                .child(value.into()),
-        )
-        .into_any_element()
-}
-
 fn command_task(command: &CommandInfo) -> String {
     if let Some(group) = &command.group {
         return group.clone();
@@ -9132,32 +8482,6 @@ fn command_scope(scope: &CommandScope) -> String {
     }
 }
 
-fn pane_list_card(
-    id: &'static str,
-    empty: Option<&'static str>,
-    error_title: &'static str,
-    error: Option<String>,
-    rows: Vec<AnyElement>,
-) -> gpui::Stateful<Div> {
-    pane_list(id, empty, error_title, error)
-        .rounded(px(PANEL_RADIUS))
-        .border_1()
-        .border_color(rgb(LINE))
-        .bg(rgb(SURFACE))
-        .overflow_x_hidden()
-        .when(!rows.is_empty(), |list| {
-            list.child(
-                div()
-                    .w(px(PANE_LIST_WIDTH - 2.0))
-                    .p_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .children(rows),
-            )
-        })
-}
-
 fn timestamped_list_row(
     id: (&'static str, usize),
     selected: bool,
@@ -9174,26 +8498,15 @@ fn timestamped_list_row(
         .child(
             div()
                 .flex_none()
-                .text_size(px(10.0))
-                .text_color(rgb(if selected { TEXT_SOFT } else { FAINT }))
+                .pt(px(baseline_offset(BODY, CAPTION)))
+                .text_caption()
+                .text_color(rgb(if selected {
+                    TEXT_SECONDARY
+                } else {
+                    TEXT_TERTIARY
+                }))
                 .child(age),
         )
-}
-
-fn meeting_action_button(id: &'static str, label: &'static str) -> gpui::Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(30.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .rounded_sm()
-        .bg(rgb(0xe8e8e8))
-        .text_size(px(12.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(0x171717))
-        .hover(|button| button.bg(rgb(0xffffff)))
-        .child(label)
 }
 
 fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
@@ -9206,12 +8519,15 @@ fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
         .gap(px(6.0))
         .border_b_1()
         .border_color(rgb(LINE))
-        .child(compact_section_label("SUMMARY").px_0().pb_1())
+        .child(section_label("Summary"))
         .child(
             div()
-                .text_size(px(13.0))
-                .line_height(px(20.0))
-                .text_color(rgb(if summary.is_empty() { MUTED } else { TEXT_SOFT }))
+                .text_body()
+                .text_color(rgb(if summary.is_empty() {
+                    TEXT_TERTIARY
+                } else {
+                    TEXT_SECONDARY
+                }))
                 .child(if summary.is_empty() {
                     "Nothing to summarize.".to_string()
                 } else {
@@ -9220,44 +8536,24 @@ fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
         )
 }
 
-/// A compact status chip; `Ready` appears only in the detail header, so the
+/// A compact status tag; `Ready` appears only in the detail header, so the
 /// list stays quiet for finished meetings.
 fn meeting_status_chip(status: MeetingStatus, stop_pending: bool, show_ready: bool) -> Option<Div> {
-    let (label, color, surface, border) = match status {
-        MeetingStatus::Recording if stop_pending => {
-            ("Transcribing", ACCENT_SOFT, ACCENT_SURFACE, 0x2c3560)
-        }
-        MeetingStatus::Starting | MeetingStatus::Recording => {
-            ("Recording", NEGATIVE, DANGER_SURFACE, DANGER_BORDER)
-        }
-        MeetingStatus::Transcribing => ("Transcribing", ACCENT_SOFT, ACCENT_SURFACE, 0x2c3560),
-        MeetingStatus::Complete if show_ready => ("Ready", POSITIVE, POSITIVE_SURFACE, 0x24452f),
+    let (label, tone) = match status {
+        MeetingStatus::Recording if stop_pending => ("Transcribing", Tone::Accent),
+        MeetingStatus::Starting | MeetingStatus::Recording => ("Recording", Tone::Danger),
+        MeetingStatus::Transcribing => ("Transcribing", Tone::Accent),
+        MeetingStatus::Complete if show_ready => ("Ready", Tone::Success),
         MeetingStatus::Complete => return None,
-        MeetingStatus::Interrupted => ("Interrupted", MUTED, CANVAS, LINE),
-        MeetingStatus::Failed => ("Failed", NEGATIVE, DANGER_SURFACE, DANGER_BORDER),
+        MeetingStatus::Interrupted => ("Interrupted", Tone::Neutral),
+        MeetingStatus::Failed => ("Failed", Tone::Danger),
     };
     let live =
         matches!(status, MeetingStatus::Starting | MeetingStatus::Recording) && !stop_pending;
-    Some(
-        div()
-            .flex_none()
-            .h(px(18.0))
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(rgb(border))
-            .bg(rgb(surface))
-            .text_size(px(10.0))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(color))
-            .when(live, |chip| {
-                chip.child(div().size(px(5.0)).rounded_full().bg(rgb(NEGATIVE)))
-            })
-            .child(label),
-    )
+    Some(tag(tone, label).when(live, |chip| {
+        chip.child(status_dot(DANGER).size(px(5.0)))
+            .flex_row_reverse()
+    }))
 }
 
 /// `42 min`, `1 h 05 min`, or `< 1 min`.
@@ -9303,8 +8599,8 @@ fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .text_size(px(10.0))
-                    .text_color(rgb(FAINT))
+                    .text_caption()
+                    .text_color(rgb(TEXT_TERTIARY))
                     .child(div().h(px(1.0)).flex_1().bg(rgb(LINE)))
                     .child(format!("{} pause", meeting_length(pause)))
                     .child(div().h(px(1.0)).flex_1().bg(rgb(LINE))),
@@ -9318,16 +8614,17 @@ fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement {
                 .when(mine, |turn| turn.items_end())
                 .when(!mine, |turn| turn.items_start())
                 .child(
+                    // Inset to the bubble's text, not its rounded edge.
                     div()
-                        .px_1()
+                        .px_3()
                         .flex()
                         .gap_2()
-                        .text_size(px(10.0))
-                        .text_color(rgb(FAINT))
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(if mine { ACCENT_SOFT } else { MUTED }))
+                                .text_color(rgb(if mine { ACCENT_TEXT } else { TEXT_TERTIARY }))
                                 .child(line.source.label()),
                         )
                         .child(line.clock.clone()),
@@ -9338,22 +8635,21 @@ fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement {
                         .max_w(relative(0.82))
                         .px_3()
                         .py_2()
-                        .rounded(px(10.0))
+                        .rounded(RADIUS_PANEL)
                         .border_1()
                         .when(mine, |bubble| {
                             bubble
-                                .border_color(rgb(0x2c3560))
+                                .border_color(rgb(ACCENT_BORDER))
                                 .bg(rgb(ACCENT_SURFACE))
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(TEXT_PRIMARY))
                         })
                         .when(!mine, |bubble| {
                             bubble
                                 .border_color(rgb(LINE))
                                 .bg(rgb(CANVAS))
-                                .text_color(rgb(TEXT_SOFT))
+                                .text_color(rgb(TEXT_SECONDARY))
                         })
-                        .text_size(px(13.0))
-                        .line_height(px(20.0))
+                        .text_body()
                         .child(line.text.clone()),
                 ),
         )
@@ -9514,20 +8810,6 @@ over the next couple of months. The build screen needs a proposal before more po
     (vec![live, synced, design, failed], transcripts)
 }
 
-fn meeting_progress_action(label: &'static str) -> AnyElement {
-    div()
-        .h(px(30.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .rounded_sm()
-        .bg(rgb(SURFACE))
-        .text_size(px(12.0))
-        .text_color(rgb(MUTED))
-        .child(label)
-        .into_any_element()
-}
-
 fn log_meeting_request_error(error: TrySendError<MeetingRequest>) {
     match error {
         TrySendError::Full(_) => tracing::warn!("meeting controller is busy"),
@@ -9577,13 +8859,13 @@ fn event_age(timestamp_ms: u64) -> String {
 
 fn event_summary(event: &VoiceEvent) -> String {
     match event {
-        VoiceEvent::SessionStarted { .. } => "HEX session started".into(),
+        VoiceEvent::SessionStarted { .. } => "Hex session started".into(),
         VoiceEvent::State { state, device, .. } => match state {
             VoiceState::Sleeping => "Voice commands went to sleep".into(),
             VoiceState::Listening => format!("Voice commands resumed on {device}"),
             VoiceState::Dictating => format!("Dictation started on {device}"),
             VoiceState::Transcribing => "Dictation is being transcribed".into(),
-            VoiceState::Stopping => "HEX is stopping".into(),
+            VoiceState::Stopping => "Hex is stopping".into(),
         },
         VoiceEvent::Transcript {
             phase,
@@ -9604,7 +8886,7 @@ fn event_summary(event: &VoiceEvent) -> String {
             let command = command.as_deref().unwrap_or("an unmatched command");
             match outcome {
                 CommandOutcome::Ignored => format!("Ignored \"{heard}\""),
-                CommandOutcome::Woke => format!("\"{heard}\" woke HEX"),
+                CommandOutcome::Woke => format!("\"{heard}\" woke Hex"),
                 CommandOutcome::Slept => format!("\"{heard}\" put voice commands to sleep"),
                 CommandOutcome::Submitted => format!("Sent {command} for \"{heard}\""),
                 CommandOutcome::Executed => format!("Ran {command} for \"{heard}\""),
@@ -9683,7 +8965,11 @@ mod tests {
     use super::*;
     use crate::personal_commands::StatusExecution;
 
-    fn editor_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
+    fn preview_fixture(
+        preview: AppWindowPreview,
+        window: &mut Window,
+        cx: &mut Context<AppWindow>,
+    ) -> AppWindow {
         AppWindow::new(
             PathBuf::from("unused-preview-events.ndjson"),
             crate::config::voice_control(),
@@ -9691,66 +8977,68 @@ mod tests {
             crate::dictation_indicator::channel().0,
             None,
             None,
-            Some(AppWindowPreview {
-                pane: DeveloperPane::Modes,
-                transcription_picker: None,
-                onboarding: false,
-                confirm_model_deletion: false,
+            Some(preview),
+            window,
+            cx,
+        )
+    }
+
+    fn pane_preview(pane: DeveloperPane) -> AppWindowPreview {
+        AppWindowPreview {
+            pane,
+            transcription_picker: None,
+            onboarding: false,
+            confirm_model_deletion: false,
+            collapse_mode_processing: false,
+            open_transformation_picker: false,
+            select_global_mode: false,
+            voice_action_enabled: false,
+            opencode_unavailable: false,
+            permissions_missing: false,
+            model_missing: false,
+            command_model_missing: false,
+            open_history_retention: false,
+            confirm_release_microphone: false,
+            update_available: false,
+            meetings_enabled: true,
+            screen_recording_missing: false,
+            meeting_recording: false,
+            confirm_meeting_delete: false,
+            open_meeting_actions: false,
+            meetings_empty: false,
+        }
+    }
+
+    fn editor_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
+        preview_fixture(
+            AppWindowPreview {
                 collapse_mode_processing: true,
-                open_transformation_picker: false,
                 select_global_mode: true,
-                voice_action_enabled: false,
                 opencode_unavailable: true,
-                permissions_missing: false,
-                model_missing: false,
-                command_model_missing: false,
-                open_history_retention: false,
-                confirm_release_microphone: false,
-                update_available: false,
                 meetings_enabled: false,
-                screen_recording_missing: false,
-                meeting_recording: false,
-                confirm_meeting_delete: false,
-                meetings_empty: false,
-            }),
+                ..pane_preview(DeveloperPane::Modes)
+            },
             window,
             cx,
         )
     }
 
     fn meetings_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
-        AppWindow::new(
-            PathBuf::from("unused-preview-events.ndjson"),
-            crate::config::voice_control(),
-            sync_channel(1).0,
-            crate::dictation_indicator::channel().0,
-            None,
-            None,
-            Some(AppWindowPreview {
-                pane: DeveloperPane::Meetings,
-                transcription_picker: None,
-                onboarding: false,
-                confirm_model_deletion: false,
-                collapse_mode_processing: false,
-                open_transformation_picker: false,
-                select_global_mode: false,
-                voice_action_enabled: false,
-                opencode_unavailable: false,
-                permissions_missing: false,
-                model_missing: false,
-                command_model_missing: false,
-                open_history_retention: false,
-                confirm_release_microphone: false,
-                update_available: false,
-                meetings_enabled: true,
-                screen_recording_missing: false,
-                meeting_recording: false,
-                confirm_meeting_delete: false,
-                meetings_empty: false,
-            }),
-            window,
-            cx,
-        )
+        preview_fixture(pane_preview(DeveloperPane::Meetings), window, cx)
+    }
+
+    fn history_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
+        preview_fixture(pane_preview(DeveloperPane::History), window, cx)
+    }
+
+    #[gpui::test]
+    fn history_detail_rows_keep_their_values_on_one_line(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(history_fixture);
+        cx.simulate_resize(size(px(WINDOW_WIDTH), px(MINIMUM_HEIGHT)));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let value = cx.debug_bounds("detail-row-value").expect("detail row");
+        assert!(value.size.width > px(200.0), "{value:?}");
     }
 
     #[gpui::test]
@@ -9763,7 +9051,7 @@ mod tests {
             let detail = cx.debug_bounds("meeting-detail").expect("detail rendered");
             let them = cx.debug_bounds("meeting-bubble-0").expect("first turn");
             let you = cx.debug_bounds("meeting-bubble-1").expect("second turn");
-            let actions = cx.debug_bounds("meeting-actions").expect("actions");
+            let actions = cx.debug_bounds("detail-actions").expect("actions");
             for bounds in [them, you, actions] {
                 assert!(
                     bounds.left() >= detail.left() && bounds.right() <= detail.right(),
@@ -9777,6 +9065,29 @@ mod tests {
                 "{width}: You is right-aligned"
             );
         }
+    }
+
+    #[gpui::test]
+    fn meeting_overflow_menu_opens_beside_the_visible_actions(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(meetings_fixture);
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| view.meeting_actions_open = true);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let actions = cx.debug_bounds("detail-actions").expect("actions");
+        let menu = cx.debug_bounds("meeting-actions-menu").expect("menu");
+        assert!(menu.top() >= actions.bottom() - px(CONTROL_HEIGHT));
+        assert_eq!(menu.size.width, px(MENU_WIDTH));
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.select_meeting("preview-design".into());
+                assert!(
+                    !view.meeting_actions_open,
+                    "a new selection closes the menu"
+                );
+            })
+        });
     }
 
     #[gpui::test]
@@ -10172,18 +9483,20 @@ mod tests {
         impl Render for SettingsLayout {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 window_frame()
-                    .child(sidebar_frame().w(px(SIDEBAR_WIDTH)))
+                    .child(sidebar_frame())
                     .child(
                         div().flex_1().min_w_0().h_full().child(settings_pane(
+                            "Settings",
+                            "settings-scroll",
                             div()
-                                .child(settings_panel().child(settings_row(
+                                .child(panel().child(settings_row(
                                     "Microphone",
                                     "Automatically chooses the preferred available input",
                                     disclosure_button("Automatic"),
                                 )))
                                 .child(settings_copy(
                                     "Release the microphone when idle?",
-                                    "HEX will open the microphone when you press the shortcut. This adds a start-up delay and removes pre-roll, so the beginning of speech may be missed if you speak right away.",
+                                    "Hex will open the microphone when you press the shortcut. This adds a start-up delay and removes pre-roll, so the beginning of speech may be missed if you speak right away.",
                                 )),
                         )),
                     )
@@ -10455,13 +9768,11 @@ mod tests {
     fn voice_action_defaults_off_and_explains_its_inactive_shortcut() {
         let settings = AppSettings::default();
         assert!(!settings.voice_action.enabled);
-        let (status, description) = voice_action_status_copy(settings.voice_action.enabled);
-        assert_eq!(status, "Off");
+        let description = voice_action_description(settings.voice_action.enabled);
         assert!(description.contains("Off by default"));
         assert!(description.contains("not reserved"));
 
-        let (status, description) = voice_action_status_copy(true);
-        assert_eq!(status, "Enabled");
+        let description = voice_action_description(true);
         assert!(description.contains("OpenCode"));
         assert!(!description.contains("not reserved"));
     }
@@ -10869,7 +10180,7 @@ mod tests {
         assert_eq!(copy.title, "OpenCode is unavailable");
         assert_eq!(
             copy.description,
-            "HEX could not load the OpenCode model catalog."
+            "Hex could not load the OpenCode model catalog."
         );
         assert_eq!(
             copy.error.as_deref(),
@@ -10899,7 +10210,7 @@ mod tests {
         assert_eq!(loading.title, "Checking for OpenCode");
         assert_eq!(
             loading.description,
-            "OpenCode transformation will be available after HEX connects to OpenCode."
+            "OpenCode transformation will be available after Hex connects to OpenCode."
         );
         assert!(!loading.can_retry);
         assert!(!loading.can_open_setup);
