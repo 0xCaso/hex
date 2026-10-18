@@ -72,7 +72,11 @@ const WINDOW_HEIGHT: f32 = 700.0;
 const MINIMUM_WIDTH: f32 = 860.0;
 const MINIMUM_HEIGHT: f32 = 560.0;
 const HOTKEY_MIN_WIDTH: f32 = 148.0;
-const HOTKEY_SIDE_SELECTOR_WIDTH: f32 = 116.0;
+/// Left / Either / Right segment widths.
+const HOTKEY_SIDE_WIDTHS: [f32; 3] = [40.0, 50.0, 40.0];
+/// The side segments plus the control's 2 px padding and 1 px border per side.
+const HOTKEY_SIDE_SELECTOR_WIDTH: f32 =
+    HOTKEY_SIDE_WIDTHS[0] + HOTKEY_SIDE_WIDTHS[1] + HOTKEY_SIDE_WIDTHS[2] + 6.0;
 const OPENCODE_INSTALL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_OPENCODE_ERROR_BYTES: usize = 4 * 1024;
@@ -2751,6 +2755,7 @@ impl AppWindow {
         }
         let section = |label: &'static str, first: bool| {
             div()
+                .w_full()
                 .when(!first, |section| {
                     section.mt_5().pt_5().border_t_1().border_color(rgb(LINE))
                 })
@@ -2800,26 +2805,19 @@ impl AppWindow {
                             ),
                         )
                     })
-                    .child(
-                        div()
-                            .mt_5()
-                            .border_t_1()
-                            .border_color(rgb(LINE))
-                            .when_some(entry.application.clone(), |detail, application| {
-                                detail.child(detail_row("Application", application))
-                            })
-                            .when_some(entry.processing.clone(), |detail, processing| {
-                                let mut summary = format!(
-                                    "{} · {} ms",
-                                    processing.profile, processing.latency_ms
-                                );
-                                if let Some(fallback) = &processing.fallback {
-                                    summary.push_str(&format!(" · fell back: {fallback}"));
-                                }
-                                detail.child(detail_row("Processing", summary))
-                            })
-                            .child(detail_row("Latency", latency)),
-                    ),
+                    .child(div().mt_5().border_t_1().border_color(rgb(LINE)))
+                    .when_some(entry.application.clone(), |detail, application| {
+                        detail.child(detail_row("Application", application))
+                    })
+                    .when_some(entry.processing.clone(), |detail, processing| {
+                        let mut summary =
+                            format!("{} · {} ms", processing.profile, processing.latency_ms);
+                        if let Some(fallback) = &processing.fallback {
+                            summary.push_str(&format!(" · fell back: {fallback}"));
+                        }
+                        detail.child(detail_row("Processing", summary))
+                    })
+                    .child(detail_row("Latency", latency)),
             )
             .into_any_element()
     }
@@ -3057,7 +3055,7 @@ impl AppWindow {
         side_animation.set_enabled(side.is_some());
         let side_position = side_animation.render_position(window).clamp(0.0, 1.0);
         let selected = side.unwrap_or(ModifierSide::Either);
-        let side_widths = [40.0, 50.0, 40.0];
+        let side_widths = HOTKEY_SIDE_WIDTHS;
         let side_selection_spring =
             &mut self.hotkey_side_selection_springs[hotkey_kind_index(kind)];
         side_selection_spring.set_target(hotkey_side_index(selected) as f32);
@@ -6481,6 +6479,8 @@ impl AppWindow {
             );
         }
         if !active && !notes_running && armed {
+            // The confirmation takes the whole row until it is answered.
+            actions.clear();
             let delete_id = id.clone();
             actions.push(
                 action_of(
@@ -9058,6 +9058,52 @@ mod tests {
         )
     }
 
+    fn history_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
+        AppWindow::new(
+            PathBuf::from("unused-preview-events.ndjson"),
+            crate::config::voice_control(),
+            sync_channel(1).0,
+            crate::dictation_indicator::channel().0,
+            None,
+            None,
+            Some(AppWindowPreview {
+                pane: DeveloperPane::History,
+                transcription_picker: None,
+                onboarding: false,
+                confirm_model_deletion: false,
+                collapse_mode_processing: false,
+                open_transformation_picker: false,
+                select_global_mode: false,
+                voice_action_enabled: false,
+                opencode_unavailable: false,
+                permissions_missing: false,
+                model_missing: false,
+                command_model_missing: false,
+                open_history_retention: false,
+                confirm_release_microphone: false,
+                update_available: false,
+                meetings_enabled: true,
+                screen_recording_missing: false,
+                meeting_recording: false,
+                confirm_meeting_delete: false,
+                open_meeting_actions: false,
+                meetings_empty: false,
+            }),
+            window,
+            cx,
+        )
+    }
+
+    #[gpui::test]
+    fn history_detail_rows_keep_their_values_on_one_line(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(history_fixture);
+        cx.simulate_resize(size(px(WINDOW_WIDTH), px(MINIMUM_HEIGHT)));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let value = cx.debug_bounds("detail-row-value").expect("detail row");
+        assert!(value.size.width > px(200.0), "{value:?}");
+    }
+
     #[gpui::test]
     fn meeting_turns_alternate_sides_inside_the_detail(cx: &mut gpui::TestAppContext) {
         let (_, cx) = cx.add_window_view(meetings_fixture);
@@ -9099,7 +9145,10 @@ mod tests {
         cx.update(|_, cx| {
             view.update(cx, |view, _| {
                 view.select_meeting("preview-design".into());
-                assert!(!view.meeting_actions_open, "a new selection closes the menu");
+                assert!(
+                    !view.meeting_actions_open,
+                    "a new selection closes the menu"
+                );
             })
         });
     }

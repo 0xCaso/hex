@@ -188,8 +188,8 @@ ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
 | Errors | `error_panel` (card), `error_message` (inside a card), `inline_error` (under a control) |
 
 A destructive menu choice ends in "…" ("Delete…") and keeps its two-step
-confirmation: choosing it closes the menu and puts the armed Danger button and
-Cancel in the action row.
+confirmation: choosing it closes the menu and replaces the action row with the
+armed Danger button and Cancel until one is chosen.
 
 Buttons are always filled or bordered. Only icon buttons and menu items are
 borderless. Tags never have a border or hover state, so they can't be mistaken
@@ -222,7 +222,8 @@ Meeting capsules are pill-shaped. They use the shared buttons with
 
 - Use `Icon` (`ArrowRight`, `ChevronDown`, `Close`, `DragHandle`, `Ellipsis`,
   `Globe`, `Plus`) via `icon(Icon, colour)` at `ICON_SIZE_SMALL`, or `sized_icon` for a
-  different size. Use `NavigationIcon` for the sidebar.
+  different size. `Ellipsis` draws at `ICON_SIZE` so its dots match the other
+  glyphs optically. Use `NavigationIcon` for the sidebar.
 - On macOS these are line-weight SF Symbols (no `.fill` variants) at medium
   weight, monochrome. On Linux they fall back to Heroicons (navigation) and
   matching glyphs (inline).

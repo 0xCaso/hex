@@ -104,6 +104,15 @@ pub(crate) enum Icon {
 }
 
 impl Icon {
+    /// The ellipsis's three dots read lighter than the other glyphs at the
+    /// same box, so it is drawn one size up to match them optically.
+    fn optical_size(self) -> f32 {
+        match self {
+            Self::Ellipsis => ICON_SIZE,
+            _ => ICON_SIZE_SMALL,
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn sf_symbol(self) -> &'static str {
         match self {
@@ -131,9 +140,9 @@ impl Icon {
     }
 }
 
-/// An inline icon at [`ICON_SIZE_SMALL`] in `color`.
+/// An inline icon at [`ICON_SIZE_SMALL`] (optically matched) in `color`.
 pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
-    sized_icon(icon, ICON_SIZE_SMALL, color)
+    sized_icon(icon, icon.optical_size(), color)
 }
 
 #[cfg(target_os = "macos")]
@@ -527,6 +536,7 @@ pub(crate) fn detail_header(
                     .debug_selector(|| "detail-actions".into())
                     .pt_2()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .children(actions),
@@ -623,6 +633,7 @@ pub(crate) fn detail_row(label: &'static str, value: impl Into<String>) -> AnyEl
         )
         .child(
             div()
+                .debug_selector(|| "detail-row-value".into())
                 .flex_1()
                 .min_w_0()
                 .text_body()
@@ -1297,6 +1308,27 @@ mod layout_tests {
             .into_any_element()
         });
         assert!(width > 180.0 && width < PANE_LIST_WIDTH, "{width}");
+    }
+
+    fn value_width(cx: &mut TestAppContext, build: fn() -> AnyElement) -> f32 {
+        let (_, cx) = cx.add_window_view(move |_, _| Probe(build));
+        cx.simulate_resize(size(px(1000.0), px(400.0)));
+        cx.run_until_parked();
+        f32::from(cx.debug_bounds("detail-row-value").unwrap().size.width)
+    }
+
+    #[gpui::test]
+    fn detail_rows_fill_a_detail_body(cx: &mut TestAppContext) {
+        let width = value_width(cx, || {
+            div()
+                .w(px(600.0))
+                .h(px(300.0))
+                .flex()
+                .flex_col()
+                .child(detail_body("probe").child(detail_row("Latency", LONG)))
+                .into_any_element()
+        });
+        assert!(width > 400.0, "{width}");
     }
 
     #[gpui::test]

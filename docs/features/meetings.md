@@ -218,7 +218,7 @@ Rename -> inline field; Enter or Save          // meetings.rename
   -> manifest title; Markdown heading only while it reads the old title
   -> file name unchanged; empty title refused
 Delete… (overflow menu) -> "Trash recording & Markdown" (or "Trash recording")
-  / Cancel, shown in the action row
+  / Cancel, which replace the action row until answered
   -> exported Markdown, then Application Support/meetings/<id>, to the Trash
   -> refused while recording, transcribing, or writing notes   // meetings.delete
 ```
