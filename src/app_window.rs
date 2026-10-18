@@ -2805,19 +2805,29 @@ impl AppWindow {
                             ),
                         )
                     })
-                    .child(div().mt_5().border_t_1().border_color(rgb(LINE)))
-                    .when_some(entry.application.clone(), |detail, application| {
-                        detail.child(detail_row("Application", application))
-                    })
-                    .when_some(entry.processing.clone(), |detail, processing| {
-                        let mut summary =
-                            format!("{} · {} ms", processing.profile, processing.latency_ms);
-                        if let Some(fallback) = &processing.fallback {
-                            summary.push_str(&format!(" · fell back: {fallback}"));
-                        }
-                        detail.child(detail_row("Processing", summary))
-                    })
-                    .child(detail_row("Latency", latency)),
+                    .child(
+                        div()
+                            .w_full()
+                            .mt_5()
+                            .flex()
+                            .flex_col()
+                            .border_t_1()
+                            .border_color(rgb(LINE))
+                            .when_some(entry.application.clone(), |rows, application| {
+                                rows.child(detail_row("Application", application))
+                            })
+                            .when_some(entry.processing.clone(), |rows, processing| {
+                                let mut summary = format!(
+                                    "{} · {} ms",
+                                    processing.profile, processing.latency_ms
+                                );
+                                if let Some(fallback) = &processing.fallback {
+                                    summary.push_str(&format!(" · fell back: {fallback}"));
+                                }
+                                rows.child(detail_row("Processing", summary))
+                            })
+                            .child(detail_row("Latency", latency)),
+                    ),
             )
             .into_any_element()
     }

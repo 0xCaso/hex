@@ -549,14 +549,13 @@ pub(crate) fn detail_title(text: impl Into<SharedString>) -> Div {
     div().text_headline().child(text.into())
 }
 
-/// The scrolling content under a [`detail_header`].
+/// The scrolling content under a [`detail_header`]. It stays a block: a flex
+/// column here measures `detail_row` values at their full length.
 pub(crate) fn detail_body(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
         .flex_1()
         .min_h(px(0.0))
-        .flex()
-        .flex_col()
         .overflow_y_scroll()
         .px_6()
         .pt_5()
