@@ -86,6 +86,23 @@ const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 const BAD_PASTEBOARD_FLAVOR: i32 = -25133;
 const DUPLICATE_PASTEBOARD_FLAVOR: i32 = -25134;
 const PASTE_SETTLE_DELAY: Duration = Duration::from_millis(100);
+// Chrome 155 and 156 on macOS can drop a ⌘V posted right after a pasteboard
+// write (#136, fixed upstream by Chromium CL 8503629, expected in Chrome 157).
+const CHROMIUM_PRE_PASTE_DELAY: Duration = Duration::from_millis(150);
+// Matched case-insensitively at a dot boundary, so release channels
+// (`com.google.Chrome.beta`) and installed web apps (`com.google.Chrome.app.…`)
+// share their browser's delay.
+const CHROMIUM_BUNDLE_FAMILIES: &[&str] = &[
+    "com.google.Chrome",
+    "com.brave.Browser",
+    "company.thebrowser.Browser",
+    "company.thebrowser.dia",
+    "com.microsoft.edgemac",
+    "com.vivaldi.Vivaldi",
+    "com.operasoftware.Opera",
+    "com.operasoftware.OperaGX",
+    "org.chromium.Chromium",
+];
 const SYSTEM_TRANSLATED_FLAVOR: u32 = 1 << 8;
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -276,8 +293,16 @@ impl Paster {
             },
         )?;
 
+        let delay = pre_paste_delay(crate::context::frontmost_bundle_identifier().as_deref());
+        if !delay.is_zero() {
+            tracing::debug!(
+                delay_ms = delay.as_millis(),
+                "delaying paste for a Chromium browser"
+            );
+        }
         let clipboard_restore = self.clipboard_restore.clone();
         complete_paste(
+            delay,
             || keyboard::post_command('v'),
             move || {
                 thread::spawn(move || {
@@ -328,11 +353,32 @@ pub(crate) fn commit_prepared_paste<P, T>(
     paste(prepared)
 }
 
+fn pre_paste_delay(bundle_id: Option<&str>) -> Duration {
+    if bundle_id.is_some_and(is_chromium_browser) {
+        CHROMIUM_PRE_PASTE_DELAY
+    } else {
+        Duration::ZERO
+    }
+}
+
+fn is_chromium_browser(bundle_id: &str) -> bool {
+    CHROMIUM_BUNDLE_FAMILIES.iter().any(|family| {
+        bundle_id
+            .get(..family.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(family))
+            && matches!(bundle_id.as_bytes().get(family.len()), None | Some(b'.'))
+    })
+}
+
 fn complete_paste(
+    pre_paste_delay: Duration,
     post_paste: impl FnOnce() -> Result<()>,
     schedule_restore: impl FnOnce(),
-    wait: impl FnOnce(Duration),
+    mut wait: impl FnMut(Duration),
 ) -> Result<()> {
+    if !pre_paste_delay.is_zero() {
+        wait(pre_paste_delay);
+    }
     let posted = post_paste();
     schedule_restore();
     posted?;
@@ -702,6 +748,7 @@ mod tests {
                     |()| {
                         steps.borrow_mut().push("write");
                         complete_paste(
+                            Duration::ZERO,
                             || {
                                 steps.borrow_mut().push("post");
                                 Ok(())
@@ -742,6 +789,7 @@ mod tests {
         let paste = |text| {
             clipboard.set(text);
             complete_paste(
+                Duration::ZERO,
                 || {
                     pending.set(true);
                     steps.borrow_mut().push("post");
@@ -783,6 +831,7 @@ mod tests {
         let restore_scheduled_at = Cell::new(None);
 
         complete_paste(
+            Duration::ZERO,
             || {
                 elapsed.set(Duration::from_secs(1));
                 assert_eq!(restore_scheduled_at.get(), None);
@@ -803,6 +852,7 @@ mod tests {
         let result = send_after_paste(
             || {
                 complete_paste(
+                    Duration::ZERO,
                     || {
                         steps.borrow_mut().push("post");
                         Err(eyre!("post failed"))
@@ -819,6 +869,71 @@ mod tests {
 
         assert_eq!(result.unwrap_err().to_string(), "post failed");
         assert_eq!(steps.into_inner(), ["post", "restore"]);
+    }
+
+    #[test]
+    fn only_chromium_browsers_delay_the_paste_shortcut() {
+        for bundle_id in [
+            "com.google.Chrome",
+            "com.google.Chrome.beta",
+            "com.google.Chrome.canary",
+            "com.google.Chrome.app.kjgfgldnnfoeklkmfkjfagphfepbbdan",
+            "com.brave.Browser",
+            "com.brave.Browser.nightly",
+            "company.thebrowser.Browser",
+            "company.thebrowser.dia",
+            "com.microsoft.edgemac",
+            "com.microsoft.edgemac.Dev",
+            "com.vivaldi.Vivaldi",
+            "com.operasoftware.Opera",
+            "com.operasoftware.OperaGX",
+            "org.chromium.Chromium",
+            "COM.GOOGLE.CHROME",
+        ] {
+            assert_eq!(
+                pre_paste_delay(Some(bundle_id)),
+                CHROMIUM_PRE_PASTE_DELAY,
+                "{bundle_id}"
+            );
+        }
+        for bundle_id in [
+            None,
+            Some(""),
+            Some("com.apple.Safari"),
+            Some("org.mozilla.firefox"),
+            Some("com.mitchellh.ghostty"),
+            Some("com.google.Chromecast"),
+            Some("com.google"),
+            Some("com.brave.Browserish"),
+            Some("çom.google.Chrome"),
+        ] {
+            assert_eq!(pre_paste_delay(bundle_id), Duration::ZERO, "{bundle_id:?}");
+        }
+    }
+
+    #[test]
+    fn chromium_delay_runs_between_the_clipboard_write_and_the_paste_shortcut() {
+        let steps = RefCell::new(Vec::new());
+
+        complete_paste(
+            CHROMIUM_PRE_PASTE_DELAY,
+            || {
+                steps.borrow_mut().push("post".to_string());
+                Ok(())
+            },
+            || steps.borrow_mut().push("restore".to_string()),
+            |delay| {
+                steps
+                    .borrow_mut()
+                    .push(format!("wait {}", delay.as_millis()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            steps.into_inner(),
+            ["wait 150", "post", "restore", "wait 100"]
+        );
     }
 
     #[test]
