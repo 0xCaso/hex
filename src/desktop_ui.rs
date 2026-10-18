@@ -615,7 +615,9 @@ pub(crate) fn settings_panel() -> Div {
 
 /// A label and value inside a detail card.
 pub(crate) fn detail_row(label: &'static str, value: impl Into<String>) -> AnyElement {
+    // A definite width, so long values wrap instead of sizing the row to them.
     div()
+        .w_full()
         .py_3()
         .flex()
         .items_start()
