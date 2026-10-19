@@ -573,7 +573,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pending, 1);
-        let job = queued.try_recv().unwrap();
+        let Ok(OutputJob::Dictation(job)) = queued.try_recv() else {
+            panic!("a dictation job");
+        };
         assert_eq!(job.audio_ms, 2_000);
         let received = commands.try_iter().collect::<Vec<_>>();
         let fed: usize = received
