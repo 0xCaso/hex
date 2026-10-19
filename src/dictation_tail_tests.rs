@@ -52,12 +52,7 @@ fn speech_end(samples: &[f32], rate: u32) -> usize {
 /// silence, and releases `release` source samples into the speech while later
 /// audio is already arriving, exactly like a delivered CGEvent release. The
 /// clip keeps the production post-release tail.
-fn capture(
-    audio: &[f32],
-    rate: u32,
-    release: usize,
-    incremental: bool,
-) -> (DictationClip, Vec<CaptureSegment>) {
+fn capture(audio: &[f32], rate: u32, release: usize) -> DictationClip {
     let origin = CaptureInstant::from_nanos(60_000_000_000);
     let at = |samples: usize| {
         origin + Duration::from_nanos(samples as u64 * 1_000_000_000 / u64::from(rate))
@@ -66,7 +61,6 @@ fn capture(
     let pressed_at = at(lead);
     let released_at = at(lead + release);
     let mut capture = DictationCapture::new(rate);
-    let mut pieces = Vec::new();
     let mut fed = 0;
     let mut finish = None;
     for block in audio.chunks(rate as usize / 100) {
@@ -75,16 +69,9 @@ fn capture(
         capture.ingest(block, through);
         if through == pressed_at {
             capture.start_at(pressed_at);
-            if incremental {
-                capture.segment_capture(1);
-            }
         }
         if through > pressed_at && finish.is_none() {
             capture.become_intentional(through.min(released_at));
-            capture.offer_segment(|segment| {
-                pieces.push(segment);
-                true
-            });
             // The owner finishes once the tail has arrived, up to one buffer late.
             if through >= released_at + POST_RELEASE_TAIL + Duration::from_millis(20) {
                 finish = Some(capture.finish_with_tail(released_at, POST_RELEASE_TAIL));
@@ -94,7 +81,7 @@ fn capture(
     let Some(Finish::Transcribe(clip)) = finish else {
         panic!("expected transcription");
     };
-    (clip, pieces)
+    clip
 }
 
 fn run(model: &mut Parakeet, mut samples: Vec<f32>) -> String {
@@ -113,7 +100,6 @@ fn release_boundary_harness() {
         Some(&TranscriptionSelection::default()),
     )
     .unwrap();
-    let selection = TranscriptionSelection::default();
     for path in std::env::var("HEX_TAIL_WAVS").unwrap().split(',') {
         let (speech, rate) = read_wav(Path::new(path));
         let end = speech_end(&speech, rate);
@@ -133,43 +119,22 @@ fn release_boundary_harness() {
                 (samples_for(PRE_ROLL, rate) + release + samples_for(POST_RELEASE_TAIL, rate))
                     * 16_000
                     / rate as usize;
-            for incremental in [false, true] {
-                let (clip, pieces) = capture(&audio, rate, release, incremental);
-                let mut speculative = SpeculativeTranscript::default();
-                for mut piece in pieces {
-                    let text = run(&mut model, std::mem::take(&mut piece.samples));
-                    speculative.record(&piece, selection.clone(), Ok(text));
-                }
-                let plan = speculative.take_plan(&clip, &selection, false);
-                let cuts = clip.cuts().len();
-                let samples = clip.into_transcription_samples();
-                let missing = expected_len as i64 - samples.len() as i64;
-                // Largest deviation from a whole-file conversion over the final
-                // 100 ms, excluding the last 2 ms that flush against silence.
-                let max_tail_diff = (samples.len().saturating_sub(1_600)
-                    ..samples.len().saturating_sub(32))
-                    .map(|index| (samples[index] - reference[reference_start + index]).abs())
-                    .fold(0.0, f32::max);
-                let merged = matches!(
-                    plan,
-                    IncrementalPlan::Join {
-                        merged_short_tail: true,
-                        ..
-                    }
+            let samples = capture(&audio, rate, release).into_transcription_samples();
+            let missing = expected_len as i64 - samples.len() as i64;
+            // Largest deviation from a whole-file conversion over the final
+            // 100 ms, excluding the last 2 ms that flush against silence.
+            let max_tail_diff = (samples.len().saturating_sub(1_600)
+                ..samples.len().saturating_sub(32))
+                .map(|index| (samples[index] - reference[reference_start + index]).abs())
+                .fold(0.0, f32::max);
+            for threads in [0, 1] {
+                model.session.set_threads_for_test(threads).unwrap();
+                let started = std::time::Instant::now();
+                let text = run(&mut model, samples.clone());
+                let release_ms = started.elapsed().as_millis();
+                println!(
+                    "release{offset_ms:+}ms threads={threads} release_ms={release_ms} missing={missing} tail_diff={max_tail_diff:.5} {text:?}"
                 );
-                for threads in [0, 1] {
-                    model.session.set_threads_for_test(threads).unwrap();
-                    let started = std::time::Instant::now();
-                    let text =
-                        transcribe_clip(samples.clone(), plan.clone(), None, |samples, _| {
-                            Ok(run(&mut model, samples))
-                        })
-                        .unwrap();
-                    let release_ms = started.elapsed().as_millis();
-                    println!(
-                        "release{offset_ms:+}ms incremental={incremental} cuts={cuts} merged={merged} threads={threads} release_ms={release_ms} missing={missing} tail_diff={max_tail_diff:.5} {text:?}"
-                    );
-                }
             }
         }
     }

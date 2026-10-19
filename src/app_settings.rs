@@ -14,7 +14,6 @@ static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
 static SHORTCUT_TOGGLE: AtomicBool = AtomicBool::new(false);
-static INCREMENTAL_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
 static MEETINGS_ENABLED: AtomicBool = AtomicBool::new(false);
 static MEETING_NOTES_ENABLED: AtomicBool = AtomicBool::new(true);
 static MEETING_OUTPUT_FOLDER: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
@@ -556,8 +555,6 @@ pub struct AppSettings {
     pub double_tap_lock: bool,
     pub double_tap_only: bool,
     pub shortcut_mode: crate::dictation::ShortcutMode,
-    /// Transcribe completed speech at pauses during hotkey captures.
-    pub incremental_transcription: bool,
     pub dictation_hotkey: HotkeyBinding,
     #[serde(
         default = "HotkeyBinding::edit_default",
@@ -596,7 +593,6 @@ impl Default for AppSettings {
             double_tap_lock: true,
             double_tap_only: false,
             shortcut_mode: crate::dictation::ShortcutMode::Hold,
-            incremental_transcription: true,
             dictation_hotkey: HotkeyBinding::default(),
             edit_hotkey: HotkeyBinding::edit_default(),
             paste_last_hotkey: Some(HotkeyBinding::paste_last_default()),
@@ -817,7 +813,6 @@ impl AppSettings {
             self.shortcut_mode == crate::dictation::ShortcutMode::Toggle,
             Ordering::Relaxed,
         );
-        INCREMENTAL_TRANSCRIPTION.store(self.incremental_transcription, Ordering::Relaxed);
         MEETINGS_ENABLED.store(self.meetings.available(), Ordering::Release);
         MEETING_NOTES_ENABLED.store(
             self.meetings.summarize_with_apple_intelligence,
@@ -1030,10 +1025,6 @@ pub fn shortcut_toggle() -> bool {
     SHORTCUT_TOGGLE.load(Ordering::Relaxed)
 }
 
-pub fn incremental_transcription() -> bool {
-    INCREMENTAL_TRANSCRIPTION.load(Ordering::Relaxed)
-}
-
 /// Whether meeting detection and recording may run: always in developer
 /// builds, otherwise only after the user opts in.
 pub fn meetings_enabled() -> bool {
@@ -1137,7 +1128,6 @@ mod tests {
         );
         assert!(settings.double_tap_lock);
         assert!(!settings.double_tap_only);
-        assert!(settings.incremental_transcription);
         assert_eq!(settings.dictation_hotkey, HotkeyBinding::default());
         assert_eq!(settings.edit_hotkey, HotkeyBinding::edit_default());
         assert_eq!(
@@ -1652,9 +1642,10 @@ mod tests {
         assert_eq!(decoded.dictation_hotkey, settings.dictation_hotkey);
         assert_eq!(decoded.paste_last_hotkey, None);
         assert!(decoded.double_tap_only);
-        let disabled: AppSettings =
-            serde_json::from_str(r#"{"incremental_transcription":false}"#).unwrap();
-        assert!(!disabled.incremental_transcription);
+        // Settings saved before dictation streamed still load.
+        assert!(
+            serde_json::from_str::<AppSettings>(r#"{"incremental_transcription":false}"#).is_ok()
+        );
 
         let legacy: HotkeyModifiers = serde_json::from_str(
             r#"{"control":false,"option":true,"shift":false,"command":false,"function":false}"#,

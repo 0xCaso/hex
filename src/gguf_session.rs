@@ -1,6 +1,7 @@
-//! The `transcribe-cpp` session owner shared by the macOS and Linux GGUF
-//! transcribers. It recreates the native session around every run so retained
-//! scheduler scratch never outlives the inference that sized it.
+//! The `transcribe-cpp` session owner shared by the macOS, Linux, and Windows
+//! GGUF transcribers. It recreates the native session around every run (and
+//! every live stream) so retained scheduler scratch never outlives the
+//! inference that sized it.
 
 use std::path::Path;
 
@@ -82,15 +83,77 @@ impl OfflineGgufSession {
         })
     }
 
-    #[cfg(target_os = "windows")]
-    pub(crate) fn device_type(&self) -> transcribe_cpp::Result<transcribe_cpp::DeviceType> {
-        Ok(self.model.device()?.device_type)
+    /// Streams only on a GPU (Metal, Vulkan): a CPU stream re-encodes each
+    /// overlapping window and would cost several times the offline compute.
+    /// The probe also prewarms the stream graph. Without an extension
+    /// Parakeet buffers with its largest left, chunk, and right context
+    /// (Unified English: 5.6 s, 1.04 s, 1.04 s), its most accurate and least
+    /// compute-intensive setting. `HEX_STREAMING=0` keeps the model offline
+    /// and `HEX_STREAMING=1` streams on any device (diagnostics and CI);
+    /// `HEX_STREAM_CHUNK_MS` overrides the chunk and right context.
+    pub(crate) fn probe_stream(
+        &mut self,
+        options: &transcribe_cpp::RunOptions,
+        architecture: &str,
+    ) -> Option<transcribe_cpp::StreamOptions> {
+        use transcribe_cpp::DeviceType;
+        let forced = match std::env::var("HEX_STREAMING").as_deref() {
+            Ok("0") => return None,
+            Ok("1") => true,
+            _ => false,
+        };
+        if !self.model.capabilities().supports_streaming {
+            return None;
+        }
+        let device_type = self.model.device().ok()?.device_type;
+        if !forced && !matches!(device_type, DeviceType::Gpu | DeviceType::Igpu) {
+            return None;
+        }
+        let chunk_ms = std::env::var("HEX_STREAM_CHUNK_MS")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok());
+        let stream_options = transcribe_cpp::StreamOptions {
+            family: (architecture == "parakeet" && chunk_ms.is_some()).then_some(
+                transcribe_cpp::StreamExtension::ParakeetBuffered(
+                    transcribe_cpp::ParakeetBufferedStreamOptions {
+                        left_ms: None,
+                        chunk_ms,
+                        right_ms: chunk_ms,
+                    },
+                ),
+            ),
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let probe = self.with_stream(
+            options,
+            &stream_options,
+            &transcribe_cpp::CancelToken::new(),
+            |stream| {
+                stream.feed(&vec![0.0; 16_000])?;
+                stream.finalize().map(|_| ())
+            },
+        );
+        match probe {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    ?device_type,
+                    chunk_ms,
+                    prewarm_ms = started.elapsed().as_millis(),
+                    "streaming transcription is available"
+                );
+                Some(stream_options)
+            }
+            Ok(Err(error)) | Err(error) => {
+                tracing::warn!(%error, "model advertises streaming but could not stream");
+                None
+            }
+        }
     }
 
     /// Runs `drive` against one live stream on this session, then rotates the
     /// session like [`Self::run`] so the stream's buffered audio and scratch
     /// are released. `cancel` stays installed only for the stream's lifetime.
-    #[cfg(target_os = "windows")]
     pub(crate) fn with_stream<R>(
         &mut self,
         options: &transcribe_cpp::RunOptions,

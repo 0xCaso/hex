@@ -137,17 +137,40 @@ fn prepare_gguf_samples(samples: &mut Vec<f32>, model: Option<TranscriptionModel
 }
 
 impl WarmTranscriber {
+    /// A warm transcriber already serving `model`, for opt-in harnesses.
+    #[cfg(test)]
+    pub(crate) fn serving(model: Transcriber) -> Self {
+        Self {
+            active: Some(model),
+        }
+    }
+
     pub fn load() -> Result<Self> {
         Ok(Self {
             active: Some(Transcriber::load()?),
         })
     }
 
-    /// The warm model, only if it already serves `selection`.
-    pub fn active_for(&mut self, selection: &TranscriptionSelection) -> Option<&mut Transcriber> {
-        self.active
-            .as_mut()
-            .filter(|model| model.matches_selection(selection))
+    /// Stream options of the warm model, when it can stream on its device.
+    pub(crate) fn stream_options(&self) -> Option<&transcribe_cpp::StreamOptions> {
+        match &self.active {
+            Some(Transcriber::Gguf(model)) => model.stream_options(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn with_stream<R>(
+        &mut self,
+        stream_options: &transcribe_cpp::StreamOptions,
+        cancel: &transcribe_cpp::CancelToken,
+        drive: impl FnOnce(&mut transcribe_cpp::Stream<'_>) -> R,
+    ) -> transcribe_cpp::Result<R> {
+        match &mut self.active {
+            Some(Transcriber::Gguf(model)) => model.with_stream(stream_options, cancel, drive),
+            _ => Err(transcribe_cpp::Error::NotImplemented(
+                "the active transcriber cannot stream".into(),
+            )),
+        }
     }
 
     pub fn activate(&mut self, selection: &TranscriptionSelection) -> Result<&mut Transcriber> {

@@ -38,11 +38,12 @@ through the signed update feed. Uninstall with `install-windows.ps1 -Uninstall`.
 ## Streaming Dictation
 
 With Parakeet Unified English on a GPU, HEX streams audio into the model while
-the shortcut is held, so release only decodes the last one to two seconds. Each
-dictation logs `source=stream` or `source=fallback` in `logs\process.log`; a
-stream that fails, stalls past its deadline, or returns nothing falls back to
-transcribing the whole clip. CPU devices (including ARM64) always use the
-whole-clip path. Set `HEX_STREAMING=0` to force the whole-clip path. See
+the shortcut is held, so release only decodes the last one to two seconds. The
+same engine streams on macOS (Metal) and Linux (Vulkan). Each dictation logs
+`source=stream` or `source=fallback` in `logs\process.log`; a stream that fails,
+stalls past its deadline, or returns nothing falls back to transcribing the
+whole clip. CPU devices (including ARM64) always use the whole-clip path. Set
+`HEX_STREAMING=0` to force the whole-clip path. See
 [dictation](features/dictation.md#streaming-finish).
 
 ## Requirements For Source Builds

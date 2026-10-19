@@ -16,7 +16,6 @@ pub struct LocalTranscriber {
     options: RunOptions,
     device_label: String,
     max_audio_samples: Option<usize>,
-    #[cfg(target_os = "windows")]
     stream: Option<transcribe_cpp::StreamOptions>,
 }
 
@@ -176,7 +175,6 @@ impl LocalTranscriber {
                 &architecture,
                 capabilities.max_audio_ms,
             ),
-            #[cfg(target_os = "windows")]
             stream: None,
         };
         let started = Instant::now();
@@ -185,84 +183,31 @@ impl LocalTranscriber {
             prewarm_ms = started.elapsed().as_millis(),
             "prewarmed local transcription model"
         );
-        #[cfg(target_os = "windows")]
-        if capabilities.supports_streaming {
-            transcriber.stream = transcriber.probe_stream(&architecture);
-        }
+        let stream_run = transcriber.stream_run_options();
+        transcriber.stream = transcriber.session.probe_stream(&stream_run, &architecture);
         Ok(transcriber)
     }
 
-    /// Streams only on a GPU: a CPU stream re-encodes each overlapping window
-    /// and would cost several times the offline compute. The probe also
-    /// prewarms the stream graph. Without an extension Parakeet buffers with
-    /// its largest left, chunk, and right context (Unified English: 5.6 s,
-    /// 1.04 s, 1.04 s), its most accurate and least compute-intensive setting.
-    /// `HEX_STREAMING=0` keeps the model offline; `HEX_STREAM_CHUNK_MS`
-    /// overrides the chunk and right context for benchmarks.
-    #[cfg(target_os = "windows")]
-    fn probe_stream(&mut self, architecture: &str) -> Option<transcribe_cpp::StreamOptions> {
-        use transcribe_cpp::DeviceType;
-        if std::env::var("HEX_STREAMING").is_ok_and(|value| value == "0") {
-            return None;
-        }
-        match self.session.device_type() {
-            Ok(DeviceType::Gpu | DeviceType::Igpu) => {}
-            _ => return None,
-        }
-        let chunk_ms = std::env::var("HEX_STREAM_CHUNK_MS")
-            .ok()
-            .and_then(|value| value.parse::<i32>().ok());
-        let options = transcribe_cpp::StreamOptions {
-            family: (architecture == "parakeet" && chunk_ms.is_some()).then_some(
-                transcribe_cpp::StreamExtension::ParakeetBuffered(
-                    transcribe_cpp::ParakeetBufferedStreamOptions {
-                        left_ms: None,
-                        chunk_ms,
-                        right_ms: chunk_ms,
-                    },
-                ),
-            ),
-            ..Default::default()
-        };
-        let started = Instant::now();
-        let probe = self.with_stream(&options, &transcribe_cpp::CancelToken::new(), |stream| {
-            stream.feed(&vec![0.0; 16_000])?;
-            stream.finalize().map(|_| ())
-        });
-        match probe {
-            Ok(Ok(())) => {
-                tracing::info!(
-                    chunk_ms,
-                    prewarm_ms = started.elapsed().as_millis(),
-                    "streaming transcription is available"
-                );
-                Some(options)
-            }
-            Ok(Err(error)) | Err(error) => {
-                tracing::warn!(%error, "model advertises streaming but could not stream");
-                None
-            }
+    /// Streams decode exactly as offline; a run-slot family extension
+    /// (Whisper's prompt) does not apply to a stream.
+    fn stream_run_options(&self) -> RunOptions {
+        RunOptions {
+            family: None,
+            ..self.options.clone()
         }
     }
 
-    #[cfg(target_os = "windows")]
     pub(crate) fn stream_options(&self) -> Option<&transcribe_cpp::StreamOptions> {
         self.stream.as_ref()
     }
 
-    #[cfg(target_os = "windows")]
     pub(crate) fn with_stream<R>(
         &mut self,
         stream_options: &transcribe_cpp::StreamOptions,
         cancel: &transcribe_cpp::CancelToken,
         drive: impl FnOnce(&mut transcribe_cpp::Stream<'_>) -> R,
     ) -> transcribe_cpp::Result<R> {
-        // Decode exactly as offline; a run-slot family extension (Whisper's
-        // prompt) does not apply to a stream.
-        let options = RunOptions {
-            family: None,
-            ..self.options.clone()
-        };
+        let options = self.stream_run_options();
         self.session
             .with_stream(&options, stream_options, cancel, drive)
     }
