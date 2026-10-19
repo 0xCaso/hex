@@ -604,7 +604,7 @@ pub enum RecordingAudioBehavior {
     DoNothing,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DictationProcessingSettings {
     pub default_mode: DictationMode,
@@ -623,7 +623,7 @@ impl Default for DictationProcessingSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DictationMode {
     pub name: String,
@@ -658,7 +658,7 @@ impl Default for DictationPostProcessing {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct VoiceActionSettings {
     pub enabled: bool,
@@ -789,9 +789,8 @@ impl Default for AppSettings {
 /// language; macOS and Linux start with the default model.
 fn default_transcription() -> TranscriptionSelection {
     #[cfg(target_os = "windows")]
-    let selection = crate::transcription_models::recommended_selection(
-        &crate::windows_settings::user_language(),
-    );
+    let selection =
+        crate::transcription_models::recommended_selection(&crate::desktop_i18n::system_language());
     #[cfg(not(target_os = "windows"))]
     let selection = TranscriptionSelection::default();
     selection
@@ -981,16 +980,7 @@ impl AppSettings {
             u8::from(self.commands_enabled) | (u8::from(self.release_microphone_while_idle) << 1);
         MICROPHONE_POLICY.store(policy, Ordering::Release);
         CUSTOM_TRANSFORMATIONS_ENABLED.store(
-            !self
-                .dictation_processing
-                .default_mode
-                .transformations
-                .is_empty()
-                || self
-                    .dictation_processing
-                    .modes
-                    .iter()
-                    .any(|mode| !mode.transformations.is_empty()),
+            transformations_used(&self.dictation_processing),
             Ordering::Release,
         );
         crate::feedback::set_enabled(self.sound_effects);
@@ -1209,6 +1199,15 @@ pub fn microphone_policy() -> MicrophonePolicy {
     }
 }
 
+/// Whether the global mode or any mode runs a transformation.
+pub fn transformations_used(processing: &DictationProcessingSettings) -> bool {
+    !processing.default_mode.transformations.is_empty()
+        || processing
+            .modes
+            .iter()
+            .any(|mode| !mode.transformations.is_empty())
+}
+
 pub fn custom_transformations_enabled() -> bool {
     CUSTOM_TRANSFORMATIONS_ENABLED.load(Ordering::Acquire)
 }
@@ -1345,7 +1344,7 @@ pub(crate) fn migrate_legacy_settings(path: &std::path::Path) -> Result<()> {
         return Ok(());
     };
     #[cfg(target_os = "windows")]
-    let legacy = crate::windows_settings::legacy_settings(directory)?;
+    let legacy = crate::windows_migration::legacy_settings(directory)?;
     #[cfg(target_os = "linux")]
     let legacy = crate::linux_settings::legacy_settings(directory)?;
     #[cfg(target_os = "macos")]

@@ -160,45 +160,23 @@ pub fn run(shutdown: &'static AtomicBool) -> Result<()> {
         Command::Listen { device, selection } => {
             shutdown.store(false, Ordering::Relaxed);
             let _instance = crate::instance::acquire("windows-listener")?;
-            let settings = crate::windows_settings::WindowsSettings::load()?;
+            let settings = crate::app_settings::AppSettings::load()?;
             let history = crate::history::History::open_default(settings.history_retention)?;
-            let mode_runtime =
-                crate::windows_dictation::WindowsModeRuntime::from_settings(&settings);
-            let transformations =
-                Arc::new(crate::personal_commands::TransformationClient::default());
-            let _personal_commands = settings
-                .transformations_enabled()
-                .then(|| {
-                    crate::personal_commands::PersonalCommands::start(
-                        crate::commands::CommandConfig::new(),
-                        transformations.clone(),
-                    )
-                })
-                .flatten();
             let config = crate::windows_dictation::WindowsDictationConfig {
                 device,
-                hotkey: settings.dictation_hotkey,
-                paste_last_hotkey: settings.paste_last_hotkey,
-                voice_action_hotkey: settings.voice_action_hotkey,
-                double_tap_lock: settings.double_tap_lock,
-                double_tap_only: settings.double_tap_only,
-                shortcut_mode: settings.shortcut_mode,
-                while_dictating: settings.while_dictating,
-                release_microphone_while_idle: settings.release_microphone_while_idle,
-                feedback_volume: settings.feedback_volume,
                 history: Some(history),
-                last_dictation: Arc::new(Mutex::new(None)),
-                indicator: None,
-                replacements: Arc::new(std::sync::RwLock::new(
-                    crate::text_replacements::ReplacementSet::new(&settings.text_replacements),
-                )),
-                mode_runtime: Arc::new(std::sync::RwLock::new(mode_runtime)),
-                transformations,
-                voice_action_model: Arc::new(std::sync::RwLock::new(
-                    settings.voice_action_model.clone(),
-                )),
                 fallback_to_default_device: false,
+                ..crate::windows_dictation::WindowsDictationConfig::from_settings(&settings)
             };
+            let _personal_commands =
+                crate::app_settings::transformations_used(&settings.dictation_processing)
+                    .then(|| {
+                        crate::personal_commands::PersonalCommands::start(
+                            crate::commands::CommandConfig::new(),
+                            config.transformations.clone(),
+                        )
+                    })
+                    .flatten();
             crate::windows_dictation::run(&event_path, &selection.resolve()?, config, shutdown)
         }
         Command::Capture {

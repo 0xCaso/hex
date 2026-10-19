@@ -6,6 +6,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use color_eyre::eyre::{Result, eyre};
+use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -19,9 +20,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
+use crate::app_settings::{HotkeyBinding, HotkeyKey, HotkeyModifiers, ModifierSide};
 use crate::audio::CaptureInstant;
 use crate::dictation::ShortcutMode;
-use crate::windows_settings::WindowsHotkey;
 
 /// The focused application's executable stem (e.g. "chrome"), lowercased,
 /// for per-application dictation modes and history entries.
@@ -64,6 +65,129 @@ pub fn window_process_path(
             return None;
         }
         Some(String::from_utf16_lossy(&buffer[..length as usize]).into())
+    }
+}
+
+/// A shortcut as the keyboard hook matches it: which modifiers are held and
+/// the named key. Settings store it as a portable `HotkeyBinding`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct WindowsHotkey {
+    pub control: bool,
+    pub windows: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub key: Option<String>,
+}
+
+impl Default for WindowsHotkey {
+    fn default() -> Self {
+        Self {
+            control: true,
+            windows: false,
+            alt: false,
+            shift: false,
+            key: Some("space".into()),
+        }
+    }
+}
+
+/// Windows names Command the Windows key and Option Alt; keys go by name.
+impl From<&HotkeyBinding> for WindowsHotkey {
+    fn from(binding: &HotkeyBinding) -> Self {
+        Self {
+            control: binding.modifiers.control.is_some(),
+            windows: binding.modifiers.command.is_some(),
+            alt: binding.modifiers.option.is_some(),
+            shift: binding.modifiers.shift.is_some(),
+            key: binding.key.as_ref().map(HotkeyKey::name),
+        }
+    }
+}
+
+impl From<&WindowsHotkey> for HotkeyBinding {
+    fn from(hotkey: &WindowsHotkey) -> Self {
+        let side = |held: bool| held.then_some(ModifierSide::Either);
+        Self {
+            modifiers: HotkeyModifiers {
+                control: side(hotkey.control),
+                option: side(hotkey.alt),
+                shift: side(hotkey.shift),
+                command: side(hotkey.windows),
+                function: false,
+            },
+            key: hotkey.key.as_deref().map(HotkeyKey::named),
+        }
+    }
+}
+
+impl WindowsHotkey {
+    pub fn paste_last_default() -> Self {
+        Self {
+            control: true,
+            windows: false,
+            alt: true,
+            shift: false,
+            key: Some("v".into()),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let modifier_count = [self.control, self.windows, self.alt, self.shift]
+            .into_iter()
+            .filter(|enabled| *enabled)
+            .count();
+        let Some(key) = self.key.as_deref() else {
+            if modifier_count < 2 {
+                return Err(eyre!(
+                    "modifier-only Windows dictation shortcuts require at least two modifiers"
+                ));
+            }
+            return Ok(());
+        };
+        if key.trim().is_empty() {
+            return Err(eyre!("Windows dictation shortcut key cannot be empty"));
+        }
+        crate::windows_input::virtual_key(key)?;
+        let function_key = key
+            .strip_prefix('f')
+            .or_else(|| key.strip_prefix('F'))
+            .and_then(|number| number.parse::<u8>().ok())
+            .is_some_and(|number| (1..=24).contains(&number));
+        if !function_key && modifier_count == 0 {
+            return Err(eyre!(
+                "Windows dictation shortcuts require a modifier or a function key"
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn label(&self) -> String {
+        self.keycaps().join("+")
+    }
+
+    pub fn keycaps(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if self.control {
+            parts.push("Ctrl".into());
+        }
+        if self.windows {
+            parts.push("Win".into());
+        }
+        if self.alt {
+            parts.push("Alt".into());
+        }
+        if self.shift {
+            parts.push("Shift".into());
+        }
+        if let Some(key) = &self.key {
+            parts.push(match key.to_ascii_lowercase().as_str() {
+                "space" => "Space".into(),
+                "enter" | "return" => "Enter".into(),
+                key => key.to_ascii_uppercase(),
+            });
+        }
+        parts
     }
 }
 
@@ -919,6 +1043,53 @@ pub(crate) fn virtual_key(key: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_binding_is_ctrl_space() {
+        let binding = WindowsHotkey::default();
+        assert_eq!(binding.label(), "Ctrl+Space");
+        assert!(binding.validate().is_ok());
+    }
+
+    #[test]
+    fn unmodified_letters_are_rejected() {
+        let binding = WindowsHotkey {
+            control: false,
+            windows: false,
+            alt: false,
+            shift: false,
+            key: Some("d".into()),
+        };
+        assert!(binding.validate().is_err());
+    }
+
+    #[test]
+    fn one_modifier_is_not_safe_as_a_modifier_only_binding() {
+        let binding = WindowsHotkey {
+            control: true,
+            windows: false,
+            alt: false,
+            shift: false,
+            key: None,
+        };
+        assert!(binding.validate().is_err());
+    }
+
+    #[test]
+    fn hotkeys_round_trip_through_the_portable_binding() {
+        for hotkey in [
+            WindowsHotkey::default(),
+            WindowsHotkey::paste_last_default(),
+            WindowsHotkey {
+                key: Some("pageup".into()),
+                shift: true,
+                windows: true,
+                ..WindowsHotkey::default()
+            },
+        ] {
+            assert_eq!(WindowsHotkey::from(&HotkeyBinding::from(&hotkey)), hotkey);
+        }
+    }
 
     #[test]
     fn event_delay_is_subtracted_from_the_audio_timeline() {

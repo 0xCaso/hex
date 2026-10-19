@@ -144,38 +144,13 @@ mod transcription_service;
 // The Windows shell and the shared desktop layer it was built on. These
 // modules come from the `windows-shell` branch and stay Windows-only until
 // the macOS and Linux shells adopt them.
-#[cfg(target_os = "windows")]
-mod desktop_activity_pane;
-#[cfg(target_os = "windows")]
-mod desktop_history_pane;
-#[cfg(target_os = "windows")]
-mod desktop_hud_lab;
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+// The shared window's strings move onto these tables next.
+#[allow(dead_code)]
 mod desktop_i18n;
 #[cfg(target_os = "windows")]
 mod desktop_indicator_model;
 #[cfg(target_os = "windows")]
 mod desktop_indicator_shader;
-#[cfg(target_os = "windows")]
-mod desktop_mode_basics;
-#[cfg(target_os = "windows")]
-mod desktop_mode_list;
-#[cfg(target_os = "windows")]
-mod desktop_mode_processing;
-#[cfg(target_os = "windows")]
-mod desktop_mode_target;
-#[cfg(target_os = "windows")]
-mod desktop_mode_transformations;
-#[cfg(target_os = "windows")]
-mod desktop_model_catalog;
-#[cfg(target_os = "windows")]
-mod desktop_onboarding;
-#[cfg(target_os = "windows")]
-mod desktop_replacement_editor;
-#[cfg(target_os = "windows")]
-mod desktop_shell;
-#[cfg(target_os = "windows")]
-mod desktop_voice_action_pane;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod self_update;
 #[cfg(target_os = "windows")]
@@ -187,8 +162,6 @@ mod windows_audio_control;
 #[cfg(target_os = "windows")]
 mod windows_context;
 #[cfg(target_os = "windows")]
-mod windows_desktop_host;
-#[cfg(target_os = "windows")]
 mod windows_dictation;
 #[cfg(target_os = "windows")]
 mod windows_indicator;
@@ -197,9 +170,9 @@ mod windows_input;
 #[cfg(target_os = "windows")]
 mod windows_login_item;
 #[cfg(target_os = "windows")]
-mod windows_paste;
+mod windows_migration;
 #[cfg(target_os = "windows")]
-mod windows_settings;
+mod windows_paste;
 #[cfg(target_os = "windows")]
 mod windows_ui;
 #[cfg(target_os = "windows")]

@@ -7,8 +7,8 @@ use std::cell::RefCell;
 
 use super::*;
 use crate::windows_app::WindowsDesktopHost;
+use crate::windows_input::WindowsHotkey;
 use crate::windows_input::{ChordCapture, ChordPoll};
-use crate::windows_settings::WindowsHotkey;
 use crate::windows_updater::UpdateCheck;
 
 pub(super) const CAPABILITIES: Capabilities = Capabilities {
@@ -79,17 +79,12 @@ impl Platform {
 }
 
 fn host_view(host: &WindowsDesktopHost) -> HostView {
-    let snapshot = host.snapshot();
-    let (running, status) = snapshot
-        .listener
-        .map_or((false, String::new()), |listener| {
-            (listener.running, listener.status)
-        });
+    let listener = host.listener_state();
     HostView {
-        running,
-        status,
-        error: snapshot.operation_error,
-        last_failure: snapshot.last_failure,
+        running: listener.running,
+        status: listener.status,
+        error: listener.error,
+        last_failure: listener.last_failure,
         update: format!("{:?}", host.update_state()),
     }
 }
@@ -294,7 +289,13 @@ impl AppWindow {
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(16)).await;
-                let poll = capture.poll();
+                // Keys typed into another application never rebind a
+                // shortcut.
+                let poll = if crate::windows_input::app_is_foreground() {
+                    capture.poll()
+                } else {
+                    ChordPoll::Pending
+                };
                 let captured = matches!(poll, ChordPoll::Captured(_));
                 let listening = this.update(cx, |this, cx| {
                     if !this.hotkey_capture.is_listening() {
@@ -354,11 +355,7 @@ impl AppWindow {
     }
 
     pub(super) fn check_for_updates(&mut self) {
-        let _ = self
-            .platform
-            .host
-            .borrow_mut()
-            .dispatch(crate::windows_desktop_host::DesktopAction::CheckForUpdates);
+        self.platform.host.borrow_mut().check_for_updates();
     }
 
     pub(super) fn install_update(&mut self, cx: &mut Context<Self>) {
@@ -371,14 +368,9 @@ impl AppWindow {
                 if self.platform.restart_scheduled {
                     return;
                 }
-                let mut host = self.platform.host.borrow_mut();
-                if host
-                    .dispatch(crate::windows_desktop_host::DesktopAction::RestartIntoUpdate)
-                    .is_ok()
-                {
+                let restarted = self.platform.host.borrow_mut().restart_into_update();
+                if restarted.is_ok() {
                     self.platform.restart_scheduled = true;
-                    host.stop();
-                    drop(host);
                     cx.quit();
                 }
             }

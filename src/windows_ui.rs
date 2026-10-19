@@ -5,8 +5,8 @@
 use std::sync::{Arc, OnceLock};
 
 use gpui::{
-    AnyElement, Bounds, Div, ElementId, FontWeight, Image, ImageFormat, Pixels, Stateful, Window,
-    WindowControlArea, div, img, prelude::*, px, rgb,
+    AnyElement, Div, FontWeight, Image, ImageFormat, Window, WindowControlArea, div, img,
+    prelude::*, px, rgb,
 };
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -18,10 +18,8 @@ use winreg::RegKey;
 use winreg::enums::HKEY_LOCAL_MACHINE;
 
 use crate::design_tokens::{
-    CAPTION, FOOTNOTE, MENU_ITEM_HEIGHT, MENU_OFFSET, SURFACE_HOVER, SURFACE_SELECTED,
-    TEXT_PRIMARY, TEXT_SECONDARY, Typography,
+    CAPTION, SURFACE_HOVER, SURFACE_SELECTED, TEXT_PRIMARY, TEXT_SECONDARY, Typography,
 };
-use crate::desktop_ui::{menu, menu_item, truncated_line};
 
 pub(crate) const FONT_UI: &str = "Segoe UI Variable Text";
 
@@ -306,141 +304,4 @@ fn caption_button(
         .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_PRIMARY)))
         .active(|button| button.bg(rgb(SURFACE_SELECTED)))
         .child(glyph)
-}
-
-// Anchored dropdowns. Windows dropdowns open as window-level overlays so a
-// long list can flip above its trigger and scroll inside the window. Callers
-// capture the trigger's bounds with a zero-size canvas; the panel and rows
-// are the shared `menu` and `menu_item` components.
-
-const DROPDOWN_MARGIN: f32 = 8.0;
-const DROPDOWN_MAX_HEIGHT: f32 = 360.0;
-/// `menu`'s `p_1` inset plus its border, on each side.
-const DROPDOWN_PADDING: f32 = 5.0;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DropdownLayout {
-    height: Pixels,
-    top: Pixels,
-}
-
-fn dropdown_rows_height(rows: usize) -> Pixels {
-    px(DROPDOWN_PADDING * 2.0) + px(MENU_ITEM_HEIGHT) * rows
-}
-
-/// The tallest whole-row height that fits `available`, so a clamped panel
-/// never slices a row in half at its scroll edge.
-fn dropdown_fit_height(row_count: usize, available: Pixels) -> Pixels {
-    let content = dropdown_rows_height(row_count);
-    if content <= available {
-        return content;
-    }
-    let usable = f32::from(available) - DROPDOWN_PADDING * 2.0;
-    let rows = (usable / MENU_ITEM_HEIGHT).floor().max(1.0) as usize;
-    dropdown_rows_height(rows.min(row_count))
-}
-
-fn dropdown_layout(
-    anchor_top: Pixels,
-    anchor_bottom: Pixels,
-    viewport_height: Pixels,
-    row_count: usize,
-) -> DropdownLayout {
-    let row_count = row_count.max(1);
-    let max_height = px(DROPDOWN_MAX_HEIGHT);
-    let gap = px(MENU_OFFSET);
-    let margin = px(DROPDOWN_MARGIN);
-    let downward_top = anchor_bottom + gap;
-    let below = (viewport_height - margin - downward_top).max(Pixels::ZERO);
-    // Keep the panel below the caption bar so the window stays draggable.
-    let above = (anchor_top - gap - px(CAPTION_HEIGHT) - margin).max(Pixels::ZERO);
-    if below >= dropdown_fit_height(row_count, max_height) || below >= above {
-        DropdownLayout {
-            height: dropdown_fit_height(row_count, below.min(max_height)),
-            top: downward_top,
-        }
-    } else {
-        let height = dropdown_fit_height(row_count, above.min(max_height));
-        DropdownLayout {
-            height,
-            top: anchor_top - gap - height,
-        }
-    }
-}
-
-/// The full-window layer behind an open dropdown; clicking it dismisses.
-pub(crate) fn dropdown_backdrop(id: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .occlude()
-}
-
-pub(crate) fn dropdown_panel(
-    bounds: Bounds<Pixels>,
-    viewport_height: Pixels,
-    row_count: usize,
-) -> Div {
-    dropdown_panel_with_width(bounds, viewport_height, row_count, bounds.size.width)
-}
-
-/// A dropdown wider than its trigger; the extra width grows leftward so
-/// right-edge triggers keep the panel inside the window.
-pub(crate) fn dropdown_panel_with_width(
-    bounds: Bounds<Pixels>,
-    viewport_height: Pixels,
-    row_count: usize,
-    width: Pixels,
-) -> Div {
-    let width = width.max(bounds.size.width);
-    let layout = dropdown_layout(bounds.top(), bounds.bottom(), viewport_height, row_count);
-    menu()
-        .absolute()
-        .left(bounds.right() - width)
-        .top(layout.top)
-        .w(width)
-        .h(layout.height)
-}
-
-pub(crate) fn dropdown_item(
-    id: impl Into<ElementId>,
-    label: String,
-    selected: bool,
-) -> Stateful<Div> {
-    menu_item(selected)
-        .id(id)
-        .child(truncated_line(FOOTNOTE, label).flex_1())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn long_dropdown_flips_up_and_stays_inside_the_viewport() {
-        let viewport_height = px(700.0);
-        let layout = dropdown_layout(px(500.0), px(530.0), viewport_height, 20);
-
-        assert!(layout.top < px(500.0));
-        assert_eq!(
-            layout.height,
-            dropdown_fit_height(20, px(DROPDOWN_MAX_HEIGHT))
-        );
-        assert!(layout.height <= px(DROPDOWN_MAX_HEIGHT));
-        let rows = f32::from(layout.height) - DROPDOWN_PADDING * 2.0;
-        assert_eq!(rows % MENU_ITEM_HEIGHT, 0.0);
-        assert!(layout.top >= px(CAPTION_HEIGHT) + px(DROPDOWN_MARGIN));
-        assert!(layout.top + layout.height <= viewport_height - px(DROPDOWN_MARGIN));
-    }
-
-    #[test]
-    fn short_dropdown_opens_below_its_trigger_at_content_height() {
-        let layout = dropdown_layout(px(100.0), px(130.0), px(700.0), 3);
-
-        assert_eq!(layout.top, px(130.0) + px(MENU_OFFSET));
-        assert_eq!(layout.height, dropdown_rows_height(3));
-    }
 }
