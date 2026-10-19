@@ -135,7 +135,7 @@ pub(super) fn window_options(options: WindowOptions) -> WindowOptions {
 }
 
 pub(super) fn frame(frame: Div) -> Div {
-    frame.font_family(crate::windows_ui::FONT_UI)
+    crate::windows_ui::ui_font(frame)
 }
 
 /// The sidebar runs under the caption row; its half holds the brand.
@@ -143,7 +143,7 @@ pub(super) fn sidebar(sidebar: Div) -> Div {
     sidebar
         .pt_0()
         .child(crate::windows_ui::caption_brand())
-        .child(div().h(px(8.0)).flex_none())
+        .child(div().h_2().flex_none())
 }
 
 /// Empty sidebar space moves the window like the caption, with snapping.

@@ -61,7 +61,6 @@ actions!(
 /// Emitted after keyboard, clipboard, or input-method editing changes the text.
 pub struct Changed;
 pub struct Submitted;
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct Navigate(pub i32);
 pub struct Dismissed;
 
@@ -159,9 +158,7 @@ pub struct TextInput {
     mouse_selection: Option<MouseSelection>,
     preferred_x: Option<Pixels>,
     multiline: bool,
-    height: Pixels,
     picker: bool,
-    read_only: bool,
     history: EditHistory,
 }
 
@@ -282,7 +279,6 @@ impl MultilineLayout {
     }
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 impl TextInput {
     pub fn new(
         cx: &mut Context<Self>,
@@ -306,32 +302,6 @@ impl TextInput {
         initial: impl AsRef<str>,
     ) -> Self {
         Self::with_mode(cx, placeholder, initial.as_ref(), true, false)
-    }
-
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub fn multiline_with_height(
-        cx: &mut Context<Self>,
-        placeholder: impl Into<SharedString>,
-        initial: impl AsRef<str>,
-        height: Pixels,
-    ) -> Self {
-        let mut input = Self::with_mode(cx, placeholder, initial.as_ref(), true, false);
-        input.height = height;
-        input
-    }
-
-    /// Selectable, copyable text that cannot be edited, drawn without the
-    /// input box.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub fn read_only_multiline(
-        cx: &mut Context<Self>,
-        text: impl AsRef<str>,
-        height: Pixels,
-    ) -> Self {
-        let mut input = Self::with_mode(cx, "", text.as_ref(), true, false);
-        input.height = height;
-        input.read_only = true;
-        input
     }
 
     fn with_mode(
@@ -358,13 +328,7 @@ impl TextInput {
             mouse_selection: None,
             preferred_x: None,
             multiline,
-            height: px(if multiline {
-                MULTILINE_INPUT_HEIGHT
-            } else {
-                CONTROL_HEIGHT
-            }),
             picker,
-            read_only: false,
             history: EditHistory::default(),
         }
     }
@@ -877,9 +841,6 @@ impl TextInput {
         marked_selection_utf16: Option<Range<usize>>,
         cx: &mut Context<Self>,
     ) {
-        if self.read_only {
-            return;
-        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -1192,7 +1153,7 @@ impl Element for TextElement {
                 scroll_y = caret.y + layout.line_height - bounds.size.height + margin;
             }
             scroll_y = scroll_y.min((layout.size().height - bounds.size.height).max(px(0.)));
-            let cursor = (!input.read_only && selected_range.is_empty()).then(|| {
+            let cursor = selected_range.is_empty().then(|| {
                 fill(
                     Bounds::new(
                         point(bounds.left() + caret.x, bounds.top() + caret.y - scroll_y),
@@ -1437,16 +1398,17 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .h(self.height)
-            .when(!self.read_only, |input| {
-                input
-                    .px_2p5()
-                    .py(px((CONTROL_HEIGHT - 2.0 - BODY.line_height) / 2.0))
-                    .rounded(RADIUS_CONTROL)
-                    .border_1()
-                    .border_color(rgb(border))
-                    .bg(rgb(CANVAS))
-            })
+            .h(px(if self.multiline {
+                MULTILINE_INPUT_HEIGHT
+            } else {
+                CONTROL_HEIGHT
+            }))
+            .px_2p5()
+            .py(px((CONTROL_HEIGHT - 2.0 - BODY.line_height) / 2.0))
+            .rounded(RADIUS_CONTROL)
+            .border_1()
+            .border_color(rgb(border))
+            .bg(rgb(CANVAS))
             .overflow_hidden()
             .text_color(rgb(TEXT_PRIMARY))
             .text_body()

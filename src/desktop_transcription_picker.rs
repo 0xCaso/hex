@@ -5,7 +5,7 @@ use gpui::{
 use crate::design_tokens::*;
 use crate::desktop_i18n::{tr, tr_fill};
 use crate::desktop_ui::{
-    ButtonKind, Icon, Tone, error_panel, icon_button, menu_item, small_button, tag,
+    ButtonKind, Icon, Tone, error_panel, icon_button, menu_item, small_button, status_dot, tag,
 };
 use crate::transcription_models::{
     ModelChoice, ModelDefinition, TranscriptionModelId, TranscriptionSelection, language_name,
@@ -41,7 +41,6 @@ pub(crate) enum TranscriptionPickerStatus {
 
 /// Whether a downloaded model card offers deleting its files.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) enum ModelDeletion {
     Unavailable,
     Offered,
@@ -105,62 +104,63 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
     let model_cards = view.models.into_iter().enumerate().map(|(index, model)| {
         let language = view.language.clone();
         let definition = model.choice.model;
+        let active = matches!(model.status, TranscriptionPickerStatus::Active);
+        let preparing = matches!(model.status, TranscriptionPickerStatus::Preparing { .. });
         let mut deletion = ModelDeletion::Unavailable;
-        let (state, action, active, preparing, progress, installed) = match model.status {
-            TranscriptionPickerStatus::Active => (
-                tag(Tone::Accent, tr("Active")),
-                None,
-                true,
-                false,
-                None,
-                true,
-            ),
+        let mut installed_inactive = false;
+        let mut progress_bar = None;
+        let (state, action) = match model.status {
+            TranscriptionPickerStatus::Active => (Some(model_state(tr("Active"))), None),
             TranscriptionPickerStatus::Available {
                 installed,
                 deletion: offered,
             } => {
                 deletion = offered;
+                installed_inactive = installed;
                 (
-                    tag(Tone::Neutral, model.choice.recommendation.label()),
-                    Some(if installed { tr("Use") } else { tr("Download") }),
-                    false,
-                    false,
                     None,
-                    installed,
+                    Some(if installed { tr("Use") } else { tr("Download") }),
                 )
             }
             TranscriptionPickerStatus::Preparing { label, progress } => (
-                tag(Tone::Accent, label),
+                // A progress bar carries its label; the title row keeps only Cancel.
+                match progress {
+                    Some(progress) => {
+                        progress_bar = Some((progress, label));
+                        None
+                    }
+                    None => Some(model_state(label)),
+                },
                 Some(tr("Cancel")),
-                false,
-                true,
-                progress,
-                false,
             ),
         };
-        let mut metadata = if definition.coverage == language_name(&language) {
-            format!(
-                "{} · {}",
-                tr(definition.quality_context),
-                tr(definition.timestamps)
+        let metadata = definition
+            .streams
+            .then(|| tr(STREAMING_DESCRIPTION))
+            .into_iter()
+            .chain(
+                (definition.coverage != language_name(&language)).then(|| tr(definition.coverage)),
             )
-        } else {
-            format!(
-                "{} · {} · {}",
-                tr(definition.coverage),
-                tr(definition.quality_context),
-                tr(definition.timestamps)
-            )
-        };
-        if installed && !active {
-            metadata.push_str(&format!(" · {}", tr("Installed")));
-        }
+            .chain([tr(definition.quality_context), tr(definition.timestamps)])
+            .chain(installed_inactive.then(|| tr("Installed")))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        // At most two descriptive tags: why to pick it, and whether it streams.
+        // Progress and the active state stay on the trailing edge as text.
+        let tags = [
+            Some(model.choice.recommendation.label()),
+            definition.streams.then_some("Streams"),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|label| tag(Tone::Neutral, tr(label)));
         let actions = div()
+            .h(px(CONTROL_HEIGHT_SMALL))
             .flex()
             .flex_none()
             .items_center()
             .gap_2()
-            .child(state)
+            .children(state)
             .when_some(
                 match deletion {
                     ModelDeletion::Unavailable => None,
@@ -197,7 +197,10 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
             .id(("transcription-model", index))
             .w_full()
             .px_4()
-            .py_3()
+            // The title row is a small control tall; its extra 3 px above the
+            // title line makes up the top padding.
+            .pt_2()
+            .pb_3()
             .flex()
             .flex_col()
             .gap_2()
@@ -212,33 +215,38 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
             .child(
                 div()
                     .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_3()
+                    .flex_col()
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
+                            .h(px(CONTROL_HEIGHT_SMALL))
                             .flex()
-                            .flex_col()
-                            .gap_1()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .text_body()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(definition.name),
+                                    .child(
+                                        div()
+                                            .text_body()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(TEXT_PRIMARY))
+                                            .child(definition.name),
+                                    )
+                                    .children(tags),
                             )
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(rgb(TEXT_TERTIARY))
-                                    .child(metadata),
-                            ),
+                            .child(actions),
                     )
-                    .child(actions),
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .child(metadata),
+                    ),
             )
             .child(
                 div()
@@ -254,27 +262,36 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                              For language-guided transcription, try Whisper.",
                 ))
             })
-            .when_some(progress, |card, progress| {
+            .when_some(progress_bar, |card, (progress, label)| {
+                let indicator = div().h_full().rounded(RADIUS_KNOB).bg(rgb(ACCENT));
                 let indicator = match progress {
-                    TranscriptionPickerProgress::Downloading(progress) => div()
-                        .h_full()
-                        .w(relative(progress))
-                        .rounded(RADIUS_KNOB)
-                        .bg(rgb(ACCENT)),
-                    TranscriptionPickerProgress::Loading(progress) => div()
-                        .ml(relative(progress * 0.75))
-                        .h_full()
-                        .w(relative(0.25))
-                        .rounded(RADIUS_KNOB)
-                        .bg(rgb(ACCENT)),
+                    TranscriptionPickerProgress::Downloading(progress) => {
+                        indicator.w(relative(progress))
+                    }
+                    TranscriptionPickerProgress::Loading(progress) => {
+                        indicator.ml(relative(progress * 0.75)).w(relative(0.25))
+                    }
                 };
                 card.child(
                     div()
-                        .h(px(PROGRESS_HEIGHT))
-                        .w_full()
-                        .rounded(RADIUS_KNOB)
-                        .bg(rgb(CANVAS))
-                        .child(indicator),
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(PROGRESS_HEIGHT))
+                                .rounded(RADIUS_KNOB)
+                                .bg(rgb(CANVAS))
+                                .child(indicator),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_caption()
+                                .text_color(rgb(TEXT_SECONDARY))
+                                .child(label),
+                        ),
                 )
             })
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -382,6 +399,29 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                 ),
         )
         .into_any_element()
+}
+
+/// Streaming needs a GPU device; every supported Mac has Metal.
+#[cfg(target_os = "macos")]
+const STREAMING_DESCRIPTION: &str = "Transcribes while you speak";
+#[cfg(not(target_os = "macos"))]
+const STREAMING_DESCRIPTION: &str = "Transcribes while you speak on a GPU";
+
+/// A card's ongoing state on its trailing edge: an accent dot and a label.
+fn model_state(label: impl IntoElement) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_2()
+        .child(status_dot(ACCENT))
+        .child(
+            div()
+                .text_footnote()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(TEXT_SECONDARY))
+                .child(label),
+        )
 }
 
 /// One inline statistic: a tertiary label beside its value.

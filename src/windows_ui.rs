@@ -21,7 +21,12 @@ use crate::design_tokens::{
     CAPTION, SURFACE_HOVER, SURFACE_SELECTED, TEXT_PRIMARY, TEXT_SECONDARY, Typography,
 };
 
-pub(crate) const FONT_UI: &str = "Segoe UI Variable Text";
+const FONT_UI: &str = "Segoe UI Variable Text";
+
+/// Sets the Windows UI face on the window root; every type step inherits it.
+pub(crate) fn ui_font(frame: Div) -> Div {
+    frame.font_family(FONT_UI)
+}
 
 /// Segoe Fluent Icons ships with Windows 11; Windows 10 carries the same
 /// glyphs we use in Segoe MDL2 Assets.
@@ -44,6 +49,8 @@ pub(crate) fn icon_font() -> &'static str {
 
 pub(crate) const CAPTION_HEIGHT: f32 = 40.0;
 const CAPTION_BUTTON_WIDTH: f32 = 46.0;
+/// The system caption buttons draw their Segoe glyphs at 10 px.
+const CAPTION_GLYPH_SIZE: f32 = 10.0;
 
 // The system caption close button's hover and pressed reds.
 const CLOSE_HOVER: u32 = 0xc42b1c;
@@ -231,28 +238,23 @@ pub(crate) fn caption_controls(window: &Window) -> impl IntoElement {
             "caption-minimize",
             WindowControlArea::Min,
             "\u{E921}",
+            SURFACE_HOVER,
+            SURFACE_SELECTED,
         ))
         .child(caption_button(
             "caption-maximize",
             WindowControlArea::Max,
             maximize_glyph,
+            SURFACE_HOVER,
+            SURFACE_SELECTED,
         ))
-        .child(
-            div()
-                .id("caption-close")
-                .window_control_area(WindowControlArea::Close)
-                .w(px(CAPTION_BUTTON_WIDTH))
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .font_family(icon_font())
-                .text_size(px(10.0))
-                .text_color(rgb(TEXT_SECONDARY))
-                .hover(|button| button.bg(rgb(CLOSE_HOVER)).text_color(rgb(TEXT_PRIMARY)))
-                .active(|button| button.bg(rgb(CLOSE_PRESSED)).text_color(rgb(TEXT_PRIMARY)))
-                .child("\u{E8BB}"),
-        )
+        .child(caption_button(
+            "caption-close",
+            WindowControlArea::Close,
+            "\u{E8BB}",
+            CLOSE_HOVER,
+            CLOSE_PRESSED,
+        ))
 }
 
 /// The caption row blocks the window's own mouse handling beneath it (such as
@@ -289,6 +291,8 @@ fn caption_button(
     id: &'static str,
     area: WindowControlArea,
     glyph: &'static str,
+    hover: u32,
+    active: u32,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -299,9 +303,9 @@ fn caption_button(
         .items_center()
         .justify_center()
         .font_family(icon_font())
-        .text_size(px(10.0))
+        .text_size(px(CAPTION_GLYPH_SIZE))
         .text_color(rgb(TEXT_SECONDARY))
-        .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_PRIMARY)))
-        .active(|button| button.bg(rgb(SURFACE_SELECTED)))
+        .hover(move |button| button.bg(rgb(hover)).text_color(rgb(TEXT_PRIMARY)))
+        .active(move |button| button.bg(rgb(active)).text_color(rgb(TEXT_PRIMARY)))
         .child(glyph)
 }

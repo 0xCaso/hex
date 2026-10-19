@@ -106,6 +106,26 @@ Choose a supported language              // setup.language-conditioning; macOS +
 └── Whisper -> Use selected language to guide decoding; accuracy is not guaranteed
 ```
 
+```ts
+Settings picker or setup > model card     // setup.model-card; shared by every desktop root
+├── Title row -> Name, recommendation tag, "Streams" tag    // at most two tags
+│   ├── Recommendation -> Per language from the catalog (English: Unified English first)
+│   └── Streams -> Catalog `streams` (pinned artifact advertises streaming)
+├── Detail line -> "Transcribes while you speak" (non-macOS: "… on a GPU"),
+│                  coverage when it differs, benchmark, timestamps, Installed
+├── Trailing edge -> Active as dot + label; Cancel while preparing; else Use/Download
+├── Preparing -> Progress bar with its "Downloading 37%" / "Loading model" label
+└── Speed · Size · WER
+```
+
+Only Parakeet Unified English is marked `streams`
+(`only_the_buffered_parakeet_artifact_is_marked_streaming`). The mark describes
+the artifact; dictation still streams only after the load probe succeeds on a GPU
+device ([Streaming Finish](dictation.md#streaming-finish)). The menu bar lists
+names only and shows no tags. Preview:
+`voice-control preview transcription-picker --language en --model-state installed`
+(also `missing`, `downloading`).
+
 Parakeet v3 remains available for Portuguese and its other existing language
 choices. Its card explains the limitation and suggests Whisper for
 language-guided transcription. This does not change saved selections or expand

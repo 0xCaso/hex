@@ -141,6 +141,10 @@ pub struct ModelDefinition {
     pub quality_context: &'static str,
     pub coverage: &'static str,
     pub timestamps: &'static str,
+    /// The pinned artifact advertises streaming, so dictation can transcribe
+    /// while the shortcut is held. It still streams only on a GPU device and
+    /// after its load probe succeeds; otherwise it transcribes the whole clip.
+    pub streams: bool,
     pub runtime: ModelRuntime,
     pub languages: &'static [&'static str],
     pub accepts_language_hint: bool,
@@ -311,6 +315,7 @@ pub const MODELS: &[ModelDefinition] = &[
         quality_context: "English benchmark",
         coverage: "English",
         timestamps: "Token timestamps",
+        streams: true,
         runtime: ModelRuntime::Gguf(&PARAKEET_UNIFIED_ENGLISH_ARTIFACT),
         languages: &["en"],
         accepts_language_hint: true,
@@ -325,6 +330,7 @@ pub const MODELS: &[ModelDefinition] = &[
         quality_context: "English benchmark",
         coverage: "English",
         timestamps: "Token timestamps",
+        streams: false,
         runtime: ModelRuntime::Gguf(&PARAKEET_V2_ARTIFACT),
         languages: &["en"],
         accepts_language_hint: true,
@@ -339,6 +345,7 @@ pub const MODELS: &[ModelDefinition] = &[
         quality_context: "English benchmark",
         coverage: "25 languages",
         timestamps: "Token timestamps",
+        streams: false,
         runtime: ModelRuntime::Gguf(&PARAKEET_V3_ARTIFACT),
         languages: PARAKEET_V3_LANGUAGES,
         // The pinned v3 artifact detects language from audio and has no prompt input.
@@ -354,6 +361,7 @@ pub const MODELS: &[ModelDefinition] = &[
         quality_context: "English benchmark",
         coverage: "100 languages",
         timestamps: "Segment timestamps",
+        streams: false,
         runtime: ModelRuntime::Gguf(&WHISPER_ARTIFACT),
         languages: &["*"],
         accepts_language_hint: true,
@@ -368,6 +376,7 @@ pub const MODELS: &[ModelDefinition] = &[
         quality_context: "Mandarin benchmark",
         coverage: "30 languages",
         timestamps: "No timestamps",
+        streams: false,
         runtime: ModelRuntime::Gguf(&QWEN_ARTIFACT),
         languages: QWEN_LANGUAGES,
         accepts_language_hint: true,
@@ -382,6 +391,7 @@ pub const MODELS: &[ModelDefinition] = &[
         quality_context: "Mandarin benchmark",
         coverage: "5 languages",
         timestamps: "No timestamps",
+        streams: false,
         runtime: ModelRuntime::Gguf(&SENSEVOICE_ARTIFACT),
         languages: &["zh", "yue", "en", "ja", "ko"],
         accepts_language_hint: true,
@@ -396,6 +406,7 @@ pub const MODELS: &[ModelDefinition] = &[
         quality_context: "English benchmark",
         coverage: "14 languages",
         timestamps: "No timestamps",
+        streams: false,
         runtime: ModelRuntime::Gguf(&COHERE_ARTIFACT),
         languages: COHERE_LANGUAGES,
         accepts_language_hint: true,
@@ -410,6 +421,7 @@ pub const MODELS: &[ModelDefinition] = &[
         quality_context: "Apple managed",
         coverage: "System locales",
         timestamps: "Segment timestamps",
+        streams: false,
         runtime: ModelRuntime::AppleSpeech,
         languages: &["*"],
         accepts_language_hint: true,
@@ -1107,6 +1119,23 @@ mod tests {
         let mandarin = choices_for_runtime("zh");
         assert_eq!(mandarin[0].model.id, TranscriptionModelId::Qwen3Asr06B);
         assert_eq!(mandarin[1].model.id, TranscriptionModelId::SenseVoiceSmall);
+    }
+
+    #[test]
+    fn only_the_buffered_parakeet_artifact_is_marked_streaming() {
+        // transcribe.cpp advertises streaming for Parakeet's chunked-attention
+        // variants; Whisper, Qwen3-ASR, SenseVoice, Cohere, and the offline
+        // TDT checkpoints transcribe whole clips.
+        let streaming = MODELS
+            .iter()
+            .filter(|model| model.streams)
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+        assert_eq!(streaming, [TranscriptionModelId::ParakeetUnifiedEnglish]);
+        let ModelRuntime::Gguf(artifact) = definition(streaming[0]).runtime else {
+            panic!("a streaming model has a GGUF artifact");
+        };
+        assert_eq!(artifact.variant, "unified-en-0.6b");
     }
 
     #[test]

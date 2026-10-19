@@ -170,7 +170,7 @@ impl OfflineGgufSession {
             .stream(options, stream_options)
             .map(|mut stream| drive(&mut stream));
         drop(session);
-        self.session = Some(self.model.session_with(&self.options)?);
+        self.session = self.model.session_with(&self.options).ok();
         result
     }
 

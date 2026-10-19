@@ -177,8 +177,6 @@ pub(crate) const ICON_SIZE: f32 = 14.0;
 pub(crate) const ICON_SIZE_SMALL: f32 = 11.0;
 pub(crate) const TOGGLE_WIDTH: f32 = 28.0;
 pub(crate) const TOGGLE_HEIGHT: f32 = 16.0;
-pub(crate) const SLIDER_TRACK_HEIGHT: f32 = 4.0;
-pub(crate) const SLIDER_KNOB_SIZE: f32 = 14.0;
 /// Opacity of a control that cannot currently be used.
 pub(crate) const DISABLED_OPACITY: f32 = 0.4;
 
@@ -277,6 +275,10 @@ mod tests {
             ("app_window.rs", include_str!("app_window.rs")),
             ("app_window/macos.rs", include_str!("app_window/macos.rs")),
             ("app_window/linux.rs", include_str!("app_window/linux.rs")),
+            (
+                "app_window/windows.rs",
+                include_str!("app_window/windows.rs"),
+            ),
             ("desktop_ui.rs", include_str!("desktop_ui.rs")),
             (
                 "desktop_transcription_picker.rs",
