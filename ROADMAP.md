@@ -77,11 +77,10 @@ foreground paste, click-through HUD, and independent service/client shutdown. Se
 [`docs/plans/linux.md`](docs/plans/linux.md). Add commands, context, meetings, or
 broader Wayland support only as explicit later capability slices.
 
-Converge the separate macOS and Linux GPUI roots on one capability-driven
-product shell without merging their lifecycle or platform behavior. Follow
-[`docs/plans/shared-desktop-ui.md`](docs/plans/shared-desktop-ui.md); preserve
-both settings formats and delete the duplicate Linux render tree only after the
-shared Settings and Activity slices work on both hosts.
+macOS, Windows, and Linux now share one window and one `settings.json` (see
+[`docs/plans/shared-desktop-ui.md`](docs/plans/shared-desktop-ui.md)). Remaining
+desktop parity: website mode rules and the focused application on Wayland and
+for Linux browsers, and voice commands outside macOS.
 
 ## Harden The Real-Time Boundary
 

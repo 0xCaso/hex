@@ -124,11 +124,14 @@ substitute for source inspection or a second roadmap.
   and modes, plus native macOS capture. Browser host is the domain concept;
   Brave AppleScript is the first macOS adapter and `windows_context` reads any
   browser through UI Automation.
-- `application_catalog`: cached installed-application discovery with normalized
-  bundle identity and rendered icons for the UI.
-- `app_settings`: persisted settings and live runtime projection for commands,
-  hotkeys, microphone and transcription selection, recording behavior,
-  processing, sound volume, and Dock policy.
+- `application_catalog`: cached installed-application discovery with icons for
+  the Modes picker, one module per OS: macOS bundles, Windows executables from
+  Start menu shortcuts, App Paths, and open windows, Linux `.desktop` entries.
+- `app_settings`: the one persisted `settings.json` on every OS and its live
+  runtime projection for commands, hotkeys, microphone and transcription
+  selection, recording behavior, processing, sound volume, indicator position,
+  interface language, and Dock policy. It records one-time changes in
+  `migrations` and migrates the Windows and Linux beta files once.
 - `login_item`: the native `SMAppService.mainAppService` adapter. macOS owns
   registration state; it is deliberately not duplicated in `settings.json`.
 - `app_paths`: the Application Support owner for runtime logs and shared state.
@@ -136,8 +139,13 @@ substitute for source inspection or a second roadmap.
   installation, the release startup gate, and opt-in command-model setup.
 - `sparkle`: packaged-app-only Sparkle lifecycle and manual update checks.
 - `linux`, `linux_app`, `linux_dictation`, `linux_input`, `linux_paste`,
-  `linux_settings`: the Linux beta CLI, GPUI shell, hotkey
-  capture-transcribe-paste loop, and persisted settings.
+  `linux_migration`: the Linux beta CLI, the service host and Settings process,
+  the hotkey capture-transcribe-paste loop with Paste Last and Voice Action, the
+  X11 grabs and shortcut options, paste and primary-selection reads, and the
+  one-time `linux-settings.json` migration.
+- `linux_context`: the frontmost X11 application for modes; Wayland has none.
+- `linux_audio_control`: While-dictating mute through `wpctl`/`pactl` and
+  MPRIS pause over D-Bus, restoring only what it changed.
 - `linux_session`: display-backend selection matching GPUI's nonempty
   `WAYLAND_DISPLAY` rule, independent of persisted preferences.
 - `linux_wayland_input`: read-only evdev input, explicit physical key mappings,
@@ -145,32 +153,31 @@ substitute for source inspection or a second roadmap.
 - `linux_service`: owner-only, same-user Unix IPC, bounded service/client transport,
   and per-user systemd lifecycle. Settings and CLI are clients of one runtime.
 - `linux_desktop`: the service-owned GTK thread for the focus-free, click-through
-  Wayland recording/processing HUD. Settings never owns its lifecycle; Linux has
-  no tray icon.
+  recording/processing HUD: layer-shell on Wayland, an override-redirect popup on
+  X11, at the top or bottom. Settings never owns its lifecycle; Linux has no tray
+  icon.
 - `self_update`: the signed-feed core the Linux and Windows updaters share:
   ed25519 feed verification, per-target manifest validation, bounded HTTPS
   downloads, and size and checksum verification.
 - `linux_updater`: signed direct-install updates, atomic version activation,
   and restart handoff for user-local Linux installs.
 - `windows`, `windows_app`, `windows_dictation`, `windows_input`,
-  `windows_paste`, `windows_settings`, `windows_indicator`, `windows_updater`,
-  `windows_context`, `windows_audio_control`, `windows_login_item`: the
-  Windows beta CLI, GPUI shell and tray, WASAPI dictation loop, low-level
-  keyboard hook, clipboard paste, settings, HUD, signed self-update, UI
-  Automation context, audio ducking, and login item. Windows uses the shared
-  `design_tokens`, `desktop_ui`, `text_input`, `desktop_activity`,
-  `dictation_processor`, `personal_commands`, and `commands` modules.
+  `windows_paste`, `windows_migration`, `windows_indicator`, `windows_updater`,
+  `windows_context`, `windows_audio_control`, `login_item`: the Windows beta
+  CLI, the tray, HUD, and listener host around the shared window, the WASAPI
+  dictation loop, low-level keyboard hook, clipboard paste, the one-time
+  `windows-settings.json` migration, HUD, signed self-update, UI Automation
+  context, audio ducking, and login item.
 - `windows_ui`: Windows window chrome on the shared design system: the split
   caption row (brand over the full-height sidebar, window buttons over the
-  content), Segoe Fluent Icons glyphs, anchored dropdowns, and window, tray,
-  and HUD-popup integration.
-- `windows_desktop_host`: the Windows Settings window's snapshot-and-action
-  contract and its pane capabilities.
-- `desktop_shell`, `desktop_i18n`, and the `desktop_*` panes (Activity,
-  History, HUD Lab, mode list/basics/processing/transformations, replacement
-  editor, model catalog, onboarding, Voice Action): the Windows panes from the
-  `windows-shell` port, built from `desktop_ui` components. Converge them with
-  the macOS panes under the shared-desktop-UI plan rather than adding a copy.
+  content), Segoe Fluent Icons glyphs, and window, tray, and HUD-popup
+  integration.
+- `dictation_modes`: the mode runtime the Windows and Linux listeners share:
+  mode selection by application and website, then global replacements, mode
+  corrections, OpenCode rewriting, and transformations, and the History entry.
+- `desktop_i18n`: interface translations keyed by the English source string,
+  `tr`, `tr_fill`, and `tr_named`. A test fails if any string the shared window
+  translates lacks a language.
 - `history`: the owner-only bounded retained-dictation store: retention
   windows with hard entry and byte caps, atomic crash-safe persistence, and
   search. Text and bounded metadata only, never audio.
@@ -180,8 +187,6 @@ substitute for source inspection or a second roadmap.
 - `desktop_activity`: the shared listener, device, session, and latest-failure
   projection over `EventReader`. Transcript rows read retained events directly.
 - `desktop_host`: the Linux Settings/service snapshot-and-action contract.
-  macOS chooses its navigation directly from the developer-feature flag and
-  uses the shared presentation primitives while committing its own settings.
 - `design_tokens`: the desktop design tokens (surface, text and role colours,
   the five-step type scale, spacing, radii, and control geometry) plus the
   `Typography` trait and the test that rejects raw styles in desktop sources.
@@ -193,9 +198,13 @@ substitute for source inspection or a second roadmap.
 - `desktop_transcription_picker`: the single GPUI language/model picker used by
   both desktop roots over portable model presentation and platform preparation
   callbacks.
-- `app_window`: the production Settings, Modes with mode-owned corrections and
-  processing, Voice Action, History, and opt-in Commands shell plus
-  developer-only Meetings, Activity, and HUD Lab panes.
+- `app_window`: the one window on macOS, Windows, and Linux: Settings, Modes
+  with mode-owned corrections and processing, Voice Action, History, opt-in
+  Commands, and developer-only Meetings, Activity, and HUD Lab panes. A
+  `Capabilities` struct decides which panes and rows exist; `app_window/macos.rs`,
+  `windows.rs`, and `linux.rs` supply each OS's chrome, settings hooks, and
+  backends. Keep shared UI in `app_window.rs` and only OS behavior in those
+  modules.
 - `status_item`: the persistent macOS menu-bar owner for Settings, Paste Last
   Dictation, meeting recording state and Stop & Transcribe, update checks, and
   orderly application shutdown.
