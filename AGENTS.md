@@ -679,8 +679,9 @@ runners with each script's `build` mode, then a job that compiles nothing signs
 all three feeds with `scripts/release-feed.sh`. Publishing uploads
 content-addressed artifacts first (never replacing different bytes), then the
 installers, then the feeds, and re-downloads each object. The `release`
-environment holds `HEX_RELEASE_SIGNING_KEY`, `CLOUDFLARE_API_TOKEN`, and
-`CLOUDFLARE_ACCOUNT_ID`.
+environment holds `HEX_RELEASE_SIGNING_KEY` and an R2 API token limited to
+object read and write on `hex-releases` (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`), used through R2's S3 API.
 
 Both scripts still work locally: `prepare` builds and signs with the Ed25519
 private PEM in `HEX_RELEASE_SIGNING_KEY` (or `HEX_LINUX_SIGNING_KEY`), and

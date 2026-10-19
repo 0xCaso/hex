@@ -268,14 +268,12 @@ jobs:
         with:
           name: signed-release
           path: dist
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-      - run: npm install --global wrangler@4.151.2
       - name: Publish artifacts, installers, then feeds
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # An R2 API token limited to object read and write on hex-releases.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           HEX_RELEASE_SOURCE: ${{ github.workspace }}/source
         run: tools/scripts/release-feed.sh publish dist $FEEDS
       - name: Re-download and verify every published object
