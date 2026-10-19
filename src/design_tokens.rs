@@ -201,6 +201,27 @@ pub(crate) const PROGRESS_HEIGHT: f32 = 3.0;
 pub(crate) const PANEL_HEADER_HEIGHT: f32 = 38.0;
 pub(crate) const SETTINGS_ROW_MIN_HEIGHT: f32 = 56.0;
 
+// Onboarding geometry.
+/// The tour's one column: page art, copy, cards, and footer share its edges.
+pub(crate) const ONBOARDING_WIDTH: f32 = 520.0;
+/// The illustration band above a centred page's title.
+pub(crate) const ONBOARDING_ART_HEIGHT: f32 = 148.0;
+/// The shortcut drawn as a large keycap in onboarding art.
+pub(crate) const HERO_KEYCAP_SIZE: f32 = 56.0;
+/// How far a hero keycap stands above its base before it is pressed.
+pub(crate) const HERO_KEYCAP_DEPTH: f32 = 3.0;
+/// The measure of a page's centred body copy.
+pub(crate) const ONBOARDING_BODY_WIDTH: f32 = 440.0;
+/// The illustration column of a "How Hex works" row.
+pub(crate) const ONBOARDING_ART_COLUMN: f32 = 112.0;
+/// A setup row's download progress, track and percentage together.
+pub(crate) const ONBOARDING_PROGRESS_WIDTH: f32 = 140.0;
+/// The round badge holding a setup row's icon.
+pub(crate) const ONBOARDING_BADGE_SIZE: f32 = 28.0;
+/// The tour's step dots; the current one stretches to the wide width.
+pub(crate) const STEP_DOT_SIZE: f32 = 6.0;
+pub(crate) const STEP_DOT_ACTIVE_WIDTH: f32 = 16.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +296,7 @@ mod tests {
             ("app_window.rs", include_str!("app_window.rs")),
             ("app_window/macos.rs", include_str!("app_window/macos.rs")),
             ("app_window/linux.rs", include_str!("app_window/linux.rs")),
+            ("app_window/tour.rs", include_str!("app_window/tour.rs")),
             (
                 "app_window/windows.rs",
                 include_str!("app_window/windows.rs"),

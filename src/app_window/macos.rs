@@ -43,6 +43,7 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     interface_language: true,
     software_updates: true,
     terminal_paste: false,
+    practice_dictation: true,
 };
 
 /// macOS records shortcuts from window key events, resolving keys through
@@ -1189,74 +1190,26 @@ pub(super) fn hotkey_key(key: &str) -> std::result::Result<HotkeyKey, &'static s
 }
 
 impl AppWindow {
-    /// The setup dialog's rows for privacy permissions macOS has not granted.
-    pub(super) fn platform_setup_permissions(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Vec<(&'static str, &'static str, AnyElement)> {
-        let status = self.setup_status;
-        let mut permission_items: Vec<(&'static str, &'static str, AnyElement)> = Vec::new();
-        if status.microphone != PermissionState::Ready {
-            let microphone = if status.microphone == PermissionState::NeedsRequest {
-                button(ButtonKind::Secondary, tr("Allow"))
-                    .id("setup-microphone")
-                    .on_click(cx.listener(|_this, _, _, cx| {
-                        crate::onboarding::request_microphone();
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            } else {
-                button(ButtonKind::Secondary, tr("Open settings"))
-                    .id("setup-microphone")
-                    .on_click(cx.listener(|_this, _, _, cx| {
-                        crate::onboarding::open_permission_settings("microphone");
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            };
-            permission_items.push((
-                tr("Microphone"),
-                if self.settings.commands_enabled {
-                    tr("Hear commands and dictation.")
-                } else {
-                    tr("Record dictation while you hold the shortcut")
-                },
-                microphone,
-            ));
+    pub(super) fn platform_tour_permission(&mut self, effect: crate::onboarding::Effect) {
+        use crate::onboarding::Effect;
+        match effect {
+            Effect::RequestMicrophone => crate::onboarding::request_microphone(),
+            Effect::OpenMicrophoneSettings => {
+                crate::onboarding::open_permission_settings("microphone");
+            }
+            Effect::ShowGuide(PermissionKind::InputMonitoring) => {
+                crate::permission_guide::show_input_monitoring();
+            }
+            Effect::ShowGuide(PermissionKind::Accessibility) => {
+                crate::permission_guide::show_accessibility();
+            }
+            _ => {}
         }
-        if status.input_monitoring != PermissionState::Ready {
-            let input_monitoring = button(ButtonKind::Secondary, tr("Grant access"))
-                .id("setup-input-monitoring")
-                .on_click(cx.listener(|_this, _, _, cx| {
-                    crate::permission_guide::show_input_monitoring();
-                    cx.notify();
-                }))
-                .into_any_element();
-            permission_items.push((
-                tr("Input Monitoring"),
-                tr("Recognize the dictation shortcut anywhere"),
-                input_monitoring,
-            ));
-        }
-        if status.accessibility != PermissionState::Ready {
-            let accessibility = button(ButtonKind::Secondary, tr("Grant access"))
-                .id("setup-accessibility")
-                .on_click(cx.listener(|_this, _, _, cx| {
-                    crate::permission_guide::show_accessibility();
-                    cx.notify();
-                }))
-                .into_any_element();
-            permission_items.push((
-                tr("Accessibility"),
-                if self.settings.commands_enabled {
-                    tr("Paste text and run keyboard commands.")
-                } else {
-                    tr("Paste completed dictation into the foreground app")
-                },
-                accessibility,
-            ));
-        }
-        permission_items
+    }
+
+    /// Reopens the installed app after this process quits.
+    pub(super) fn platform_relaunch(&mut self) -> bool {
+        crate::onboarding::spawn_relaunch()
     }
 
     /// The voice command model's notice when commands are on but the model

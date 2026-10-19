@@ -102,6 +102,11 @@ pub(crate) enum Icon {
     Ellipsis,
     Globe,
     Plus,
+    Microphone,
+    Keyboard,
+    Accessibility,
+    Waveform,
+    Check,
 }
 
 impl Icon {
@@ -109,7 +114,11 @@ impl Icon {
     /// same box, so it is drawn one size up to match them optically.
     fn optical_size(self) -> f32 {
         match self {
-            Self::Ellipsis => ICON_SIZE,
+            Self::Ellipsis
+            | Self::Microphone
+            | Self::Keyboard
+            | Self::Accessibility
+            | Self::Waveform => ICON_SIZE,
             _ => ICON_SIZE_SMALL,
         }
     }
@@ -124,6 +133,11 @@ impl Icon {
             Self::Ellipsis => "ellipsis",
             Self::Globe => "globe",
             Self::Plus => "plus",
+            Self::Microphone => "mic",
+            Self::Keyboard => "keyboard",
+            Self::Accessibility => "accessibility",
+            Self::Waveform => "waveform",
+            Self::Check => "checkmark",
         }
     }
 
@@ -137,6 +151,11 @@ impl Icon {
             Self::Ellipsis => "…",
             Self::Globe => "◎",
             Self::Plus => "+",
+            Self::Microphone => "●",
+            Self::Keyboard => "⌨",
+            Self::Accessibility => "◉",
+            Self::Waveform => "≋",
+            Self::Check => "✓",
         }
     }
 
@@ -150,6 +169,11 @@ impl Icon {
             Self::Ellipsis => "\u{E712}",
             Self::Globe => "\u{E774}",
             Self::Plus => "\u{E710}",
+            Self::Microphone => "\u{E720}",
+            Self::Keyboard => "\u{E765}",
+            Self::Accessibility => "\u{E776}",
+            Self::Waveform => "\u{E8D6}",
+            Self::Check => "\u{E73E}",
         }
     }
 }
@@ -750,6 +774,69 @@ pub(crate) fn hotkey_keycaps(parts: Vec<String>, opacity: f32) -> AnyElement {
                 .child(label)
         }))
         .into_any_element()
+}
+
+/// The shortcut drawn large in onboarding art. `pressed` (0…1) sinks each
+/// cap onto its base and lights its edge with the accent.
+pub(crate) fn hero_keycaps(parts: Vec<String>, pressed: f32) -> Div {
+    let pressed = pressed.clamp(0.0, 1.0);
+    div()
+        .flex()
+        .items_end()
+        .gap_2()
+        .h(px(HERO_KEYCAP_SIZE + HERO_KEYCAP_DEPTH))
+        .children(parts.into_iter().map(move |part| {
+            let (_, label) = split_sided_keycap(&part);
+            div()
+                .min_w(px(HERO_KEYCAP_SIZE))
+                .h(px(HERO_KEYCAP_SIZE + HERO_KEYCAP_DEPTH * (1.0 - pressed)))
+                .px_4()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(RADIUS_PANEL)
+                .border_1()
+                .border_b(px(1.0 + HERO_KEYCAP_DEPTH * (1.0 - pressed)))
+                .border_color(mix_color(rgb(LINE_STRONG), rgb(ACCENT), pressed))
+                .bg(mix_color(rgb(SURFACE_HOVER), rgb(ACCENT_SURFACE), pressed))
+                .text_title()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(TEXT_PRIMARY))
+                .child(label)
+        }))
+}
+
+/// A determinate or indeterminate progress track around its `indicator`.
+pub(crate) fn progress_track(indicator: Div) -> Div {
+    div()
+        .flex_1()
+        .h(px(PROGRESS_HEIGHT))
+        .rounded(RADIUS_KNOB)
+        .bg(rgb(CANVAS))
+        .child(indicator.h_full().rounded(RADIUS_KNOB).bg(rgb(ACCENT)))
+}
+
+/// Where a multi-step flow is: one dot per step, the current one stretched.
+pub(crate) fn step_dots(index: usize, count: usize) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .children((0..count).map(|step| {
+            div()
+                .h(px(STEP_DOT_SIZE))
+                .w(px(if step == index {
+                    STEP_DOT_ACTIVE_WIDTH
+                } else {
+                    STEP_DOT_SIZE
+                }))
+                .rounded_full()
+                .bg(rgb(if step == index {
+                    TEXT_PRIMARY
+                } else {
+                    LINE_STRONG
+                }))
+        }))
 }
 
 fn split_sided_keycap(part: &str) -> (Option<&'static str>, String) {

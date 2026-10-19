@@ -5,7 +5,8 @@ use gpui::{
 use crate::design_tokens::*;
 use crate::desktop_i18n::{tr, tr_fill};
 use crate::desktop_ui::{
-    ButtonKind, Icon, Tone, error_panel, icon_button, menu_item, small_button, status_dot, tag,
+    ButtonKind, Icon, Tone, error_panel, icon_button, menu_item, progress_track, small_button,
+    status_dot, tag,
 };
 use crate::transcription_models::{
     ModelChoice, ModelDefinition, TranscriptionModelId, TranscriptionSelection, language_name,
@@ -263,7 +264,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                 ))
             })
             .when_some(progress_bar, |card, (progress, label)| {
-                let indicator = div().h_full().rounded(RADIUS_KNOB).bg(rgb(ACCENT));
+                let indicator = div();
                 let indicator = match progress {
                     TranscriptionPickerProgress::Downloading(progress) => {
                         indicator.w(relative(progress))
@@ -277,14 +278,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(
-                            div()
-                                .flex_1()
-                                .h(px(PROGRESS_HEIGHT))
-                                .rounded(RADIUS_KNOB)
-                                .bg(rgb(CANVAS))
-                                .child(indicator),
-                        )
+                        .child(progress_track(indicator))
                         .child(
                             div()
                                 .flex_none()

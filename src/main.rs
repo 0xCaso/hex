@@ -232,6 +232,9 @@ enum Command {
         /// Deterministic model installation state shown by the picker.
         #[arg(long, value_enum, default_value = "actual")]
         model_state: AppPreviewModelState,
+        /// For `onboarding`: the tour step and state to show.
+        #[arg(long, value_enum, default_value = "welcome")]
+        step: OnboardingPreviewStep,
         /// Ask to delete the first deletable model in the transcription picker.
         #[arg(long)]
         confirm_model_deletion: bool,
@@ -436,6 +439,23 @@ enum MeetingPanelPreview {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, ValueEnum)]
+enum OnboardingPreviewStep {
+    Welcome,
+    HowItWorks,
+    Setup,
+    SetupProgress,
+    SetupReady,
+    TryIt,
+    TryItListening,
+    TryItShort,
+    TryItSilent,
+    TryItLanded,
+    TryItReopen,
+    Done,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, ValueEnum)]
 enum AppPreviewModelState {
     Actual,
     Installed,
@@ -560,6 +580,7 @@ fn main() -> Result<()> {
             open_meeting_actions,
             meetings_empty,
             meeting_panel,
+            step,
         } => {
             if matches!(target, AppPreviewTarget::MeetingOffer) {
                 return meeting_watcher::run(
@@ -611,7 +632,40 @@ fn main() -> Result<()> {
                     pane,
                     transcription_picker: matches!(target, AppPreviewTarget::TranscriptionPicker)
                         .then_some((language, model_state)),
-                    onboarding: matches!(target, AppPreviewTarget::Onboarding),
+                    onboarding: matches!(target, AppPreviewTarget::Onboarding).then_some(
+                        match step {
+                            OnboardingPreviewStep::Welcome => {
+                                app_window::OnboardingPreview::Welcome
+                            }
+                            OnboardingPreviewStep::HowItWorks => {
+                                app_window::OnboardingPreview::HowItWorks
+                            }
+                            OnboardingPreviewStep::Setup => app_window::OnboardingPreview::Setup,
+                            OnboardingPreviewStep::SetupProgress => {
+                                app_window::OnboardingPreview::SetupProgress
+                            }
+                            OnboardingPreviewStep::SetupReady => {
+                                app_window::OnboardingPreview::SetupReady
+                            }
+                            OnboardingPreviewStep::TryIt => app_window::OnboardingPreview::TryIt,
+                            OnboardingPreviewStep::TryItListening => {
+                                app_window::OnboardingPreview::TryItListening
+                            }
+                            OnboardingPreviewStep::TryItShort => {
+                                app_window::OnboardingPreview::TryItShort
+                            }
+                            OnboardingPreviewStep::TryItSilent => {
+                                app_window::OnboardingPreview::TryItSilent
+                            }
+                            OnboardingPreviewStep::TryItLanded => {
+                                app_window::OnboardingPreview::TryItLanded
+                            }
+                            OnboardingPreviewStep::TryItReopen => {
+                                app_window::OnboardingPreview::TryItReopen
+                            }
+                            OnboardingPreviewStep::Done => app_window::OnboardingPreview::Done,
+                        },
+                    ),
                     confirm_model_deletion,
                     collapse_mode_processing,
                     open_transformation_picker,
