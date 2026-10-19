@@ -83,7 +83,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ../resources
       ../assets
       ../packaging
-      ../vendor
+      ../sdk/commands/package.json
+      ../sdk/commands/src
+      ../sdk/commands/workspace-template
     ];
   };
 

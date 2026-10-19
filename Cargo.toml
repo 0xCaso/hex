@@ -122,8 +122,8 @@ transcribe-cpp = { version = "=0.2.4", features = ["vulkan"] }
 # GPUI 0.2.2 (and Zed main) unwraps the Wayland XKB state on modifier and key
 # events, which a compositor can send before any XkbV1 keymap: a seat whose
 # only keyboard is a keymap-less virtual one, as right after a wtype paste on
-# wlroots compositors. vendor/gpui is 0.2.2 without its examples, with the
-# three unwraps in src/platform/linux/wayland/client.rs turned into early
-# returns (marked HEX PATCH). Drop this once GPUI handles a missing keymap.
+# wlroots compositors. Hona/gpui is 0.2.2 plus one commit that turns the three
+# unwraps in src/platform/linux/wayland/client.rs into early returns. Drop this
+# once GPUI handles a missing keymap.
 [patch.crates-io]
-gpui = { path = "vendor/gpui" }
+gpui = { git = "https://github.com/Hona/gpui", rev = "a0c6474ddf4859ebdd69ae2cc636ae25c227a9ac" }
