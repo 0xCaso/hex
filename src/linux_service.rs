@@ -53,6 +53,7 @@ pub enum ShortcutTarget {
     #[default]
     Dictation,
     PasteLast,
+    VoiceAction,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

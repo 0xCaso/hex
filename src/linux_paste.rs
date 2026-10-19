@@ -56,6 +56,36 @@ impl LinuxPaster {
         })
     }
 
+    /// The focused application's selected text: the primary selection,
+    /// which X11 and Wayland compositors update as the user selects.
+    pub fn selected_text(&mut self) -> Option<String> {
+        let bytes = match &mut self.backend {
+            Backend::X11(paster) => {
+                let atoms = &paster.clipboard.getter.atoms;
+                paster
+                    .clipboard
+                    .load(
+                        atoms.primary,
+                        atoms.utf8_string,
+                        atoms.property,
+                        Duration::from_millis(500),
+                    )
+                    .ok()?
+            }
+            Backend::Wayland(_) => {
+                let output = Command::new("wl-paste")
+                    .args(["--primary", "--no-newline", "--type", "text/plain"])
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .output()
+                    .ok()?;
+                output.status.success().then_some(output.stdout)?
+            }
+        };
+        let text = String::from_utf8(bytes).ok()?;
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     pub fn paste(&mut self, text: &str) -> Result<()> {
         if text.trim().is_empty() {
             return Err(eyre!("refusing to paste an empty transcript"));

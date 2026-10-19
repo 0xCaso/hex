@@ -12,7 +12,7 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     commands: false,
     hud_lab: false,
     modes: true,
-    voice_action: false,
+    voice_action: true,
     history: true,
     permissions: false,
     dock_icon: false,
@@ -64,12 +64,12 @@ pub(super) struct Platform {
     preparing: Option<(crate::transcription_models::TranscriptionModelId, Instant)>,
 }
 
-/// The service registers the dictation and Paste last shortcuts.
+/// The service registers every shortcut.
 fn shortcut_target(kind: HotkeyKind) -> Option<ShortcutTarget> {
     match kind {
         HotkeyKind::Dictation => Some(ShortcutTarget::Dictation),
         HotkeyKind::PasteLast => Some(ShortcutTarget::PasteLast),
-        HotkeyKind::Edit => None,
+        HotkeyKind::Edit => Some(ShortcutTarget::VoiceAction),
     }
 }
 
@@ -393,12 +393,18 @@ impl AppWindow {
                 self.settings.paste_last_hotkey.clone(),
                 HotkeyKind::PasteLast,
             ),
+            ShortcutTarget::VoiceAction => (
+                Some(state.settings.edit_hotkey.clone()),
+                Some(self.settings.edit_hotkey.clone()),
+                HotkeyKind::Edit,
+            ),
         };
         if let Some(binding) = saved.filter(|saved| Some(saved) != current.as_ref()) {
             let keycaps = binding.keycaps();
             match kind {
                 HotkeyKind::PasteLast => self.settings.paste_last_hotkey = Some(binding),
-                _ => self.settings.dictation_hotkey = binding,
+                HotkeyKind::Edit => self.settings.edit_hotkey = binding,
+                HotkeyKind::Dictation => self.settings.dictation_hotkey = binding,
             }
             self.hotkey_width_spring
                 .set_target(hotkey_saved_width(keycaps.len()) + hotkey_label_overflow(&keycaps));
