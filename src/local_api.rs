@@ -2525,7 +2525,7 @@ mod tests {
         let client = thread::spawn(move || {
             let mut stream = TcpStream::connect(address).unwrap();
             stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
+                .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).unwrap();
@@ -2536,13 +2536,15 @@ mod tests {
             .set_write_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let preparing = Arc::new(AtomicBool::new(true));
+        // Each stage outlasts several 100 ms progress polls, so a busy machine
+        // can't skip one.
         let preparer: ModelPreparer = Box::new(|_, downloaded, stage| {
             downloaded.store(123, Ordering::Relaxed);
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(400));
             crate::transcription_models::ModelPreparationStage::Verifying.store(&stage);
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(400));
             crate::transcription_models::ModelPreparationStage::Loading.store(&stage);
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(400));
             Ok(())
         });
         stream_model_prepare_with(
