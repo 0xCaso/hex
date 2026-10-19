@@ -211,7 +211,7 @@ pub(super) fn window_drag_region(region: Div) -> Div {
         };
         let application = objc2_app_kit::NSApplication::sharedApplication(main_thread);
         if let Some(event) = application.currentEvent()
-            && let Some(ns_window) = event.window()
+            && let Some(ns_window) = event.window(main_thread)
         {
             ns_window.performWindowDragWithEvent(&event);
         }
