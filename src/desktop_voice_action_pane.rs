@@ -1,3 +1,7 @@
+// TODO(consolidate-screens): only the Windows shell uses this. macOS draws the
+// same screen in the Voice Action pane in app_window.rs. Both now build on the shared
+// design system from 75f859b (#138, "consolidate the desktop design system"),
+// so converge them into one shared screen; see docs/plans/shared-desktop-ui.md.
 //! Shared Voice Action pane presentation.
 //!
 //! Native roots own shortcut capture, selected-text access, OpenCode discovery,

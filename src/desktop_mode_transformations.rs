@@ -1,3 +1,7 @@
+// TODO(consolidate-screens): only the Windows shell uses this. macOS draws the
+// same screen in the Modes pane in app_window.rs. Both now build on the shared
+// design system from 75f859b (#138, "consolidate the desktop design system"),
+// so converge them into one shared screen; see docs/plans/shared-desktop-ui.md.
 //! Shared ordered transformation editor for contextual dictation modes.
 //!
 //! The renderer owns catalog presentation, drag/drop ordering, and typed

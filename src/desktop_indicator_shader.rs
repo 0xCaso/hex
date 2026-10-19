@@ -1,3 +1,7 @@
+// TODO(consolidate-screens): only the Windows shell uses this. macOS draws the
+// same screen in dictation_indicator.metal. Both now build on the shared
+// design system from 75f859b (#138, "consolidate the desktop design system"),
+// so converge them into one shared screen; see docs/plans/shared-desktop-ui.md.
 //! CPU port of the Metal dictation-indicator fragment shader.
 //!
 //! This module is a pure-Rust, pixel-for-pixel translation of

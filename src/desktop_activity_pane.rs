@@ -1,3 +1,7 @@
+// TODO(consolidate-screens): only the Windows shell uses this. macOS draws the
+// same screen in the Activity pane in app_window.rs. Both now build on the shared
+// design system from 75f859b (#138, "consolidate the desktop design system"),
+// so converge them into one shared screen; see docs/plans/shared-desktop-ui.md.
 //! The shared Activity pane: the live listening session at a glance —
 //! state, capture device, session age, the most recent transcripts, and
 //! where the raw observations live. Read-only, so both port shells

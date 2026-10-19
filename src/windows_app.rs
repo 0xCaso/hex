@@ -1,3 +1,7 @@
+// TODO(consolidate-screens): only the Windows shell uses this. macOS draws the
+// same screen in app_window.rs (Settings, Modes, Voice Action, and History rendering). Both now build on the shared
+// design system from 75f859b (#138, "consolidate the desktop design system"),
+// so converge them into one shared screen; see docs/plans/shared-desktop-ui.md.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};

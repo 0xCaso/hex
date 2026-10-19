@@ -1,3 +1,7 @@
+// TODO(consolidate-screens): only the Windows shell uses this. macOS draws the
+// same screen in the HUD Lab pane in app_window.rs. Both now build on the shared
+// design system from 75f859b (#138, "consolidate the desktop design system"),
+// so converge them into one shared screen; see docs/plans/shared-desktop-ui.md.
 //! The shared HUD Lab pane: the macOS developer surface for live-tuning the
 //! dictation HUD shader, ported to the Windows and Linux shells. The rows,
 //! slider ranges, tuning defaults, and style-preset reset semantics are

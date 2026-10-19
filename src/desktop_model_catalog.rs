@@ -1,3 +1,7 @@
+// TODO(consolidate-screens): only the Windows shell uses this. macOS draws the
+// same screen in desktop_transcription_picker.rs and the model browser in app_window.rs. Both now build on the shared
+// design system from 75f859b (#138, "consolidate the desktop design system"),
+// so converge them into one shared screen; see docs/plans/shared-desktop-ui.md.
 //! The shared speech-model browser: the full runtime catalog with install
 //! state, a single-select language filter, download/verify/load progress,
 //! and uninstall. The Windows shell renders this dialog; installing keeps the current dictation language when the model supports

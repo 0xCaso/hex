@@ -1,3 +1,7 @@
+// TODO(consolidate-screens): only the Windows shell uses this. macOS draws the
+// same screen in onboarding.rs and the first-run window in app_window.rs. Both now build on the shared
+// design system from 75f859b (#138, "consolidate the desktop design system"),
+// so converge them into one shared screen; see docs/plans/shared-desktop-ui.md.
 //! The shared first-run experience: pick a dictation language, download
 //! its recommended model with live progress, and start dictating. Both
 //! port shells render this dialog on a fresh install (no persisted
