@@ -2987,33 +2987,17 @@ impl AppWindow {
     fn render_software_update_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let control = match self.platform_software_update()? {
             SoftwareUpdate::Checking => busy_label(tr("Checking")).into_any_element(),
-            SoftwareUpdate::Available { version } => {
-                let label =
-                    version.map_or_else(|| tr("Update").into(), |v| tr_fill("Update to {}", &v));
-                button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
-                    .child(label)
-                    .id("software-update")
-                    .debug_selector(|| "software-update".into())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.install_update(cx);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            }
-            SoftwareUpdate::ReadyToRestart { version } => {
-                let label = version.map_or_else(
+            SoftwareUpdate::Available { version } => self.render_update_button(
+                version.map_or_else(|| tr("Update").into(), |v| tr_fill("Update to {}", &v)),
+                cx,
+            ),
+            SoftwareUpdate::ReadyToRestart { version } => self.render_update_button(
+                version.map_or_else(
                     || tr("Restart to update").into(),
                     |v| tr_fill("Restart into {}", &v),
-                );
-                button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
-                    .child(label)
-                    .id("software-update")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.install_update(cx);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            }
+                ),
+                cx,
+            ),
             SoftwareUpdate::Current if !platform::MANUAL_UPDATE_CHECK => div()
                 .text_footnote()
                 .text_color(rgb(TEXT_TERTIARY))
@@ -3035,6 +3019,18 @@ impl AppWindow {
             }
         };
         Some(control)
+    }
+
+    fn render_update_button(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
+        button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+            .child(label)
+            .id("software-update")
+            .debug_selector(|| "software-update".into())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.install_update(cx);
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

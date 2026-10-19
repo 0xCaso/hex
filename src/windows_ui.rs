@@ -238,28 +238,23 @@ pub(crate) fn caption_controls(window: &Window) -> impl IntoElement {
             "caption-minimize",
             WindowControlArea::Min,
             "\u{E921}",
+            SURFACE_HOVER,
+            SURFACE_SELECTED,
         ))
         .child(caption_button(
             "caption-maximize",
             WindowControlArea::Max,
             maximize_glyph,
+            SURFACE_HOVER,
+            SURFACE_SELECTED,
         ))
-        .child(
-            div()
-                .id("caption-close")
-                .window_control_area(WindowControlArea::Close)
-                .w(px(CAPTION_BUTTON_WIDTH))
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .font_family(icon_font())
-                .text_size(px(CAPTION_GLYPH_SIZE))
-                .text_color(rgb(TEXT_SECONDARY))
-                .hover(|button| button.bg(rgb(CLOSE_HOVER)).text_color(rgb(TEXT_PRIMARY)))
-                .active(|button| button.bg(rgb(CLOSE_PRESSED)).text_color(rgb(TEXT_PRIMARY)))
-                .child("\u{E8BB}"),
-        )
+        .child(caption_button(
+            "caption-close",
+            WindowControlArea::Close,
+            "\u{E8BB}",
+            CLOSE_HOVER,
+            CLOSE_PRESSED,
+        ))
 }
 
 /// The caption row blocks the window's own mouse handling beneath it (such as
@@ -296,6 +291,8 @@ fn caption_button(
     id: &'static str,
     area: WindowControlArea,
     glyph: &'static str,
+    hover: u32,
+    active: u32,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -308,7 +305,7 @@ fn caption_button(
         .font_family(icon_font())
         .text_size(px(CAPTION_GLYPH_SIZE))
         .text_color(rgb(TEXT_SECONDARY))
-        .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_PRIMARY)))
-        .active(|button| button.bg(rgb(SURFACE_SELECTED)))
+        .hover(move |button| button.bg(rgb(hover)).text_color(rgb(TEXT_PRIMARY)))
+        .active(move |button| button.bg(rgb(active)).text_color(rgb(TEXT_PRIMARY)))
         .child(glyph)
 }

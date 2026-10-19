@@ -4,7 +4,7 @@
 
 use gpui::{
     AnyElement, App, Div, ElementId, FontWeight, IntoElement, Pixels, Rgba, ShapedLine,
-    SharedString, Stateful, Window, canvas, div, prelude::*, px, relative, rgb,
+    SharedString, Stateful, Window, canvas, div, prelude::*, px, rgb,
 };
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1056,41 +1056,6 @@ pub(crate) fn segmented_item(selected: bool) -> Div {
         .when(!selected, |item| {
             item.hover(|item| item.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_SECONDARY)))
         })
-}
-
-/// A continuous value's track, filled to `fraction` with a round knob. Callers
-/// size it, own hit-testing, and map pointer positions to values.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn slider_track(fraction: f32) -> Div {
-    let fraction = fraction.clamp(0.0, 1.0);
-    let knob = SLIDER_KNOB_SIZE;
-    div()
-        .relative()
-        .h(px(SLIDER_TRACK_HEIGHT))
-        .rounded_full()
-        .bg(rgb(LINE_STRONG))
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .h_full()
-                .w(relative(fraction))
-                .rounded_full()
-                .bg(rgb(ACCENT)),
-        )
-        .child(
-            div()
-                .absolute()
-                .top(px((SLIDER_TRACK_HEIGHT - knob) / 2.0))
-                .left(relative(fraction))
-                .ml(px(-knob / 2.0))
-                .size(px(knob))
-                .rounded_full()
-                .border_2()
-                .border_color(rgb(CANVAS))
-                .bg(rgb(ACCENT)),
-        )
 }
 
 /// A [`segmented_control`] whose selection indicator slides between items.

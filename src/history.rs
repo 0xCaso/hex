@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn truncation_respects_character_boundaries() {
-        let text = "Ã©".repeat(MAX_TEXT_BYTES);
+        let text = "é".repeat(MAX_TEXT_BYTES);
         let truncated = truncated(&text, MAX_TEXT_BYTES);
         assert!(truncated.len() <= MAX_TEXT_BYTES);
         assert!(text.starts_with(&truncated));

@@ -1195,25 +1195,25 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) -> Vec<(&'static str, &'static str, AnyElement)> {
         let status = self.setup_status;
-        let microphone = match status.microphone {
-            PermissionState::Ready => tag(Tone::Success, tr("Ready")).into_any_element(),
-            PermissionState::NeedsRequest => button(ButtonKind::Secondary, tr("Allow"))
-                .id("setup-microphone")
-                .on_click(cx.listener(|_this, _, _, cx| {
-                    crate::onboarding::request_microphone();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            PermissionState::NeedsSettings => button(ButtonKind::Secondary, tr("Open settings"))
-                .id("setup-microphone")
-                .on_click(cx.listener(|_this, _, _, cx| {
-                    crate::onboarding::open_permission_settings("microphone");
-                    cx.notify();
-                }))
-                .into_any_element(),
-        };
         let mut permission_items: Vec<(&'static str, &'static str, AnyElement)> = Vec::new();
         if status.microphone != PermissionState::Ready {
+            let microphone = if status.microphone == PermissionState::NeedsRequest {
+                button(ButtonKind::Secondary, tr("Allow"))
+                    .id("setup-microphone")
+                    .on_click(cx.listener(|_this, _, _, cx| {
+                        crate::onboarding::request_microphone();
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            } else {
+                button(ButtonKind::Secondary, tr("Open settings"))
+                    .id("setup-microphone")
+                    .on_click(cx.listener(|_this, _, _, cx| {
+                        crate::onboarding::open_permission_settings("microphone");
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            };
             permission_items.push((
                 tr("Microphone"),
                 if self.settings.commands_enabled {

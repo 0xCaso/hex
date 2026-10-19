@@ -41,7 +41,6 @@ pub(crate) enum TranscriptionPickerStatus {
 
 /// Whether a downloaded model card offers deleting its files.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) enum ModelDeletion {
     Unavailable,
     Offered,
@@ -105,44 +104,34 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
     let model_cards = view.models.into_iter().enumerate().map(|(index, model)| {
         let language = view.language.clone();
         let definition = model.choice.model;
+        let active = matches!(model.status, TranscriptionPickerStatus::Active);
+        let preparing = matches!(model.status, TranscriptionPickerStatus::Preparing { .. });
         let mut deletion = ModelDeletion::Unavailable;
-        let mut progress_label = None;
-        let (state, action, active, preparing, progress, installed) = match model.status {
-            TranscriptionPickerStatus::Active => (
-                Some(model_state(tr("Active"))),
-                None,
-                true,
-                false,
-                None,
-                true,
-            ),
+        let mut installed_inactive = false;
+        let mut progress_bar = None;
+        let (state, action) = match model.status {
+            TranscriptionPickerStatus::Active => (Some(model_state(tr("Active"))), None),
             TranscriptionPickerStatus::Available {
                 installed,
                 deletion: offered,
             } => {
                 deletion = offered;
+                installed_inactive = installed;
                 (
                     None,
                     Some(if installed { tr("Use") } else { tr("Download") }),
-                    false,
-                    false,
-                    None,
-                    installed,
                 )
             }
             TranscriptionPickerStatus::Preparing { label, progress } => (
                 // A progress bar carries its label; the title row keeps only Cancel.
-                if progress.is_some() {
-                    progress_label = Some(label);
-                    None
-                } else {
-                    Some(model_state(label))
+                match progress {
+                    Some(progress) => {
+                        progress_bar = Some((progress, label));
+                        None
+                    }
+                    None => Some(model_state(label)),
                 },
                 Some(tr("Cancel")),
-                false,
-                true,
-                progress,
-                false,
             ),
         };
         let metadata = definition
@@ -153,7 +142,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                 (definition.coverage != language_name(&language)).then(|| tr(definition.coverage)),
             )
             .chain([tr(definition.quality_context), tr(definition.timestamps)])
-            .chain((installed && !active).then(|| tr("Installed")))
+            .chain(installed_inactive.then(|| tr("Installed")))
             .collect::<Vec<_>>()
             .join(" · ");
         // At most two descriptive tags: why to pick it, and whether it streams.
@@ -273,19 +262,15 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                              For language-guided transcription, try Whisper.",
                 ))
             })
-            .when_some(progress, |card, progress| {
+            .when_some(progress_bar, |card, (progress, label)| {
+                let indicator = div().h_full().rounded(RADIUS_KNOB).bg(rgb(ACCENT));
                 let indicator = match progress {
-                    TranscriptionPickerProgress::Downloading(progress) => div()
-                        .h_full()
-                        .w(relative(progress))
-                        .rounded(RADIUS_KNOB)
-                        .bg(rgb(ACCENT)),
-                    TranscriptionPickerProgress::Loading(progress) => div()
-                        .ml(relative(progress * 0.75))
-                        .h_full()
-                        .w(relative(0.25))
-                        .rounded(RADIUS_KNOB)
-                        .bg(rgb(ACCENT)),
+                    TranscriptionPickerProgress::Downloading(progress) => {
+                        indicator.w(relative(progress))
+                    }
+                    TranscriptionPickerProgress::Loading(progress) => {
+                        indicator.ml(relative(progress * 0.75)).w(relative(0.25))
+                    }
                 };
                 card.child(
                     div()
@@ -300,13 +285,13 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                                 .bg(rgb(CANVAS))
                                 .child(indicator),
                         )
-                        .children(progress_label.map(|label| {
+                        .child(
                             div()
                                 .flex_none()
                                 .text_caption()
                                 .text_color(rgb(TEXT_SECONDARY))
-                                .child(label)
-                        })),
+                                .child(label),
+                        ),
                 )
             })
             .on_click(cx.listener(move |this, _, _, cx| {
