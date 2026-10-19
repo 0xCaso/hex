@@ -179,9 +179,13 @@ impl Icon {
 }
 
 /// An inline icon at [`ICON_SIZE_SMALL`] (optically matched) in `color`.
+pub(crate) fn icon(glyph: Icon, color: u32) -> AnyElement {
+    icon_at(glyph, glyph.optical_size(), color)
+}
+
+/// An icon drawn at `size`, for illustrations such as onboarding art.
 #[cfg(target_os = "macos")]
-pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
-    let size = icon.optical_size();
+pub(crate) fn icon_at(icon: Icon, size: f32, color: u32) -> AnyElement {
     div()
         .size(px(size))
         .flex_none()
@@ -198,10 +202,9 @@ pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
         .into_any_element()
 }
 
-/// An inline icon at [`ICON_SIZE_SMALL`] (optically matched) in `color`.
+/// An icon drawn at `size`, for illustrations such as onboarding art.
 #[cfg(target_os = "linux")]
-pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
-    let size = icon.optical_size();
+pub(crate) fn icon_at(icon: Icon, size: f32, color: u32) -> AnyElement {
     div()
         .size(px(size))
         .flex_none()
@@ -218,10 +221,9 @@ pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
         .into_any_element()
 }
 
-/// An inline icon at [`ICON_SIZE_SMALL`] (optically matched) in `color`.
+/// An icon drawn at `size`, for illustrations such as onboarding art.
 #[cfg(target_os = "windows")]
-pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
-    let size = icon.optical_size();
+pub(crate) fn icon_at(icon: Icon, size: f32, color: u32) -> AnyElement {
     div()
         .size(px(size))
         .flex_none()

@@ -288,15 +288,21 @@ impl OnboardingPreview {
 
     fn flow(self, permissions: bool, practice: bool) -> crate::onboarding::Flow {
         use crate::onboarding::{Flow, Input, ModelProgress, Observation, SetupItem, Step};
+        let fresh = Self::Setup.status();
         let start = match self {
             Self::Welcome => Step::Welcome,
             Self::HowItWorks => Step::HowItWorks,
-            Self::Setup | Self::SetupProgress | Self::SetupReady => Step::Setup,
-            Self::Done => Step::Done,
-            _ => Step::TryIt,
+            _ => Step::Setup,
         };
+        let initial = if self == Self::SetupProgress {
+            self.status()
+        } else {
+            fresh
+        };
+        // Later steps walk through setup, as a first run does, so the page
+        // dots match what a person sees.
+        let mut flow = Flow::new(start, initial, permissions, practice);
         let status = self.status();
-        let mut flow = Flow::new(start, status, permissions, practice);
         if self == Self::SetupProgress {
             flow.on(Input::Grant(SetupItem::Accessibility));
             flow.on(Input::Status(
@@ -306,6 +312,20 @@ impl OnboardingPreview {
                     ..ModelProgress::default()
                 },
             ));
+        } else if start == Step::Setup && self != Self::Setup {
+            flow.on(Input::Status(
+                status,
+                ModelProgress {
+                    installed: true,
+                    ..ModelProgress::default()
+                },
+            ));
+            if self != Self::SetupReady {
+                flow.on(Input::Continue);
+            }
+            if self == Self::Done {
+                flow.on(Input::Skip);
+            }
         }
         let observations: &[Observation] = match self {
             Self::TryItListening => &[Observation::Started],

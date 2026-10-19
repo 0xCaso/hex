@@ -208,10 +208,12 @@ pub(crate) const ONBOARDING_WIDTH: f32 = 520.0;
 pub(crate) const ONBOARDING_ART_HEIGHT: f32 = 148.0;
 /// The shortcut drawn as a large keycap in onboarding art.
 pub(crate) const HERO_KEYCAP_SIZE: f32 = 56.0;
+/// An icon drawn as onboarding art, such as the finished tour's check.
+pub(crate) const HERO_ICON_SIZE: f32 = 28.0;
 /// How far a hero keycap stands above its base before it is pressed.
 pub(crate) const HERO_KEYCAP_DEPTH: f32 = 3.0;
 /// The measure of a page's centred body copy.
-pub(crate) const ONBOARDING_BODY_WIDTH: f32 = 440.0;
+pub(crate) const ONBOARDING_BODY_WIDTH: f32 = 400.0;
 /// The illustration column of a "How Hex works" row.
 pub(crate) const ONBOARDING_ART_COLUMN: f32 = 112.0;
 /// A setup row's download progress, track and percentage together.

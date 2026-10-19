@@ -14,7 +14,7 @@ use super::{AppWindow, platform};
 use crate::design_tokens::*;
 use crate::desktop_i18n::{tr, tr_fill};
 use crate::desktop_ui::{
-    ButtonKind, Icon, button, hero_keycaps, hotkey_keycaps, icon, panel, progress_track,
+    ButtonKind, Icon, button, hero_keycaps, hotkey_keycaps, icon, icon_at, panel, progress_track,
     section_label, small_button, status_dot, step_dots,
 };
 use crate::events::{DictationPhase, VoiceEvent};
@@ -419,7 +419,7 @@ impl AppWindow {
                 },
                 Some(
                     if permissions {
-                        tr("Each row turns green as macOS confirms it. You can do them in any order.")
+                        tr("Rows turn green as macOS confirms them. Any order works.")
                     } else {
                         tr("Hex transcribes on this computer, so it needs a local model first.")
                     }
@@ -593,12 +593,15 @@ impl AppWindow {
             ItemStatus::Waiting => div()
                 .flex()
                 .items_center()
-                .gap_2()
+                .gap_3()
                 .child(
-                    div()
-                        .text_footnote()
-                        .text_color(rgb(TEXT_TERTIARY))
-                        .child(tr("Waiting for macOS")),
+                    status_dot(ACCENT).with_animation(
+                        ("setup-waiting", setup_item_index(item)),
+                        Animation::new(LISTENING_LOOP)
+                            .repeat()
+                            .with_easing(ease_in_out),
+                        |dot, phase| dot.opacity(pulse(phase)),
+                    ),
                 )
                 .child(grant(
                     if item == SetupItem::Microphone {
@@ -650,25 +653,12 @@ impl AppWindow {
             .child(page_title(
                 tr("Give it a try"),
                 Some(if self.holds() {
-                    tr_fill(
-                        "Hold {}, say a sentence, and let go. Your words land in the box below.",
-                        &shortcut,
-                    )
+                    tr_fill("Hold {}, say a sentence, then let go.", &shortcut)
                 } else {
-                    tr_fill(
-                        "Press {}, say a sentence, and press it again. Your words land in the box below.",
-                        &shortcut,
-                    )
+                    tr_fill("Press {}, say a sentence, then press it again.", &shortcut)
                 }),
             ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(field)
-                    .child(hint),
-            )
+            .child(div().flex().flex_col().gap_3().child(field).child(hint))
             .into_any_element()
     }
 
@@ -769,7 +759,7 @@ impl AppWindow {
                         Animation::new(LISTENING_LOOP)
                             .repeat()
                             .with_easing(ease_in_out),
-                        |dot, phase| dot.opacity(0.45 + 0.55 * (1.0 - (2.0 * phase - 1.0).abs())),
+                        |dot, phase| dot.opacity(pulse(phase)),
                     )
                     .into_any_element()
             }
@@ -797,7 +787,7 @@ impl AppWindow {
             .items_center()
             .justify_center()
             .bg(rgb(SUCCESS_SURFACE))
-            .child(icon(Icon::Check, SUCCESS));
+            .child(icon_at(Icon::Check, HERO_ICON_SIZE, SUCCESS));
         let art = div()
             .h(px(ONBOARDING_ART_HEIGHT))
             .flex()
@@ -1010,6 +1000,7 @@ fn how_row(art: impl IntoElement, text: String, last: bool) -> Div {
         .child(
             div()
                 .flex_1()
+                .min_w(px(0.0))
                 .text_body()
                 .text_color(rgb(TEXT_SECONDARY))
                 .child(text),
@@ -1111,6 +1102,11 @@ fn pasted_art() -> Div {
         .text_color(rgb(TEXT_PRIMARY))
         .child(tr("Hello"))
         .child(div().w(px(1.0)).h(px(FOOTNOTE.line_height)).bg(rgb(ACCENT)))
+}
+
+/// Dim, bright, dim over one loop.
+fn pulse(phase: f32) -> f32 {
+    0.35 + 0.65 * (1.0 - (2.0 * phase - 1.0).abs())
 }
 
 fn smooth(t: f32) -> f32 {
