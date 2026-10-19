@@ -42,6 +42,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           DRY_RUN: ${{ inputs.dry_run }}
           REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           sha=$(git rev-parse HEAD)
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
@@ -49,14 +50,19 @@ jobs:
             echo "::error::Stable releases need a non-prerelease version, not $version."
             exit 1
           fi
-          publish=true
-          if [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then
-            publish=false
-          fi
-          if [ "$EVENT" = push ] && [ "$REF_NAME" != "app-v$version" ]; then
-            echo "::error::Tag $REF_NAME does not match version $version."
-            exit 1
-          fi
+          publish=false
+          case "$EVENT:$REF_TYPE" in
+            workflow_dispatch:*)
+              if [ "$DRY_RUN" = false ]; then publish=true; fi
+              ;;
+            push:tag)
+              if [ "$REF_NAME" != "app-v$version" ]; then
+                echo "::error::Tag $REF_NAME does not match version $version."
+                exit 1
+              fi
+              publish=true
+              ;;
+          esac
           {
             echo "sha=$sha"
             echo "version=$version"
