@@ -104,6 +104,12 @@ struct Capabilities {
     /// The listener can be off: an Enabled/Disabled card and Enable on launch.
     listener_control: bool,
     paste_last: bool,
+    /// Other applications' audio can be muted or paused while dictating.
+    recording_audio: bool,
+    /// The microphone can close between dictations.
+    release_microphone: bool,
+    /// Recording can wait for a second tap of the shortcut.
+    double_tap_only: bool,
     /// Shortcuts can require the left or right modifier key.
     modifier_sides: bool,
     indicator_position: bool,
@@ -3322,24 +3328,29 @@ impl AppWindow {
                 .child(settings_section_label("Behavior"))
                 .child(
                     panel()
-                        .child(
-                            settings_row(
-                                "While dictating",
-                                "Mute or pause other audio during dictation",
-                                audio_behavior,
+                        .when(capabilities.recording_audio, |panel| {
+                            panel.child(
+                                settings_row(
+                                    "While dictating",
+                                    "Mute or pause other audio during dictation",
+                                    audio_behavior,
+                                )
+                                .id("recording-audio-setting"),
                             )
-                            .id("recording-audio-setting"),
-                        )
-                        .child(settings_row(
-                            "Microphone mode",
-                            if self.settings.release_microphone_while_idle {
-                                "Opens only while holding the shortcut. Disables pre-roll and commands."
-                            } else {
-                                "Keeps the microphone open for instant start and pre-roll"
-                            },
-                            microphone_mode,
-                        ))
-                        .children(microphone_confirmation)
+                        })
+                        .when(capabilities.release_microphone, |panel| {
+                            panel
+                                .child(settings_row(
+                                    "Microphone mode",
+                                    if self.settings.release_microphone_while_idle {
+                                        "Opens only while holding the shortcut. Disables pre-roll and commands."
+                                    } else {
+                                        "Keeps the microphone open for instant start and pre-roll"
+                                    },
+                                    microphone_mode,
+                                ))
+                                .children(microphone_confirmation)
+                        })
                         .when(!toggle_mode, |panel| {
                             panel.child(
                                 settings_row(
@@ -3354,7 +3365,7 @@ impl AppWindow {
                                 })),
                             )
                         })
-                        .child(
+                        .when(capabilities.double_tap_only, |panel| panel.child(
                             div()
                                 .h(px(SETTINGS_ROW_MIN_HEIGHT * double_tap_only_visibility))
                                 .overflow_hidden()
@@ -3371,7 +3382,7 @@ impl AppWindow {
                                         this.set_double_tap_only(enabled, cx);
                                     })),
                                 ),
-                        )
+                        ))
                         .when(capabilities.indicator_position, |panel| {
                             panel.child(
                                 settings_row(
