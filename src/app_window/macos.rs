@@ -62,6 +62,9 @@ pub(super) fn focused_application_known() -> bool {
     true
 }
 
+/// The Modes application picker's button for an app it doesn't list.
+pub(super) const CHOOSE_APPLICATION_FILE: &str = "Choose from Finder…";
+
 pub(super) const MANUAL_UPDATE_CHECK: bool = true;
 
 /// What the macOS application coordinator hands a new window.

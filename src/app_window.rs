@@ -4887,7 +4887,7 @@ impl AppWindow {
                         .items_center()
                         .justify_between()
                         .child(
-                            small_button(ButtonKind::Secondary, "Choose from Finder…")
+                            small_button(ButtonKind::Secondary, platform::CHOOSE_APPLICATION_FILE)
                                 .id("choose-application-bundle")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.choose_application(selection, cx);

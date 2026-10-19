@@ -46,6 +46,9 @@ pub(super) fn focused_application_known() -> bool {
     !crate::linux_session::LinuxSession::detect().is_wayland()
 }
 
+/// The Modes application picker's button for an app it doesn't list.
+pub(super) const CHOOSE_APPLICATION_FILE: &str = "Choose a file…";
+
 pub(super) const MANUAL_UPDATE_CHECK: bool = false;
 
 pub(super) struct Args;

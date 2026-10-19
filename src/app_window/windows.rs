@@ -49,6 +49,9 @@ pub(super) fn focused_application_known() -> bool {
     true
 }
 
+/// The Modes application picker's button for an app it doesn't list.
+pub(super) const CHOOSE_APPLICATION_FILE: &str = "Choose an .exe…";
+
 pub(super) const MANUAL_UPDATE_CHECK: bool = true;
 
 /// What the Windows lifecycle hands the window.
