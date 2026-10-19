@@ -626,7 +626,11 @@ impl LinuxDesktopHost {
             || settings.paste_with_shift != self.settings.paste_with_shift
             || settings.microphone != self.settings.microphone
             || settings.paste_last_hotkey != self.settings.paste_last_hotkey
-            || settings.double_tap_only != self.settings.double_tap_only;
+            || settings.double_tap_only != self.settings.double_tap_only
+            || settings.release_microphone_while_idle
+                != self.settings.release_microphone_while_idle
+            || settings.recording_audio_behavior != self.settings.recording_audio_behavior
+            || settings.indicator_position != self.settings.indicator_position;
         if restart && self.is_running() && self.settings_edit.is_none() {
             self.begin_settings_edit(SettingsChange::Reload(Box::new(settings)));
             return Ok(());

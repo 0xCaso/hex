@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 
-use crate::audio::{AudioInput, AudioInputEvent, CaptureInstant};
+use crate::audio::{CaptureInstant, RecoveringAudioInput, RecoveringAudioInputEvent};
 use crate::dictation::{DictationCapture, Finish, POST_RELEASE_TAIL};
 use crate::events::{DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms};
 use crate::feedback::{self, Tone};
@@ -141,9 +141,14 @@ pub fn run(
         stop: Arc::new(AtomicBool::new(false)),
         worker: None,
     };
-    let input = match device.or(settings.microphone.as_deref()) {
-        Some(name) => AudioInput::open_matching(name)?,
-        None => AudioInput::open(&[])?,
+    // A missing microphone falls back to the default one. A released
+    // microphone opens only while a dictation records.
+    let microphone = device.or(settings.microphone.as_deref());
+    let release_while_idle = settings.release_microphone_while_idle;
+    let mut input = if release_while_idle {
+        RecoveringAudioInput::closed(None, 0, microphone)
+    } else {
+        RecoveringAudioInput::open(None, 0, microphone)
     };
     let binding = crate::linux_input::LinuxHotkey::from(&settings.dictation_hotkey);
     let hotkey_label = binding.label();
@@ -163,7 +168,9 @@ pub fn run(
     };
     let hotkey = LinuxHotkeyMonitor::start_with(binding, options, hotkey_status)?;
     let wayland_modifiers = hotkey.wayland_modifiers();
-    let indicator = LinuxIndicator::new();
+    let indicator = LinuxIndicator::new(settings.indicator_position);
+    let suppressor =
+        crate::linux_audio_control::AudioSuppressor::new(settings.recording_audio_behavior);
     let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
@@ -227,17 +234,31 @@ pub fn run(
     }));
 
     let mut events = EventLog::create(event_path)?;
-    let mut capture = DictationCapture::new(input.sample_rate);
+    let mut audio_ready = input.is_open();
+    // A released microphone's sample rate is unknown until it opens; the
+    // first chunk replaces this placeholder capture.
+    let mut capture = DictationCapture::new(if audio_ready {
+        input.sample_rate()
+    } else {
+        16_000
+    });
+    let mut device_label = if audio_ready {
+        input.device_name().to_string()
+    } else {
+        microphone.unwrap_or("microphone").to_string()
+    };
+    // A press that arrived while the released microphone was opening;
+    // recording starts at its first chunk.
+    let mut start_pending = false;
     let mut captured_through = CaptureInstant::ZERO;
     let mut finishing: Option<Finishing> = None;
     let mut pending = 0_usize;
     events.emit(&VoiceEvent::SessionStarted {
         timestamp_ms: now_ms(),
     })?;
-    emit_state(&mut events, VoiceState::Listening, &input.device_name)?;
+    emit_state(&mut events, VoiceState::Listening, &device_label)?;
     println!(
-        "HEX dictation is ready on {}. Hold {} to dictate; Ctrl-C stops.",
-        input.device_name, hotkey_label
+        "HEX dictation is ready on {device_label}. Hold {hotkey_label} to dictate; Ctrl-C stops."
     );
 
     while !shutdown.load(Ordering::Relaxed) {
@@ -260,21 +281,51 @@ pub fn run(
                 &mut events,
                 &mut pending,
             )?;
+            suppressor.restore();
+            if release_while_idle {
+                input.close();
+                audio_ready = false;
+            }
             emit_state(
                 &mut events,
                 active_state(capture.is_recording(), pending),
-                &input.device_name,
+                &device_label,
             )?;
         }
         while finishing.is_none()
             && let Ok(action) = hotkey.events.try_recv()
         {
             match action {
-                HotkeyEvent::Start if !capture.is_recording() => {
-                    start_capture(&mut capture, captured_through, feedback::play);
-                    stream_when_due(&mut capture, &engine, toggle);
+                HotkeyEvent::Start if !capture.is_recording() && !start_pending => {
+                    if audio_ready {
+                        start_capture(&mut capture, captured_through, feedback::play);
+                        stream_when_due(&mut capture, &engine, toggle);
+                    } else if release_while_idle {
+                        start_pending = true;
+                        input.request_open();
+                    } else {
+                        continue;
+                    }
+                    suppressor.suppress();
                     events.dictation(DictationPhase::Started, "")?;
-                    emit_state(&mut events, VoiceState::Dictating, &input.device_name)?;
+                    emit_state(&mut events, VoiceState::Dictating, &device_label)?;
+                }
+                HotkeyEvent::Finish | HotkeyEvent::Cancel if start_pending => {
+                    // Released before the opening microphone produced audio:
+                    // nothing was captured.
+                    start_pending = false;
+                    suppressor.restore();
+                    input.close();
+                    audio_ready = false;
+                    events.dictation(
+                        if action == HotkeyEvent::Cancel {
+                            DictationPhase::Cancelled
+                        } else {
+                            DictationPhase::Discarded
+                        },
+                        "",
+                    )?;
+                    emit_state(&mut events, active_state(false, pending), &device_label)?;
                 }
                 HotkeyEvent::Finish if capture.is_recording() => {
                     finishing = Some(begin_finishing(&capture, captured_through));
@@ -290,11 +341,16 @@ pub fn run(
                 HotkeyEvent::Cancel if capture.is_recording() => {
                     capture.cancel();
                     feedback::play(Tone::Cancel);
+                    suppressor.restore();
+                    if release_while_idle {
+                        input.close();
+                        audio_ready = false;
+                    }
                     events.dictation(DictationPhase::Cancelled, "")?;
                     emit_state(
                         &mut events,
                         active_state(capture.is_recording(), pending),
-                        &input.device_name,
+                        &device_label,
                     )?;
                 }
                 _ => {}
@@ -324,27 +380,74 @@ pub fn run(
             emit_state(
                 &mut events,
                 active_state(capture.is_recording(), pending),
-                &input.device_name,
+                &device_label,
             )?;
         }
 
-        indicator.update(capture.is_recording(), pending);
-        let chunk = match input.recv_timeout(UPDATE_INTERVAL) {
-            AudioInputEvent::Chunk {
+        indicator.update(capture.is_recording() || start_pending, pending);
+        match input.recv_timeout(UPDATE_INTERVAL, !capture.is_recording()) {
+            RecoveringAudioInputEvent::Chunk {
                 samples,
                 captured_through: chunk_captured_through,
             } => {
                 captured_through = chunk_captured_through;
-                samples
+                if !audio_ready {
+                    capture = DictationCapture::new(input.sample_rate());
+                    audio_ready = true;
+                    device_label = input.device_name().to_string();
+                    if start_pending {
+                        // The on-demand open finished while the shortcut is
+                        // held: recording starts here, without pre-roll.
+                        start_pending = false;
+                        start_capture(&mut capture, captured_through, feedback::play);
+                    }
+                }
+                capture.ingest(&samples, captured_through);
+                capture.become_intentional(captured_through);
+                stream_when_due(&mut capture, &engine, toggle);
             }
-            AudioInputEvent::Timeout => continue,
-            AudioInputEvent::StreamFailed(error) => {
-                return Err(eyre!("microphone stream stopped: {error}"));
+            RecoveringAudioInputEvent::Timeout => {}
+            RecoveringAudioInputEvent::Interrupted => {
+                // A release still in its tail finishes with the audio it has.
+                if let Some(release) = &mut finishing {
+                    release.deadline = Instant::now();
+                }
+                audio_ready = false;
+                if capture.is_recording() && finishing.is_none() {
+                    capture.cancel();
+                    feedback::play(Tone::Cancel);
+                    suppressor.restore();
+                    events.dictation(DictationPhase::Cancelled, "")?;
+                }
+                events.dictation(
+                    DictationPhase::Failed("microphone stream interrupted; reopening".into()),
+                    "",
+                )?;
+                emit_state(
+                    &mut events,
+                    active_state(capture.is_recording(), pending),
+                    &device_label,
+                )?;
             }
-        };
-        capture.ingest(&chunk, captured_through);
-        capture.become_intentional(captured_through);
-        stream_when_due(&mut capture, &engine, toggle);
+            RecoveringAudioInputEvent::Reopened => {
+                audio_ready = false;
+                device_label = input.device_name().to_string();
+            }
+            RecoveringAudioInputEvent::OpenFailed(error) => {
+                if !release_while_idle {
+                    return Err(eyre!("could not open the microphone: {error}"));
+                }
+                // An on-demand open failed (device busy or unplugged): report
+                // it and stay released rather than stopping the listener.
+                start_pending = false;
+                suppressor.restore();
+                events.dictation(
+                    DictationPhase::Failed(format!("could not open microphone: {error}")),
+                    "",
+                )?;
+                emit_state(&mut events, active_state(false, pending), &device_label)?;
+            }
+        }
     }
 
     if capture.is_recording() {
@@ -352,7 +455,8 @@ pub fn run(
         events.dictation(DictationPhase::Cancelled, "")?;
     }
     indicator.update(false, pending);
-    emit_state(&mut events, VoiceState::Stopping, &input.device_name)?;
+    suppressor.restore();
+    emit_state(&mut events, VoiceState::Stopping, &device_label)?;
     output.stop.store(true, Ordering::Release);
     drop(hotkey);
     drop(input);
