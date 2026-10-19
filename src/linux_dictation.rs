@@ -1,14 +1,14 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 
-use crate::audio::{AudioInput, AudioInputEvent, CaptureInstant};
+use crate::audio::{CaptureInstant, RecoveringAudioInput, RecoveringAudioInputEvent};
 use crate::dictation::{DictationCapture, Finish, POST_RELEASE_TAIL};
 use crate::events::{DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms};
 use crate::feedback::{self, Tone};
@@ -27,9 +27,25 @@ struct Job {
     audio_ms: u64,
 }
 
+enum OutputJob {
+    Dictation(Job),
+    VoiceAction(Job),
+    /// Pastes the newest completed dictation again.
+    PasteLast,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum OutputKind {
+    Dictation,
+    VoiceAction,
+    PasteLast,
+}
+
 /// A release whose capture is still collecting its post-release tail.
 struct Finishing {
     ended_at: CaptureInstant,
+    /// The recording is a Voice Action instruction.
+    voice: bool,
     deadline: Instant,
 }
 
@@ -47,6 +63,67 @@ impl Drop for OutputWorker {
     }
 }
 
+/// What happens to a transcript before and after it is pasted: the modes
+/// that process it and the history that keeps it. The service shares it
+/// with the listener so saved settings apply without a restart.
+#[derive(Clone)]
+pub struct DictationOutput {
+    pub history: Option<crate::history::History>,
+    pub modes: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
+    pub transformations: Arc<crate::personal_commands::TransformationClient>,
+}
+
+impl DictationOutput {
+    pub fn from_settings(
+        settings: &crate::app_settings::AppSettings,
+        history: Option<crate::history::History>,
+    ) -> Self {
+        Self {
+            history,
+            modes: Arc::new(RwLock::new(
+                crate::dictation_modes::ModeRuntime::from_settings(settings),
+            )),
+            transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
+        }
+    }
+
+    /// Processes and pastes one transcript, then records it.
+    fn deliver(
+        &self,
+        raw_text: String,
+        paster: &mut LinuxPaster,
+        audio_ms: u64,
+        inference_ms: u64,
+        started: Instant,
+    ) -> Result<String> {
+        let context = crate::linux_context::capture();
+        let modes = self
+            .modes
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let processed = modes.process(&raw_text, &context, &self.transformations);
+        if processed.text.trim().is_empty() {
+            return Err(eyre!("text replacements produced empty output"));
+        }
+        paster.paste(&processed.text)?;
+        if let Some(history) = &self.history {
+            let draft = crate::dictation_modes::history_draft(
+                raw_text,
+                &processed,
+                context.application,
+                audio_ms,
+                inference_ms,
+                started.elapsed().as_millis() as u64,
+            );
+            if let Err(error) = history.record(draft) {
+                tracing::warn!(%error, "could not retain Linux dictation history");
+            }
+        }
+        Ok(processed.text)
+    }
+}
+
 /// Runs hotkey dictation until `shutdown`. A prepared transcriber skips the
 /// model load; otherwise the supplied transcription selection is loaded here.
 pub fn run(
@@ -54,6 +131,7 @@ pub fn run(
     device: Option<&str>,
     shutdown: &AtomicBool,
     settings: &crate::app_settings::AppSettings,
+    output_settings: DictationOutput,
     transcriber: Option<LocalTranscriber>,
     hotkey_status: HotkeyStatus,
 ) -> Result<()> {
@@ -67,30 +145,75 @@ pub fn run(
         stop: Arc::new(AtomicBool::new(false)),
         worker: None,
     };
-    let input = match device {
-        Some(name) => AudioInput::open_matching(name)?,
-        None => AudioInput::open(&[])?,
+    // A missing microphone falls back to the default one. A released
+    // microphone opens only while a dictation records.
+    let microphone = device.or(settings.microphone.as_deref());
+    let release_while_idle = settings.release_microphone_while_idle;
+    let mut input = if release_while_idle {
+        RecoveringAudioInput::closed(None, 0, microphone)
+    } else {
+        RecoveringAudioInput::open(None, 0, microphone)
     };
     let binding = crate::linux_input::LinuxHotkey::from(&settings.dictation_hotkey);
     let hotkey_label = binding.label();
     let toggle = settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
     let paste_with_shift = settings.paste_with_shift;
-    let hotkey =
-        LinuxHotkeyMonitor::start(binding, settings.double_tap_lock, toggle, hotkey_status)?;
+    let options = crate::linux_input::HotkeyOptions {
+        double_tap: settings.double_tap_lock,
+        // Double-tap-only needs the double-tap window and a non-modifier key.
+        double_tap_only: settings.double_tap_lock
+            && settings.double_tap_only
+            && settings.dictation_hotkey.key.is_some(),
+        toggle,
+        paste_last: settings
+            .paste_last_hotkey
+            .as_ref()
+            .map(crate::linux_input::LinuxHotkey::from),
+        voice_action: settings
+            .voice_action
+            .enabled
+            .then(|| crate::linux_input::LinuxHotkey::from(&settings.edit_hotkey)),
+    };
+    let hotkey = LinuxHotkeyMonitor::start_with(binding, options, hotkey_status)?;
     let wayland_modifiers = hotkey.wayland_modifiers();
-    let indicator = LinuxIndicator::new();
-    let (jobs, job_receiver) = mpsc::sync_channel::<Job>(2);
+    let indicator = LinuxIndicator::new(settings.indicator_position);
+    let suppressor =
+        crate::linux_audio_control::AudioSuppressor::new(settings.recording_audio_behavior);
+    let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
     output.worker = Some(thread::spawn(move || {
         let mut paster = LinuxPaster::new(worker_stop.clone(), paste_with_shift, wayland_modifiers);
+        let mut last_dictation: Option<String> = None;
         while let Ok(job) = job_receiver.recv() {
             if worker_stop.load(Ordering::Acquire) {
                 break;
             }
+            let (job, kind) = match job {
+                OutputJob::Dictation(job) => (job, OutputKind::Dictation),
+                OutputJob::VoiceAction(job) => (job, OutputKind::VoiceAction),
+                OutputJob::PasteLast => {
+                    let result = last_dictation
+                        .clone()
+                        .ok_or_else(|| eyre!("there is no completed dictation to paste"))
+                        .and_then(|text| {
+                            paster
+                                .as_mut()
+                                .map_err(|error| eyre!("{error:#}"))?
+                                .paste(&text)
+                        })
+                        .map(|()| String::new())
+                        .map_err(|error| format!("{error:#}"));
+                    if result_sender.send((OutputKind::PasteLast, result)).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let started = Instant::now();
             let result = (|| -> Result<String> {
                 let transcribed = job.transcript.wait().map_err(|error| eyre!(error))?;
+                let inference_ms = started.elapsed().as_millis() as u64;
                 tracing::info!(
                     source = transcribed.source.label(),
                     finish_ms = transcribed.finish_ms,
@@ -101,11 +224,11 @@ pub fn run(
                 if text.is_empty() {
                     return Err(eyre!("transcription was empty"));
                 }
-                paster
-                    .as_mut()
-                    .map_err(|error| eyre!("{error:#}"))?
-                    .paste(&text)?;
-                Ok(text)
+                let paster = paster.as_mut().map_err(|error| eyre!("{error:#}"))?;
+                if kind == OutputKind::VoiceAction {
+                    return run_voice_action(&text, paster);
+                }
+                output_settings.deliver(text, paster, job.audio_ms, inference_ms, started)
             })()
             .map_err(|error| format!("{error:#}"));
             tracing::info!(
@@ -113,24 +236,45 @@ pub fn run(
                 elapsed_ms = started.elapsed().as_millis(),
                 "completed Linux dictation job"
             );
-            if result_sender.send(result).is_err() {
+            if let Ok(text) = &result
+                && kind == OutputKind::Dictation
+            {
+                last_dictation = Some(text.clone());
+            }
+            if result_sender.send((kind, result)).is_err() {
                 break;
             }
         }
     }));
 
     let mut events = EventLog::create(event_path)?;
-    let mut capture = DictationCapture::new(input.sample_rate);
+    let mut audio_ready = input.is_open();
+    // A released microphone's sample rate is unknown until it opens; the
+    // first chunk replaces this placeholder capture.
+    let mut capture = DictationCapture::new(if audio_ready {
+        input.sample_rate()
+    } else {
+        16_000
+    });
+    let mut device_label = if audio_ready {
+        input.device_name().to_string()
+    } else {
+        microphone.unwrap_or("microphone").to_string()
+    };
+    // A press that arrived while the released microphone was opening;
+    // recording starts at its first chunk.
+    let mut start_pending = false;
+    // The recording, or the pending one, is a Voice Action instruction.
+    let mut recording_voice = false;
     let mut captured_through = CaptureInstant::ZERO;
     let mut finishing: Option<Finishing> = None;
     let mut pending = 0_usize;
     events.emit(&VoiceEvent::SessionStarted {
         timestamp_ms: now_ms(),
     })?;
-    emit_state(&mut events, VoiceState::Listening, &input.device_name)?;
+    emit_state(&mut events, VoiceState::Listening, &device_label)?;
     println!(
-        "HEX dictation is ready on {}. Hold {} to dictate; Ctrl-C stops.",
-        input.device_name, hotkey_label
+        "HEX dictation is ready on {device_label}. Hold {hotkey_label} to dictate; Ctrl-C stops."
     );
 
     while !shutdown.load(Ordering::Relaxed) {
@@ -144,7 +288,9 @@ pub fn run(
                 || Instant::now() >= release.deadline)
         {
             let ended_at = release.ended_at;
+            let voice = release.voice;
             finishing = None;
+            recording_voice = false;
             submit_capture(
                 &mut capture,
                 ended_at,
@@ -152,40 +298,106 @@ pub fn run(
                 &jobs,
                 &mut events,
                 &mut pending,
+                voice,
             )?;
+            suppressor.restore();
+            if release_while_idle {
+                input.close();
+                audio_ready = false;
+            }
             emit_state(
                 &mut events,
                 active_state(capture.is_recording(), pending),
-                &input.device_name,
+                &device_label,
             )?;
         }
         while finishing.is_none()
             && let Ok(action) = hotkey.events.try_recv()
         {
             match action {
-                HotkeyEvent::Start if !capture.is_recording() => {
-                    start_capture(&mut capture, captured_through, feedback::play);
-                    stream_when_due(&mut capture, &engine, toggle);
+                HotkeyEvent::Start | HotkeyEvent::VoiceStart
+                    if !capture.is_recording() && !start_pending =>
+                {
+                    recording_voice = action == HotkeyEvent::VoiceStart;
+                    if audio_ready {
+                        // An instruction plays no start tone, as on Windows.
+                        start_capture(&mut capture, captured_through, |tone| {
+                            if !recording_voice {
+                                feedback::play(tone);
+                            }
+                        });
+                        stream_when_due(&mut capture, &engine, toggle);
+                    } else if release_while_idle {
+                        start_pending = true;
+                        input.request_open();
+                    } else {
+                        continue;
+                    }
+                    suppressor.suppress();
                     events.dictation(DictationPhase::Started, "")?;
-                    emit_state(&mut events, VoiceState::Dictating, &input.device_name)?;
+                    emit_state(&mut events, VoiceState::Dictating, &device_label)?;
                 }
-                HotkeyEvent::Finish if capture.is_recording() => {
-                    finishing = Some(begin_finishing(&capture, captured_through));
+                HotkeyEvent::Finish | HotkeyEvent::VoiceFinish | HotkeyEvent::Cancel
+                    if start_pending =>
+                {
+                    recording_voice = false;
+                    // Released before the opening microphone produced audio:
+                    // nothing was captured.
+                    start_pending = false;
+                    suppressor.restore();
+                    input.close();
+                    audio_ready = false;
+                    events.dictation(
+                        if action == HotkeyEvent::Cancel {
+                            DictationPhase::Cancelled
+                        } else {
+                            DictationPhase::Discarded
+                        },
+                        "",
+                    )?;
+                    emit_state(&mut events, active_state(false, pending), &device_label)?;
+                }
+                HotkeyEvent::Finish if capture.is_recording() && !recording_voice => {
+                    finishing = Some(begin_finishing(&capture, captured_through, false));
+                }
+                HotkeyEvent::VoiceFinish if capture.is_recording() && recording_voice => {
+                    finishing = Some(begin_finishing(&capture, captured_through, true));
+                }
+                HotkeyEvent::PasteLast if !capture.is_recording() => {
+                    match jobs.try_send(OutputJob::PasteLast) {
+                        Ok(()) | Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Disconnected(_)) => {
+                            return Err(eyre!("dictation worker is unavailable"));
+                        }
+                    }
                 }
                 HotkeyEvent::Cancel if capture.is_recording() => {
+                    recording_voice = false;
                     capture.cancel();
                     feedback::play(Tone::Cancel);
+                    suppressor.restore();
+                    if release_while_idle {
+                        input.close();
+                        audio_ready = false;
+                    }
                     events.dictation(DictationPhase::Cancelled, "")?;
                     emit_state(
                         &mut events,
                         active_state(capture.is_recording(), pending),
-                        &input.device_name,
+                        &device_label,
                     )?;
                 }
                 _ => {}
             }
         }
-        while let Ok(result) = results.try_recv() {
+        while let Ok((kind, result)) = results.try_recv() {
+            // A repeated paste has no transcript and is not pending work.
+            if kind == OutputKind::PasteLast {
+                if let Err(error) = result {
+                    events.dictation(DictationPhase::Failed(error), "")?;
+                }
+                continue;
+            }
             pending = pending.saturating_sub(1);
             match result {
                 Ok(text) => {
@@ -202,27 +414,79 @@ pub fn run(
             emit_state(
                 &mut events,
                 active_state(capture.is_recording(), pending),
-                &input.device_name,
+                &device_label,
             )?;
         }
 
-        indicator.update(capture.is_recording(), pending);
-        let chunk = match input.recv_timeout(UPDATE_INTERVAL) {
-            AudioInputEvent::Chunk {
+        indicator.update(capture.is_recording() || start_pending, pending);
+        match input.recv_timeout(UPDATE_INTERVAL, !capture.is_recording()) {
+            RecoveringAudioInputEvent::Chunk {
                 samples,
                 captured_through: chunk_captured_through,
             } => {
                 captured_through = chunk_captured_through;
-                samples
+                if !audio_ready {
+                    capture = DictationCapture::new(input.sample_rate());
+                    audio_ready = true;
+                    device_label = input.device_name().to_string();
+                    if start_pending {
+                        // The on-demand open finished while the shortcut is
+                        // held: recording starts here, without pre-roll.
+                        start_pending = false;
+                        start_capture(&mut capture, captured_through, |tone| {
+                            if !recording_voice {
+                                feedback::play(tone);
+                            }
+                        });
+                    }
+                }
+                capture.ingest(&samples, captured_through);
+                capture.become_intentional(captured_through);
+                stream_when_due(&mut capture, &engine, toggle);
             }
-            AudioInputEvent::Timeout => continue,
-            AudioInputEvent::StreamFailed(error) => {
-                return Err(eyre!("microphone stream stopped: {error}"));
+            RecoveringAudioInputEvent::Timeout => {}
+            RecoveringAudioInputEvent::Interrupted => {
+                // A release still in its tail finishes with the audio it has.
+                if let Some(release) = &mut finishing {
+                    release.deadline = Instant::now();
+                }
+                audio_ready = false;
+                if capture.is_recording() && finishing.is_none() {
+                    recording_voice = false;
+                    capture.cancel();
+                    feedback::play(Tone::Cancel);
+                    suppressor.restore();
+                    events.dictation(DictationPhase::Cancelled, "")?;
+                }
+                events.dictation(
+                    DictationPhase::Failed("microphone stream interrupted; reopening".into()),
+                    "",
+                )?;
+                emit_state(
+                    &mut events,
+                    active_state(capture.is_recording(), pending),
+                    &device_label,
+                )?;
             }
-        };
-        capture.ingest(&chunk, captured_through);
-        capture.become_intentional(captured_through);
-        stream_when_due(&mut capture, &engine, toggle);
+            RecoveringAudioInputEvent::Reopened => {
+                audio_ready = false;
+                device_label = input.device_name().to_string();
+            }
+            RecoveringAudioInputEvent::OpenFailed(error) => {
+                if !release_while_idle {
+                    return Err(eyre!("could not open the microphone: {error}"));
+                }
+                // An on-demand open failed (device busy or unplugged): report
+                // it and stay released rather than stopping the listener.
+                start_pending = false;
+                suppressor.restore();
+                events.dictation(
+                    DictationPhase::Failed(format!("could not open microphone: {error}")),
+                    "",
+                )?;
+                emit_state(&mut events, active_state(false, pending), &device_label)?;
+            }
+        }
     }
 
     if capture.is_recording() {
@@ -230,7 +494,8 @@ pub fn run(
         events.dictation(DictationPhase::Cancelled, "")?;
     }
     indicator.update(false, pending);
-    emit_state(&mut events, VoiceState::Stopping, &input.device_name)?;
+    suppressor.restore();
+    emit_state(&mut events, VoiceState::Stopping, &device_label)?;
     output.stop.store(true, Ordering::Release);
     drop(hotkey);
     drop(input);
@@ -246,6 +511,27 @@ pub fn run(
     }
     println!("Stopped.");
     Ok(())
+}
+
+/// Pairs the spoken instruction with the selected text, asks OpenCode with
+/// the Voice Action settings, and pastes the reply.
+fn run_voice_action(instruction: &str, paster: &mut LinuxPaster) -> Result<String> {
+    let context = crate::linux_context::capture();
+    let selected = paster.selected_text();
+    let processed = crate::dictation_processor::process_voice_action_cancellable(
+        instruction,
+        selected.as_deref(),
+        &context,
+        &AtomicBool::new(false),
+    );
+    if let Some(error) = processed
+        .observation
+        .and_then(|observation| observation.fallback)
+    {
+        return Err(eyre!(error));
+    }
+    paster.paste(&processed.text)?;
+    Ok(processed.text)
 }
 
 /// Applies the saved sound settings and preloads the tones.
@@ -274,10 +560,11 @@ fn stream_when_due(capture: &mut DictationCapture, engine: &TranscriptionEngine,
     }
 }
 
-fn begin_finishing(capture: &DictationCapture, ended_at: CaptureInstant) -> Finishing {
+fn begin_finishing(capture: &DictationCapture, ended_at: CaptureInstant, voice: bool) -> Finishing {
     let now = Instant::now();
     Finishing {
         ended_at,
+        voice,
         // A short tap is discarded on its release alone and needs no tail.
         deadline: if capture.would_transcribe(ended_at) {
             now + POST_RELEASE_TAIL + TAIL_STALL_GRACE
@@ -291,9 +578,10 @@ fn submit_capture(
     capture: &mut DictationCapture,
     ended_at: CaptureInstant,
     engine: &TranscriptionEngine,
-    jobs: &SyncSender<Job>,
+    jobs: &SyncSender<OutputJob>,
     events: &mut EventLog,
     pending: &mut usize,
+    voice: bool,
 ) -> Result<()> {
     match capture.finish_with_tail(ended_at, POST_RELEASE_TAIL) {
         Finish::Discard => events.dictation(DictationPhase::Discarded, "")?,
@@ -306,6 +594,11 @@ fn submit_capture(
             let job = Job {
                 transcript: engine.finish(clip.take_stream(), clip.into_transcription_samples())?,
                 audio_ms,
+            };
+            let job = if voice {
+                OutputJob::VoiceAction(job)
+            } else {
+                OutputJob::Dictation(job)
             };
             match jobs.try_send(job) {
                 Ok(()) => {
@@ -439,7 +732,11 @@ mod tests {
         let released = record(&mut capture, &engine, false, 2);
         let mut pending = 0;
         // The release waits for its tail before it is submitted.
-        let finishing = begin_finishing(&capture, released.checked_sub(POST_RELEASE_TAIL).unwrap());
+        let finishing = begin_finishing(
+            &capture,
+            released.checked_sub(POST_RELEASE_TAIL).unwrap(),
+            false,
+        );
         assert!(finishing.deadline > Instant::now());
         submit_capture(
             &mut capture,
@@ -448,10 +745,13 @@ mod tests {
             &jobs,
             &mut events,
             &mut pending,
+            false,
         )
         .unwrap();
         assert_eq!(pending, 1);
-        let job = queued.try_recv().unwrap();
+        let Ok(OutputJob::Dictation(job)) = queued.try_recv() else {
+            panic!("a dictation job");
+        };
         assert_eq!(job.audio_ms, 2_000);
         let received = commands.try_iter().collect::<Vec<_>>();
         let fed: usize = received
@@ -495,7 +795,7 @@ mod tests {
         start_capture(&mut short, start, |_| {});
         stream_when_due(&mut short, &engine, true);
         short.ingest(&[0.1; 1_600], start + Duration::from_millis(100));
-        let finishing = begin_finishing(&short, start + Duration::from_millis(100));
+        let finishing = begin_finishing(&short, start + Duration::from_millis(100), false);
         assert!(
             finishing.deadline <= Instant::now(),
             "a short tap needs no tail"
@@ -507,6 +807,7 @@ mod tests {
             &jobs,
             &mut events,
             &mut pending,
+            false,
         )
         .unwrap();
 
@@ -537,6 +838,7 @@ mod tests {
             &jobs,
             &mut events,
             &mut pending,
+            false,
         )
         .unwrap();
         assert!(queued.try_recv().is_ok());

@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, TryLockError, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -160,6 +160,15 @@ pub struct HistoryStore {
     retention: HistoryRetention,
     prune_pending: bool,
     prune_error_reported: bool,
+    /// The file as this store last read or wrote it. Linux runs the
+    /// listener and the History pane in separate processes, so each store
+    /// rereads the file when another process changed it.
+    file_state: Option<(SystemTime, u64)>,
+}
+
+fn file_state(path: &std::path::Path) -> Option<(SystemTime, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
 }
 
 impl HistoryStore {
@@ -174,7 +183,9 @@ impl HistoryStore {
             retention,
             prune_pending: false,
             prune_error_reported: false,
+            file_state: None,
         };
+        store.file_state = file_state(&store.path);
         match fs::read(&store.path) {
             Ok(bytes) => match serde_json::from_slice::<LoadedHistory>(&bytes) {
                 Ok(loaded) if loaded.version == VERSION => {
@@ -201,6 +212,38 @@ impl HistoryStore {
         }
         store.expire(now_ms);
         store
+    }
+
+    /// Rereads the file if another process wrote it since this store last
+    /// read or wrote it. An unreadable file keeps the entries in memory.
+    pub fn sync(&mut self) {
+        let current = file_state(&self.path);
+        if current == self.file_state {
+            return;
+        }
+        self.file_state = current;
+        let loaded = match fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice::<LoadedHistory>(&bytes)
+                .ok()
+                .filter(|loaded| loaded.version == VERSION),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Some(LoadedHistory {
+                version: VERSION,
+                next_id: self.next_id,
+                entries: Vec::new(),
+            }),
+            Err(_) => None,
+        };
+        let Some(loaded) = loaded else {
+            tracing::warn!(path = %self.path.display(), "could not reread the changed history");
+            return;
+        };
+        let max_entry_id = loaded.entries.iter().map(|entry| entry.id).max();
+        self.next_id = self
+            .next_id
+            .max(loaded.next_id)
+            .max(max_entry_id.map_or(1, |id| id.saturating_add(1)));
+        self.entries = loaded.entries;
+        self.entries.sort_by_key(|entry| entry.id);
     }
 
     /// Record one successful result. Returns the stable entry ID, or `None`
@@ -351,6 +394,7 @@ impl HistoryStore {
             file.sync_all()?;
         }
         fs::rename(&temporary, &self.path)?;
+        self.file_state = file_state(&self.path);
         self.prune_pending = false;
         self.prune_error_reported = false;
         Ok(())
@@ -413,32 +457,34 @@ impl History {
     }
 
     pub fn record(&self, draft: HistoryDraft) -> io::Result<Option<u64>> {
-        self.locked().record(draft, now_ms())
+        self.synced().record(draft, now_ms())
     }
 
     pub fn delete(&self, id: u64) -> io::Result<bool> {
-        self.locked().delete(id)
+        self.synced().delete(id)
     }
 
     pub fn clear(&self) -> io::Result<()> {
-        self.locked().clear()
+        self.synced().clear()
     }
 
     pub fn set_retention(&self, retention: HistoryRetention) -> io::Result<()> {
-        self.locked().set_retention(retention, now_ms())
+        self.synced().set_retention(retention, now_ms())
     }
 
     /// Bounded snapshot of matching entries, newest first.
     pub fn search(&self, query: &str) -> Vec<HistoryEntry> {
-        self.locked()
+        self.synced()
             .search(query, now_ms())
             .into_iter()
             .cloned()
             .collect()
     }
 
-    fn locked(&self) -> std::sync::MutexGuard<'_, HistoryStore> {
-        self.store.lock().unwrap_or_else(|error| error.into_inner())
+    fn synced(&self) -> std::sync::MutexGuard<'_, HistoryStore> {
+        let mut store = self.store.lock().unwrap_or_else(|error| error.into_inner());
+        store.sync();
+        store
     }
 }
 
@@ -488,6 +534,25 @@ mod tests {
             inference_ms: 80,
             total_ms: 1_100,
         }
+    }
+
+    #[test]
+    fn stores_in_two_processes_see_each_others_writes() {
+        let path = temp_path("two-processes");
+        let mut listener = HistoryStore::open(path.clone(), HistoryRetention::Week, 1_000);
+        let mut window = HistoryStore::open(path.clone(), HistoryRetention::Week, 1_000);
+        let first = listener.record(draft("first"), 1_000).unwrap().unwrap();
+
+        window.sync();
+        assert!(window.entry(first).is_some());
+        window.delete(first).unwrap();
+
+        listener.sync();
+        let second = listener.record(draft("second"), 2_000).unwrap().unwrap();
+        assert!(second > first);
+        window.sync();
+        assert!(window.entry(first).is_none(), "a deletion is never undone");
+        assert!(window.entry(second).is_some());
     }
 
     #[test]
@@ -582,7 +647,7 @@ mod tests {
             clock.store(now, Ordering::SeqCst);
             while ticked.recv_timeout(Duration::from_secs(2)).unwrap() != now {}
             // The clock is sampled under the lock; acquiring it waits for that prune.
-            drop(history.locked());
+            drop(history.synced());
         };
         fs::OpenOptions::new()
             .write(true)
@@ -795,7 +860,7 @@ mod tests {
 
     #[test]
     fn truncation_respects_character_boundaries() {
-        let text = "é".repeat(MAX_TEXT_BYTES);
+        let text = "Ã©".repeat(MAX_TEXT_BYTES);
         let truncated = truncated(&text, MAX_TEXT_BYTES);
         assert!(truncated.len() <= MAX_TEXT_BYTES);
         assert!(text.starts_with(&truncated));

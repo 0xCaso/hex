@@ -1,6 +1,6 @@
 //! Applications a dictation mode can activate for. Each OS lists them the
 //! way its mode matcher identifies the focused application: macOS by the
-//! bundle name Finder shows, Windows by the executable name.
+//! bundle name Finder shows, Windows and Linux by the executable name.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,23 +16,9 @@ mod platform;
 #[path = "application_catalog/windows.rs"]
 mod platform;
 
-/// Linux dictation has no per-application modes yet, so it lists none.
 #[cfg(target_os = "linux")]
-mod platform {
-    use std::path::Path;
-
-    use color_eyre::eyre::{Result, eyre};
-
-    use super::InstalledApplication;
-
-    pub(super) fn applications() -> Vec<InstalledApplication> {
-        Vec::new()
-    }
-
-    pub(super) fn metadata(path: &Path) -> Result<InstalledApplication> {
-        Err(eyre!("{} cannot activate a Linux mode", path.display()))
-    }
-}
+#[path = "application_catalog/linux.rs"]
+mod platform;
 
 #[derive(Clone, Debug)]
 pub struct InstalledApplication {

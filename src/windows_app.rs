@@ -29,6 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::app_settings::{AppSettings, IndicatorPosition};
 use crate::desktop_activity::DesktopActivity;
+use crate::desktop_i18n::{tr, tr_fill};
 use crate::events::{EventReader, TranscriptPhase, VoiceEvent};
 use crate::history::History;
 
@@ -54,8 +55,7 @@ pub(crate) struct WindowsDesktopHost {
     history: Option<History>,
     last_dictation: Arc<Mutex<Option<String>>>,
     indicator: crate::windows_indicator::WindowsIndicatorSender,
-    replacements: Arc<RwLock<crate::text_replacements::ReplacementSet>>,
-    mode_runtime: Arc<RwLock<crate::windows_dictation::WindowsModeRuntime>>,
+    mode_runtime: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
     transformations: Arc<crate::personal_commands::TransformationClient>,
     personal_commands: Option<crate::personal_commands::PersonalCommands>,
     personal_commands_checked_at: Instant,
@@ -87,7 +87,10 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
         Ok(settings) => (settings, None),
         Err(error) => (
             AppSettings::default(),
-            Some(format!("Could not load settings: {error:#}")),
+            Some(tr_fill(
+                "Could not load settings: {}",
+                &format!("{error:#}"),
+            )),
         ),
     };
     let listen_on_launch = settings.enable_on_launch;
@@ -250,9 +253,9 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
 
 fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     let menu = Menu::new();
-    let show = MenuItem::with_id("show", "Show Hex", true, None);
-    let toggle = MenuItem::with_id("toggle", "Enable / Disable Hex", true, None);
-    let quit = MenuItem::with_id("quit", "Quit Hex", true, None);
+    let show = MenuItem::with_id("show", tr("Show Hex"), true, None);
+    let toggle = MenuItem::with_id("toggle", tr("Enable / Disable Hex"), true, None);
+    let quit = MenuItem::with_id("quit", tr("Quit Hex"), true, None);
     menu.append(&show)?;
     menu.append(&toggle)?;
     menu.append(&quit)?;
@@ -283,7 +286,7 @@ fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     }));
 
     Ok(TrayIconBuilder::new()
-        .with_tooltip("Hex Dictation")
+        .with_tooltip(tr("Hex Dictation"))
         .with_icon(tray_icon()?)
         .with_menu(Box::new(menu))
         // Left click shows the window (handled above); only right click
@@ -411,11 +414,8 @@ impl WindowsDesktopHost {
                 None
             }
         };
-        let replacements = Arc::new(RwLock::new(crate::text_replacements::ReplacementSet::new(
-            &settings.dictation_processing.default_mode.replacements,
-        )));
         let mode_runtime = Arc::new(RwLock::new(
-            crate::windows_dictation::WindowsModeRuntime::from_settings(&settings),
+            crate::dictation_modes::ModeRuntime::from_settings(&settings),
         ));
         let voice_action_model = Arc::new(RwLock::new(voice_action_model(&settings)));
         let mut host = Self {
@@ -435,7 +435,6 @@ impl WindowsDesktopHost {
             history,
             last_dictation: Arc::new(Mutex::new(None)),
             indicator,
-            replacements,
             mode_runtime,
             transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
             personal_commands: None,
@@ -477,7 +476,6 @@ impl WindowsDesktopHost {
             history: self.history.clone(),
             last_dictation: self.last_dictation.clone(),
             indicator: Some(self.indicator.clone()),
-            replacements: self.replacements.clone(),
             mode_runtime: self.mode_runtime.clone(),
             transformations: self.transformations.clone(),
             voice_action_model: self.voice_action_model.clone(),
@@ -502,7 +500,7 @@ impl WindowsDesktopHost {
             }
             Err(error) => {
                 self.status = "Couldn't enable".into();
-                self.error = Some(format!("Could not start listener: {error}"));
+                self.error = Some(tr_fill("Could not start listener: {}", &error.to_string()));
                 self.listener_stop
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -552,7 +550,7 @@ impl WindowsDesktopHost {
             return Err(eyre!("no installed Windows update is ready"));
         };
         crate::windows_updater::relaunch_at(&executable).inspect_err(|error| {
-            self.error = Some(format!("Could not restart Hex: {error:#}"));
+            self.error = Some(tr_fill("Could not restart Hex: {}", &format!("{error:#}")));
         })?;
         self.stop();
         Ok(())
@@ -573,25 +571,13 @@ impl WindowsDesktopHost {
     pub(crate) fn apply_settings(&mut self, settings: &AppSettings) {
         let previous = std::mem::replace(&mut self.settings, settings.clone());
         let current = settings;
-        let processing = &current.dictation_processing;
-        if previous.dictation_processing.default_mode.replacements
-            != processing.default_mode.replacements
-        {
-            *self
-                .replacements
-                .write()
-                .unwrap_or_else(|error| error.into_inner()) =
-                crate::text_replacements::ReplacementSet::new(
-                    &processing.default_mode.replacements,
-                );
-        }
         let modes_changed = previous.dictation_processing != current.dictation_processing;
         if modes_changed {
             *self
                 .mode_runtime
                 .write()
                 .unwrap_or_else(|error| error.into_inner()) =
-                crate::windows_dictation::WindowsModeRuntime::from_settings(current);
+                crate::dictation_modes::ModeRuntime::from_settings(current);
         }
         if previous.voice_action != current.voice_action {
             *self

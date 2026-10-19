@@ -1,4 +1,6 @@
-//! The service-owned, focus-free Wayland recording HUD. Settings never owns this runtime.
+//! The service-owned, focus-free recording HUD: a layer-shell surface on
+//! Wayland, an override-redirect popup on X11. Settings never owns this
+//! runtime.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -8,9 +10,12 @@ use color_eyre::eyre::Result;
 use gtk::prelude::*;
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
+use crate::app_settings::IndicatorPosition;
 use crate::linux_session::LinuxSession;
 
 const TICK: Duration = Duration::from_millis(16);
+/// Distance between the HUD and the screen edge it sits on.
+const EDGE_MARGIN: i32 = 16;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum IndicatorState {
@@ -54,6 +59,7 @@ impl IndicatorSlot {
 #[derive(Default)]
 struct State {
     indicator: IndicatorSlot,
+    position: IndicatorPosition,
     initialized: bool,
     limitation: Option<String>,
 }
@@ -131,14 +137,14 @@ pub(crate) struct LinuxIndicator {
 }
 
 impl LinuxIndicator {
-    pub(crate) fn new() -> Self {
-        let generation = LinuxSession::detect().is_wayland().then(|| {
-            runtime()
+    pub(crate) fn new(position: IndicatorPosition) -> Self {
+        let generation = (position != IndicatorPosition::Hidden).then(|| {
+            let mut state = runtime()
                 .state
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .indicator
-                .acquire()
+                .unwrap_or_else(|error| error.into_inner());
+            state.position = position;
+            state.indicator.acquire()
         });
         Self { generation }
     }
@@ -162,8 +168,9 @@ impl Drop for LinuxIndicator {
 
 fn run(state: &Mutex<State>, stop: &AtomicBool) -> Result<()> {
     gtk::init()?;
-    let indicator = if gtk_layer_shell::is_supported() {
-        Some(create_indicator()?)
+    let layer_shell = gtk_layer_shell::is_supported();
+    let indicator = if layer_shell || !LinuxSession::detect().is_wayland() {
+        Some(create_indicator(layer_shell)?)
     } else {
         None
     };
@@ -179,22 +186,29 @@ fn run(state: &Mutex<State>, stop: &AtomicBool) -> Result<()> {
     let context = gtk::glib::MainContext::default();
     let mut displayed = IndicatorState::Hidden;
     while !stop.load(Ordering::Acquire) {
-        let desired = state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .indicator
-            .state;
+        let (desired, position) = {
+            let state = state.lock().unwrap_or_else(|error| error.into_inner());
+            (state.indicator.state, state.position)
+        };
         if desired != displayed {
             if let Some((window, label)) = &indicator {
                 match desired {
                     IndicatorState::Hidden => window.hide(),
                     IndicatorState::Recording | IndicatorState::Processing => {
-                        label.set_text(if desired == IndicatorState::Recording {
-                            "Recording"
-                        } else {
-                            "Transcribing"
-                        });
+                        label.set_text(crate::desktop_i18n::tr(
+                            if desired == IndicatorState::Recording {
+                                "Recording"
+                            } else {
+                                "Transcribing"
+                            },
+                        ));
+                        if displayed == IndicatorState::Hidden {
+                            place_indicator(window, layer_shell, position);
+                        }
                         window.show_all();
+                        if !layer_shell {
+                            place_indicator(window, layer_shell, position);
+                        }
                     }
                 }
             }
@@ -213,8 +227,39 @@ fn run(state: &Mutex<State>, stop: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-fn create_indicator() -> Result<(gtk::Window, gtk::Label)> {
-    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+/// Centers the HUD on the top or bottom edge of the primary monitor.
+fn place_indicator(window: &gtk::Window, layer_shell: bool, position: IndicatorPosition) {
+    let bottom = position == IndicatorPosition::Bottom;
+    if layer_shell {
+        window.set_anchor(Edge::Top, !bottom);
+        window.set_anchor(Edge::Bottom, bottom);
+        window.set_layer_shell_margin(if bottom { Edge::Bottom } else { Edge::Top }, EDGE_MARGIN);
+        return;
+    }
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let Some(monitor) = display.primary_monitor().or_else(|| display.monitor(0)) else {
+        return;
+    };
+    let area = monitor.workarea();
+    let (width, height) = window.size();
+    let y = if bottom {
+        area.y() + area.height() - height - EDGE_MARGIN
+    } else {
+        area.y() + EDGE_MARGIN
+    };
+    window.move_(area.x() + (area.width() - width) / 2, y);
+}
+
+fn create_indicator(layer_shell: bool) -> Result<(gtk::Window, gtk::Label)> {
+    // An X11 popup is override-redirect: it never takes focus and stays
+    // above other windows.
+    let window = gtk::Window::new(if layer_shell {
+        gtk::WindowType::Toplevel
+    } else {
+        gtk::WindowType::Popup
+    });
     window.set_decorated(false);
     window.set_accept_focus(false);
     window.set_focus_on_map(false);
@@ -226,12 +271,12 @@ fn create_indicator() -> Result<(gtk::Window, gtk::Label)> {
     {
         window.set_visual(Some(&visual));
     }
-    window.init_layer_shell();
-    window.set_layer(Layer::Overlay);
-    window.set_keyboard_mode(KeyboardMode::None);
-    window.set_exclusive_zone(0);
-    window.set_anchor(Edge::Top, true);
-    window.set_layer_shell_margin(Edge::Top, 16);
+    if layer_shell {
+        window.init_layer_shell();
+        window.set_layer(Layer::Overlay);
+        window.set_keyboard_mode(KeyboardMode::None);
+        window.set_exclusive_zone(0);
+    }
     window.style_context().add_class("hex-hud");
     let css = gtk::CssProvider::new();
     css.load_from_data(b"window.hex-hud { background: transparent; } .hex-hud label { background: #171717; color: #eeeeee; border: 1px solid #292929; border-radius: 18px; padding: 9px 18px; font: 600 13px sans-serif; }")?;

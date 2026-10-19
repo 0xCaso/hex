@@ -110,6 +110,10 @@ pub fn run(shutdown: &'static AtomicBool) -> Result<()> {
                 device.as_deref(),
                 shutdown,
                 &settings,
+                crate::linux_dictation::DictationOutput::from_settings(
+                    &settings,
+                    crate::history::History::open_default(settings.history_retention).ok(),
+                ),
                 None,
                 Default::default(),
             )

@@ -5,26 +5,26 @@
 use super::*;
 use crate::desktop_host::{DesktopAction, DesktopShortcut, DesktopUpdateStatus};
 use crate::linux_input::LinuxHotkey;
-use crate::linux_service::{Client, Request};
+use crate::linux_service::{Client, Request, ShortcutTarget};
 
 pub(super) const CAPABILITIES: Capabilities = Capabilities {
     meetings: false,
     commands: false,
     hud_lab: false,
-    modes: false,
-    voice_action: false,
-    history: false,
+    modes: true,
+    voice_action: true,
+    history: true,
     permissions: false,
     dock_icon: false,
     launch_at_login: false,
     listener_control: true,
-    paste_last: false,
-    recording_audio: false,
-    release_microphone: false,
-    double_tap_only: false,
+    paste_last: true,
+    recording_audio: true,
+    release_microphone: true,
+    double_tap_only: true,
     modifier_sides: false,
-    indicator_position: false,
-    interface_language: false,
+    indicator_position: true,
+    interface_language: true,
     software_updates: true,
     terminal_paste: true,
 };
@@ -37,6 +37,18 @@ pub(super) fn records_key_events() -> bool {
 }
 
 /// The service checks for updates on its own schedule.
+/// How the Modes pane describes website rules; `None` hides them where
+/// the listener can't read the browser's address.
+pub(super) const WEB_PAGES_DESCRIPTION: Option<&str> = None;
+
+/// Whether the listener knows which application is frontmost.
+pub(super) fn focused_application_known() -> bool {
+    !crate::linux_session::LinuxSession::detect().is_wayland()
+}
+
+/// The Modes application picker's button for an app it doesn't list.
+pub(super) const CHOOSE_APPLICATION_FILE: &str = "Choose a file…";
+
 pub(super) const MANUAL_UPDATE_CHECK: bool = false;
 
 pub(super) struct Args;
@@ -46,8 +58,19 @@ pub(super) struct Platform {
     /// What the window last showed of the service, to redraw only on change.
     shown: Option<(crate::desktop_host::DesktopSnapshot, Option<String>)>,
     capture: CapturePhase,
+    /// The shortcut the service is recording or saving.
+    capture_target: ShortcutTarget,
     /// The model the service is preparing, and since when.
     preparing: Option<(crate::transcription_models::TranscriptionModelId, Instant)>,
+}
+
+/// The service registers every shortcut.
+fn shortcut_target(kind: HotkeyKind) -> Option<ShortcutTarget> {
+    match kind {
+        HotkeyKind::Dictation => Some(ShortcutTarget::Dictation),
+        HotkeyKind::PasteLast => Some(ShortcutTarget::PasteLast),
+        HotkeyKind::Edit => Some(ShortcutTarget::VoiceAction),
+    }
 }
 
 /// The service's side of a shortcut change the window asked for.
@@ -72,6 +95,7 @@ impl Platform {
             client: Client::new(),
             shown: None,
             capture: CapturePhase::Idle,
+            capture_target: ShortcutTarget::Dictation,
             preparing: None,
         }
     }
@@ -79,7 +103,15 @@ impl Platform {
 
 /// Opens the shared window in the Settings process.
 pub fn open(event_path: PathBuf, cx: &mut App) -> gpui::Result<WindowHandle<AppWindow>> {
-    open_new(event_path, None, None, Args, cx)
+    // The service records dictations; this process reads and edits the
+    // same file, rereading it whenever the service wrote.
+    let retention = AppSettings::load()
+        .map(|settings| settings.history_retention)
+        .unwrap_or_default();
+    let history = crate::history::History::open_default(retention)
+        .inspect_err(|error| tracing::warn!(%error, "could not open retained history"))
+        .ok();
+    open_new(event_path, history, None, Args, cx)
 }
 
 pub(super) fn window_options(options: WindowOptions) -> WindowOptions {
@@ -123,7 +155,7 @@ pub(super) fn hotkey_modifiers(modifiers: GpuiModifiers) -> HotkeyModifiers {
 
 pub(super) fn hotkey_key(key: &str) -> std::result::Result<HotkeyKey, &'static str> {
     if key.trim().is_empty() {
-        Err("Unsupported key")
+        Err(tr("Unsupported key"))
     } else {
         Ok(HotkeyKey::named(key))
     }
@@ -136,7 +168,7 @@ pub(super) fn validate_hotkey(
 ) -> std::result::Result<(), &'static str> {
     LinuxHotkey::from(binding)
         .validate()
-        .map_err(|_| "Add a key Linux can register")
+        .map_err(|_| tr("Add a key Linux can register"))
 }
 
 impl AppWindow {
@@ -252,7 +284,14 @@ impl AppWindow {
         if self.preview {
             return;
         }
-        self.send(Request::CaptureShortcut);
+        let HotkeyCaptureState::Listening { kind, .. } = self.hotkey_capture else {
+            return;
+        };
+        let Some(target) = shortcut_target(kind) else {
+            return;
+        };
+        self.send(Request::CaptureShortcutFor(target));
+        self.platform.capture_target = target;
         self.platform.capture = CapturePhase::Requested(Instant::now());
     }
 
@@ -264,10 +303,18 @@ impl AppWindow {
     }
 
     /// The service validates, registers, and saves the chord recorded on X11.
-    pub(super) fn platform_save_hotkey(&mut self, _: HotkeyKind, binding: &HotkeyBinding) -> bool {
+    pub(super) fn platform_save_hotkey(
+        &mut self,
+        kind: HotkeyKind,
+        binding: &HotkeyBinding,
+    ) -> bool {
+        let Some(target) = shortcut_target(kind) else {
+            return false;
+        };
         let modifiers = binding.modifiers;
-        self.send(Request::Desktop(DesktopAction::SetDictationShortcut(
-            DesktopShortcut {
+        self.send(Request::SetShortcut {
+            target,
+            shortcut: DesktopShortcut {
                 alt: modifiers.option.is_some(),
                 control: modifiers.control.is_some(),
                 function: false,
@@ -279,7 +326,7 @@ impl AppWindow {
                 platform: modifiers.command.is_some(),
                 shift: modifiers.shift.is_some(),
             },
-        )));
+        });
         true
     }
 
@@ -335,14 +382,34 @@ impl AppWindow {
             return false;
         }
         self.platform.capture = CapturePhase::Idle;
-        let saved = state.settings.dictation_hotkey.clone();
-        if saved != self.settings.dictation_hotkey {
-            let keycaps = saved.keycaps();
-            self.settings.dictation_hotkey = saved;
+        let (saved, current, kind) = match self.platform.capture_target {
+            ShortcutTarget::Dictation => (
+                Some(state.settings.dictation_hotkey.clone()),
+                Some(self.settings.dictation_hotkey.clone()),
+                HotkeyKind::Dictation,
+            ),
+            ShortcutTarget::PasteLast => (
+                state.settings.paste_last_hotkey.clone(),
+                self.settings.paste_last_hotkey.clone(),
+                HotkeyKind::PasteLast,
+            ),
+            ShortcutTarget::VoiceAction => (
+                Some(state.settings.edit_hotkey.clone()),
+                Some(self.settings.edit_hotkey.clone()),
+                HotkeyKind::Edit,
+            ),
+        };
+        if let Some(binding) = saved.filter(|saved| Some(saved) != current.as_ref()) {
+            let keycaps = binding.keycaps();
+            match kind {
+                HotkeyKind::PasteLast => self.settings.paste_last_hotkey = Some(binding),
+                HotkeyKind::Edit => self.settings.edit_hotkey = binding,
+                HotkeyKind::Dictation => self.settings.dictation_hotkey = binding,
+            }
             self.hotkey_width_spring
                 .set_target(hotkey_saved_width(keycaps.len()) + hotkey_label_overflow(&keycaps));
             self.hotkey_capture = HotkeyCaptureState::Saved {
-                kind: HotkeyKind::Dictation,
+                kind,
                 saved_at: Instant::now(),
             };
         } else if !matches!(self.hotkey_capture, HotkeyCaptureState::Idle) {
@@ -386,7 +453,7 @@ impl AppWindow {
         let Some(state) = &self.platform.client.state else {
             return Some(ListenerView {
                 running: false,
-                status: "Service disconnected".into(),
+                status: tr("Service disconnected").into(),
                 last_failure: None,
                 error,
             });

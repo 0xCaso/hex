@@ -708,21 +708,17 @@ Decoding happens before the Linux capture loop; the output device opens for
 the first tone and is released five minutes after the last one, as described
 in [macOS feedback](dictation.md#feedback). Playback admission is bounded and
 nonblocking. Output preparation failures are
-logged without blocking dictation. Sound-volume saves in
-[linux_app.rs](../../src/linux_app.rs) preserve listener ownership; failed saves
-leave the previous selection active, and shortcut/model edits temporarily disable
-the control to prevent overlapping settings writes. The start sound does not wait
+logged without blocking dictation. The Settings window saves the volume to
+`settings.json` and the service reloads it without restarting the listener. The start sound does not wait
 for the 300 ms capture-retention threshold; input delivery and audio-device
 latency still apply.
 
 Checks: `bundled_recording_sounds_decode_without_an_audio_device` and
 `feedback_admission_never_waits_for_playback` in the player, plus
-`recording_volume_defaults_for_new_and_legacy_settings_and_round_trips` and
-`invalid_sound_volume_is_rejected_before_saving` in
-[linux_settings.rs](../../src/linux_settings.rs). The desktop host checks
-`invalid_volume_preserves_settings_and_does_not_stop_the_listener` and
-`volume_changes_cannot_overwrite_an_in_flight_settings_edit` cover invalid-volume
-and overlapping-edit guards, not real disk failures.
+`files_that_predate_a_setting_keep_the_beta_defaults` and
+`a_muted_beta_keeps_the_remembered_volume` in
+[linux_migration.rs](../../src/linux_migration.rs) for settings that predate
+`settings.json`.
 `start_sound_precedes_audio_and_does_not_change_short_tap_discard` in
 [linux_dictation.rs](../../src/linux_dictation.rs) exercises the production start
 path with a sound spy: immediate feedback without any audio, while a 100 ms tap

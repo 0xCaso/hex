@@ -28,8 +28,15 @@ const UNIT: &str = "hex.service";
 pub enum Request {
     Snapshot,
     Desktop(DesktopAction),
+    /// Records the dictation shortcut.
     CaptureShortcut,
+    CaptureShortcutFor(ShortcutTarget),
     CancelShortcut,
+    /// The chord Settings recorded on X11, for the service to register.
+    SetShortcut {
+        target: ShortcutTarget,
+        shortcut: crate::desktop_host::DesktopShortcut,
+    },
     ChooseModel {
         model: TranscriptionModelId,
         language: String,
@@ -38,6 +45,15 @@ pub enum Request {
     /// Settings saved `settings.json`; adopt it.
     ReloadSettings,
     Shutdown,
+}
+
+/// A shortcut the service registers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ShortcutTarget {
+    #[default]
+    Dictation,
+    PasteLast,
+    VoiceAction,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

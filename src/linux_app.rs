@@ -21,7 +21,9 @@ use crate::desktop_host::{
 };
 use crate::events::EventReader;
 use crate::linux_input::LinuxHotkey;
-use crate::linux_service::{self, Event as ServiceEvent, Request, Snapshot as ServiceSnapshot};
+use crate::linux_service::{
+    self, Event as ServiceEvent, Request, ShortcutTarget, Snapshot as ServiceSnapshot,
+};
 use crate::linux_session::LinuxSession;
 use crate::linux_updater::InstalledUpdate;
 
@@ -43,10 +45,10 @@ struct TranscriptionPreparation {
     worker: JoinHandle<PreparationResult>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum SettingsChange {
-    Capture,
-    Hotkey(LinuxHotkey),
+    Capture(ShortcutTarget),
+    Hotkey(ShortcutTarget, LinuxHotkey),
     /// Settings the Settings window already saved.
     Reload(Box<AppSettings>),
 }
@@ -108,6 +110,10 @@ struct LinuxDesktopHost {
     transcription_preparation: Option<TranscriptionPreparation>,
     transcription_error: Option<String>,
     update: UpdateState,
+    output: crate::linux_dictation::DictationOutput,
+    /// Hosts the personal transformations workspace while a mode uses one.
+    personal_commands: Option<crate::personal_commands::PersonalCommands>,
+    personal_commands_checked_at: Instant,
 }
 
 enum UpdateState {
@@ -202,7 +208,9 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
                         } else if matches!(
                             request,
                             Request::CaptureShortcut
+                                | Request::CaptureShortcutFor(_)
                                 | Request::CancelShortcut
+                                | Request::SetShortcut { .. }
                                 | Request::Desktop(DesktopAction::SetDictationShortcut(_))
                         ) {
                             return Err(color_eyre::eyre::eyre!(
@@ -213,13 +221,20 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
                     match request {
                         Request::Snapshot => {}
                         Request::Desktop(action) => host.dispatch(action)?,
-                        Request::CaptureShortcut => {
-                            host.begin_settings_edit(SettingsChange::Capture);
+                        Request::CaptureShortcut | Request::CaptureShortcutFor(_) => {
+                            let target = match request {
+                                Request::CaptureShortcutFor(target) => target,
+                                _ => ShortcutTarget::Dictation,
+                            };
+                            host.begin_settings_edit(SettingsChange::Capture(target));
                             if host.capturing_hotkey() {
                                 editor = Some((client, Instant::now() + Duration::from_secs(3)));
                             }
                         }
                         Request::CancelShortcut => host.cancel_settings_edit(),
+                        Request::SetShortcut { target, shortcut } => {
+                            host.set_hotkey(target, shortcut)?
+                        }
                         Request::ChooseModel { model, language } => {
                             host.choose_transcription(model, language)?
                         }
@@ -290,7 +305,16 @@ impl LinuxDesktopHost {
         let mut event_reader = EventReader::open(&event_path);
         let mut activity = DesktopActivity::default();
         activity.refresh(&mut event_reader);
-        Self {
+        // Tests never touch the user's history.
+        let history = if cfg!(test) {
+            None
+        } else {
+            crate::history::History::open_default(settings.history_retention)
+                .inspect_err(|error| tracing::warn!(%error, "could not open retained history"))
+                .ok()
+        };
+        let output = crate::linux_dictation::DictationOutput::from_settings(&settings, history);
+        let mut host = Self {
             event_reader,
             event_path,
             activity,
@@ -307,6 +331,47 @@ impl LinuxDesktopHost {
             transcription_preparation: None,
             transcription_error: None,
             update,
+            output,
+            personal_commands: None,
+            personal_commands_checked_at: Instant::now(),
+        };
+        host.refresh_personal_commands();
+        host
+    }
+
+    /// Applies saved settings the running listener reads live: modes,
+    /// history retention, and the transformations workspace.
+    fn apply_output_settings(&mut self) {
+        *self
+            .output
+            .modes
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) =
+            crate::dictation_modes::ModeRuntime::from_settings(&self.settings);
+        if let Some(history) = &self.output.history
+            && let Err(error) = history.set_retention(self.settings.history_retention)
+        {
+            tracing::warn!(%error, "could not apply the history retention");
+        }
+        self.refresh_personal_commands();
+    }
+
+    fn refresh_personal_commands(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let enabled =
+            crate::app_settings::transformations_used(&self.settings.dictation_processing)
+                || crate::personal_commands::workspace_configured();
+        match (enabled, self.personal_commands.is_some()) {
+            (true, false) => {
+                self.personal_commands = crate::personal_commands::PersonalCommands::start(
+                    crate::commands::CommandConfig::new(),
+                    self.output.transformations.clone(),
+                );
+            }
+            (false, true) => self.personal_commands = None,
+            _ => {}
         }
     }
 
@@ -333,6 +398,7 @@ impl LinuxDesktopHost {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let settings = self.settings.clone();
+        let output = self.output.clone();
         let event_path = self.event_path.clone();
         let prepared_transcriber = self.prepared_transcriber.take();
         let hotkey_status = crate::linux_input::HotkeyStatus::default();
@@ -344,6 +410,7 @@ impl LinuxDesktopHost {
                     None,
                     &worker_stop,
                     &settings,
+                    output,
                     prepared_transcriber,
                     worker_hotkey_status,
                 )
@@ -374,6 +441,11 @@ impl LinuxDesktopHost {
     }
 
     fn refresh(&mut self) {
+        // Settings may set up the transformations workspace at any time.
+        if self.personal_commands_checked_at.elapsed() >= Duration::from_secs(2) {
+            self.personal_commands_checked_at = Instant::now();
+            self.refresh_personal_commands();
+        }
         if matches!(&self.update, UpdateState::Waiting(at) | UpdateState::Failed(at) if Instant::now() >= *at)
         {
             self.update = UpdateState::Checking(start_update_check());
@@ -477,7 +549,7 @@ impl LinuxDesktopHost {
         self.listener.is_some()
     }
 
-    fn set_dictation_hotkey(&mut self, shortcut: DesktopShortcut) -> Result<()> {
+    fn set_hotkey(&mut self, target: ShortcutTarget, shortcut: DesktopShortcut) -> Result<()> {
         if shortcut.function {
             self.error = Some("The Fn modifier cannot be registered on Linux".into());
             self.cancel_settings_edit();
@@ -497,11 +569,11 @@ impl LinuxDesktopHost {
             },
         };
         if let Some(edit) = &mut self.settings_edit {
-            if matches!(edit.change, SettingsChange::Capture) && edit.worker.is_none() {
-                edit.change = SettingsChange::Hotkey(binding);
+            if edit.change == SettingsChange::Capture(target) && edit.worker.is_none() {
+                edit.change = SettingsChange::Hotkey(target, binding);
             }
         } else {
-            self.begin_settings_edit(SettingsChange::Hotkey(binding));
+            self.begin_settings_edit(SettingsChange::Hotkey(target, binding));
         }
         Ok(())
     }
@@ -514,7 +586,8 @@ impl LinuxDesktopHost {
             self.error = Some("Wait for model preparation before editing shortcut settings".into());
             return;
         }
-        let resume = self.is_running() && self.listen_when_ready;
+        // A listener waiting for a model still starts once one is ready.
+        let resume = self.listen_when_ready;
         self.stop();
         self.error = None;
         self.settings_edit = Some(SettingsEdit {
@@ -550,7 +623,16 @@ impl LinuxDesktopHost {
             || settings.dictation_hotkey != self.settings.dictation_hotkey
             || settings.double_tap_lock != self.settings.double_tap_lock
             || settings.shortcut_mode != self.settings.shortcut_mode
-            || settings.paste_with_shift != self.settings.paste_with_shift;
+            || settings.paste_with_shift != self.settings.paste_with_shift
+            || settings.microphone != self.settings.microphone
+            || settings.paste_last_hotkey != self.settings.paste_last_hotkey
+            || settings.double_tap_only != self.settings.double_tap_only
+            || settings.release_microphone_while_idle
+                != self.settings.release_microphone_while_idle
+            || settings.recording_audio_behavior != self.settings.recording_audio_behavior
+            || settings.indicator_position != self.settings.indicator_position
+            || settings.voice_action.enabled != self.settings.voice_action.enabled
+            || settings.edit_hotkey != self.settings.edit_hotkey;
         if restart && self.is_running() && self.settings_edit.is_none() {
             self.begin_settings_edit(SettingsChange::Reload(Box::new(settings)));
             return Ok(());
@@ -558,6 +640,7 @@ impl LinuxDesktopHost {
         self.settings = settings;
         self.settings_valid = true;
         self.settings_error = None;
+        self.apply_output_settings();
         if model_changed && self.listen_when_ready && !self.is_running() {
             self.start();
         }
@@ -566,7 +649,8 @@ impl LinuxDesktopHost {
 
     fn capturing_hotkey(&self) -> bool {
         self.settings_edit.as_ref().is_some_and(|edit| {
-            !edit.canceled.load(Ordering::Acquire) && matches!(edit.change, SettingsChange::Capture)
+            !edit.canceled.load(Ordering::Acquire)
+                && matches!(edit.change, SettingsChange::Capture(_))
         })
     }
 
@@ -599,6 +683,7 @@ impl LinuxDesktopHost {
                     self.settings = settings;
                     self.settings_valid = true;
                     self.settings_error = None;
+                    self.apply_output_settings();
                 }
                 Ok(Err(error)) if !canceled => {
                     self.error = Some(format!("Could not update dictation settings: {error:#}"));
@@ -610,7 +695,7 @@ impl LinuxDesktopHost {
             }
         } else if !canceled {
             let wayland = LinuxSession::detect().is_wayland();
-            if !wayland && matches!(edit.change, SettingsChange::Capture) {
+            if !wayland && matches!(edit.change, SettingsChange::Capture(_)) {
                 // X11 uses focused GPUI keystrokes, never raw input-device access.
                 self.status = "Press a shortcut".into();
                 return;
@@ -618,11 +703,12 @@ impl LinuxDesktopHost {
             let change = edit.change.clone();
             let canceled = edit.canceled.clone();
             edit.worker = Some(std::thread::spawn(move || {
-                let binding = match change {
-                    SettingsChange::Capture => {
-                        crate::linux_input::capture_wayland_binding(&canceled)?
-                    }
-                    SettingsChange::Hotkey(binding) => binding,
+                let (target, binding) = match change {
+                    SettingsChange::Capture(target) => (
+                        target,
+                        crate::linux_input::capture_wayland_binding(&canceled)?,
+                    ),
+                    SettingsChange::Hotkey(target, binding) => (target, binding),
                     SettingsChange::Reload(settings) => return Ok(*settings),
                 };
                 binding.validate()?;
@@ -635,7 +721,14 @@ impl LinuxDesktopHost {
                 if canceled.load(Ordering::Acquire) {
                     return Err(color_eyre::eyre::eyre!("Shortcut edit canceled"));
                 }
-                save_with(|settings| settings.dictation_hotkey = HotkeyBinding::from(&binding))
+                save_with(|settings| {
+                    let binding = HotkeyBinding::from(&binding);
+                    match target {
+                        ShortcutTarget::Dictation => settings.dictation_hotkey = binding,
+                        ShortcutTarget::PasteLast => settings.paste_last_hotkey = Some(binding),
+                        ShortcutTarget::VoiceAction => settings.edit_hotkey = binding,
+                    }
+                })
             }));
             self.status = if self.capturing_hotkey() {
                 "Press a shortcut"
@@ -850,7 +943,7 @@ impl LinuxDesktopHost {
                 }
             }
             DesktopAction::SetDictationShortcut(shortcut) => {
-                self.set_dictation_hotkey(shortcut)?;
+                self.set_hotkey(ShortcutTarget::Dictation, shortcut)?;
             }
             DesktopAction::StartListening => {
                 self.error = None;
@@ -1101,7 +1194,7 @@ mod tests {
             for cancel in [false, true] {
                 let mut host = host_for_edit(running);
                 let original = host.settings.clone();
-                host.begin_settings_edit(SettingsChange::Capture);
+                host.begin_settings_edit(SettingsChange::Capture(ShortcutTarget::Dictation));
                 assert!(host.capturing_hotkey());
                 host.listener = None;
                 if cancel {
@@ -1125,7 +1218,7 @@ mod tests {
     #[test]
     fn cancel_signals_worker_and_does_not_wait_or_restart_until_it_finishes() {
         let mut host = host_for_edit(true);
-        host.begin_settings_edit(SettingsChange::Capture);
+        host.begin_settings_edit(SettingsChange::Capture(ShortcutTarget::Dictation));
         host.listener = None;
         let (release, held) = mpsc::channel();
         host.settings_edit.as_mut().unwrap().worker = Some(std::thread::spawn(move || {
@@ -1157,7 +1250,7 @@ mod tests {
     #[test]
     fn client_disconnect_cancels_its_edit_and_restores_previous_listening() {
         let mut host = host_for_edit(true);
-        host.begin_settings_edit(SettingsChange::Capture);
+        host.begin_settings_edit(SettingsChange::Capture(ShortcutTarget::Dictation));
         let mut editor = Some((1, Instant::now()));
         disconnect_editor(&mut host, &mut editor, 2);
         assert!(

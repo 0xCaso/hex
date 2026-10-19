@@ -176,6 +176,8 @@ current-user startup registry, UI Automation, and Windows capture APIs.
 | Recording tones and click-through recording/processing HUD | Implemented; the renderer is native GPUI/DirectX rather than the macOS Metal shader |
 | History retention, list, detail, search, copy, delete, and clear | Implemented |
 | Text replacements | Implemented in the Windows Modes pane using the shared phrase-boundary replacement engine |
+| Application picker in Modes | Implemented; lists Start menu shortcuts, App Paths, and apps with an open window, each with its executable's icon |
+| Interface language | Implemented on every OS; English, Polish, Chinese, Japanese, German, and Spanish |
 | Resident tray and Launch at login | Implemented |
 | Application modes with per-mode corrections, OpenCode rewriting, and transformations | Implemented on the shared ordered processing policy; global and contextual profiles persist their own corrections, model, reasoning variant, deadline, and ordered built-in/TypeScript transformations, while modes match by application name — physical end-to-end paste/UI validation remains |
 | Voice Action with selected-text capture and in-app OpenCode model selection | Implemented; selection is read through a clipboard round trip rather than UI Automation |
@@ -191,6 +193,10 @@ current-user startup registry, UI Automation, and Windows capture APIs.
 | Developer Meetings, live drafts, and meeting paste | Missing |
 | Local transcription API and public TypeScript SDK host lifecycle on Windows | Missing; see Local Transcription Service |
 | Streaming finish with whole-clip fallback | Implemented on GPU devices with Parakeet Unified English |
+
+Settings live in `%APPDATA%\voice-control\settings.json`, the same file macOS and
+Linux use. On first launch, an existing `windows-settings.json` is migrated once
+and kept as `windows-settings.json.migrated`.
 
 The Windows window uses the shared design system
 ([design-system.md](design-system.md)): the same tokens, components, and text

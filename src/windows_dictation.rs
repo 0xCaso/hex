@@ -53,66 +53,6 @@ struct JobResult {
     result: Result<(), String>,
 }
 
-/// Live mode-processing snapshot. The output worker clones it before any
-/// deadline-bounded OpenCode call, so settings writes never wait on inference.
-#[derive(Clone)]
-pub struct WindowsModeRuntime {
-    default: crate::dictation_processor::PostProcessingSettings,
-    default_transformations: Vec<String>,
-    modes: Vec<crate::app_settings::DictationMode>,
-}
-
-impl WindowsModeRuntime {
-    pub fn from_settings(settings: &crate::app_settings::AppSettings) -> Self {
-        let processing = &settings.dictation_processing;
-        Self {
-            default: processing.default_mode.post_processing.clone(),
-            default_transformations: processing.default_mode.transformations.clone(),
-            modes: processing.modes.clone(),
-        }
-    }
-}
-
-/// Whether a mode's applications match the focused executable: Windows
-/// compares case-insensitive substrings of the executable name ("code"
-/// matches "vscode").
-fn matches_application(mode: &crate::app_settings::DictationMode, application: &str) -> bool {
-    let application = application.to_lowercase();
-    mode.applications.iter().any(|candidate| {
-        let candidate = candidate.trim().to_lowercase();
-        !candidate.is_empty() && application.contains(&candidate)
-    })
-}
-
-/// Whether a mode's websites match the focused page's exact host.
-fn matches_website(mode: &crate::app_settings::DictationMode, host: &str) -> bool {
-    let host = crate::windows_context::normalize_host(host);
-    mode.browser_hosts.iter().any(|candidate| {
-        // Entries are stored as typed; pasted URLs, ports, and IDN text
-        // reduce to their host here.
-        crate::windows_context::canonical_host(candidate).is_some_and(|candidate| candidate == host)
-    })
-}
-
-/// The first mode matching the focused context. A website rule is more
-/// specific than an application rule, so browser-host matches win, like
-/// the macOS selector ordering.
-fn mode_for_context<'a>(
-    modes: &'a [crate::app_settings::DictationMode],
-    application: Option<&str>,
-    browser_host: Option<&str>,
-) -> Option<&'a crate::app_settings::DictationMode> {
-    if let Some(host) = browser_host
-        && let Some(mode) = modes.iter().find(|mode| matches_website(mode, host))
-    {
-        return Some(mode);
-    }
-    let application = application?;
-    modes
-        .iter()
-        .find(|mode| matches_application(mode, application))
-}
-
 #[derive(Clone)]
 pub struct WindowsDictationConfig {
     pub device: Option<String>,
@@ -128,8 +68,7 @@ pub struct WindowsDictationConfig {
     pub history: Option<crate::history::History>,
     pub last_dictation: Arc<Mutex<Option<String>>>,
     pub indicator: Option<crate::windows_indicator::WindowsIndicatorSender>,
-    pub replacements: Arc<RwLock<crate::text_replacements::ReplacementSet>>,
-    pub mode_runtime: Arc<RwLock<WindowsModeRuntime>>,
+    pub mode_runtime: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
     pub transformations: Arc<crate::personal_commands::TransformationClient>,
     pub voice_action_model: Arc<RwLock<Option<crate::dictation_processor::Model>>>,
     pub fallback_to_default_device: bool,
@@ -160,10 +99,9 @@ impl WindowsDictationConfig {
             history: None,
             last_dictation: Arc::new(Mutex::new(None)),
             indicator: None,
-            replacements: Arc::new(RwLock::new(crate::text_replacements::ReplacementSet::new(
-                &settings.dictation_processing.default_mode.replacements,
-            ))),
-            mode_runtime: Arc::new(RwLock::new(WindowsModeRuntime::from_settings(settings))),
+            mode_runtime: Arc::new(RwLock::new(
+                crate::dictation_modes::ModeRuntime::from_settings(settings),
+            )),
             transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
             voice_action_model: Arc::new(RwLock::new(voice_action_model(settings))),
             fallback_to_default_device: true,
@@ -214,7 +152,6 @@ pub fn run_with_transcriber(
         history,
         last_dictation,
         indicator,
-        replacements,
         mode_runtime,
         transformations,
         voice_action_model,
@@ -287,7 +224,6 @@ pub fn run_with_transcriber(
                         &mut paster,
                         history.as_ref(),
                         &last_dictation,
-                        &replacements,
                         &mode_runtime,
                         transformations.as_ref(),
                     ),
@@ -798,8 +734,7 @@ fn process_dictation_job(
     paster: &mut Result<WindowsPaster>,
     history: Option<&crate::history::History>,
     last_dictation: &Mutex<Option<String>>,
-    replacements: &RwLock<crate::text_replacements::ReplacementSet>,
-    mode_runtime: &RwLock<WindowsModeRuntime>,
+    mode_runtime: &RwLock<crate::dictation_modes::ModeRuntime>,
     transformations: &crate::personal_commands::TransformationClient,
 ) -> JobResult {
     let started = Instant::now();
@@ -822,19 +757,12 @@ fn process_dictation_job(
         if raw_text.is_empty() {
             return Err("transcription was empty".into());
         }
-        let text = replacements
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .replace(&raw_text);
-        // Context selection remains in the native adapter because Windows
-        // application rules intentionally match executable substrings. The
-        // selected mode then enters the shared ordered processing policy.
         let mode_runtime = mode_runtime
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let processed = process_mode_text(&text, &context, &mode_runtime, transformations);
-        let text = processed.text;
+        let processed = mode_runtime.process(&raw_text, &context, transformations);
+        let text = processed.text.clone();
         if text.trim().is_empty() {
             return Err("text replacements produced empty output".into());
         }
@@ -847,22 +775,14 @@ fn process_dictation_job(
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(text.clone());
         if let Some(history) = history {
-            let draft = crate::history::HistoryDraft {
-                kind: crate::history::HistoryKind::Dictation,
+            let draft = crate::dictation_modes::history_draft(
                 raw_text,
-                final_text: text.clone(),
-                application: application.clone(),
-                processing: processed.observation.map(|processing| {
-                    crate::history::HistoryProcessing {
-                        profile: processing.profile,
-                        latency_ms: processing.latency_ms,
-                        fallback: processing.fallback,
-                    }
-                }),
-                audio_ms: job.audio_ms,
+                &processed,
+                application.clone(),
+                job.audio_ms,
                 inference_ms,
-                total_ms: started.elapsed().as_millis() as u64,
-            };
+                started.elapsed().as_millis() as u64,
+            );
             if let Err(error) = history.record(draft) {
                 tracing::warn!(%error, "could not retain Windows dictation history");
             }
@@ -876,47 +796,6 @@ fn process_dictation_job(
         "completed Windows dictation job"
     );
     job_result(OutputKind::Dictation, result, latency_ms)
-}
-
-fn process_mode_text(
-    text: &str,
-    context: &crate::context::ContextSnapshot,
-    runtime: &WindowsModeRuntime,
-    transformations: &crate::personal_commands::TransformationClient,
-) -> crate::dictation_processor::Processed {
-    let mode = mode_for_context(
-        &runtime.modes,
-        context.application.as_deref(),
-        context.browser_host(),
-    );
-    let profile = mode.map_or_else(
-        || {
-            crate::dictation_processor::Profile::configured(
-                "Global",
-                crate::text_replacements::ReplacementSet::default(),
-                runtime.default_transformations.clone(),
-                &runtime.default,
-            )
-        },
-        |mode| {
-            let name = if mode.name.trim().is_empty() {
-                "Untitled mode"
-            } else {
-                &mode.name
-            };
-            crate::dictation_processor::Profile::configured(
-                name,
-                crate::text_replacements::ReplacementSet::new(&mode.replacements),
-                mode.transformations.clone(),
-                &mode.post_processing,
-            )
-        },
-    );
-    let cancelled = AtomicBool::new(false);
-    let mut processed = crate::dictation_processor::Profiles::new(profile)
-        .process_cancellable(text, context, &cancelled);
-    processed.apply_transformations(transformations, context, &cancelled);
-    processed
 }
 
 /// Voice Action replies may take longer than a dictation rewrite.
@@ -1182,125 +1061,5 @@ impl Drop for IndicatorGuard {
         if let Some(indicator) = &self.0 {
             indicator.send(crate::windows_indicator::WindowsIndicatorEvent::Reset);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app_settings::DictationMode;
-
-    fn mode(name: &str, applications: &[&str], browser_hosts: &[&str]) -> DictationMode {
-        DictationMode {
-            name: name.into(),
-            applications: applications.iter().map(|value| value.to_string()).collect(),
-            browser_hosts: browser_hosts
-                .iter()
-                .map(|value| value.to_string())
-                .collect(),
-            ..DictationMode::default()
-        }
-    }
-
-    fn matched<'a>(
-        modes: &'a [DictationMode],
-        application: Option<&str>,
-        host: Option<&str>,
-    ) -> Option<&'a str> {
-        mode_for_context(modes, application, host).map(|mode| mode.name.as_str())
-    }
-
-    #[test]
-    fn modes_match_case_insensitive_application_substrings() {
-        let modes = [
-            mode("Code", &["Code", "rustrover"], &[]),
-            mode("Chat", &["slack"], &[]),
-        ];
-        assert_eq!(matched(&modes, Some("code"), None), Some("Code"));
-        assert_eq!(matched(&modes, Some("slack"), None), Some("Chat"));
-        assert_eq!(matched(&modes, Some("vscode"), None), Some("Code"));
-        assert_eq!(matched(&modes, Some("notepad"), None), None);
-        assert_eq!(matched(&modes, None, None), None);
-    }
-
-    #[test]
-    fn website_rules_match_exact_hosts_and_beat_application_rules() {
-        let modes = [
-            mode("Browser", &["chrome"], &[]),
-            mode("X", &[], &["X.com"]),
-        ];
-        assert_eq!(matched(&modes, Some("chrome"), Some("x.com.")), Some("X"));
-        assert_eq!(
-            matched(&modes, Some("chrome"), Some("news.x.com")),
-            Some("Browser")
-        );
-        assert_eq!(matched(&modes, Some("chrome"), None), Some("Browser"));
-    }
-
-    #[test]
-    fn blank_rules_never_match() {
-        let modes = [mode("Broken", &["  ", ""], &[" "])];
-        assert_eq!(matched(&modes, Some("anything"), Some("x.com")), None);
-    }
-
-    #[test]
-    fn windows_mode_corrections_use_the_shared_processing_policy() {
-        let modes = vec![crate::app_settings::DictationMode {
-            name: "Code".into(),
-            applications: vec!["code".into()],
-            replacements: vec![crate::text_replacements::TextReplacement {
-                matched_phrase: "open code".into(),
-                output: "OpenCode".into(),
-            }],
-            ..crate::app_settings::DictationMode::default()
-        }];
-        let context = crate::context::ContextSnapshot {
-            application: Some("Visual Studio Code".into()),
-            ..crate::context::ContextSnapshot::default()
-        };
-
-        let runtime = WindowsModeRuntime {
-            default: crate::dictation_processor::PostProcessingSettings::default(),
-            default_transformations: Vec::new(),
-            modes,
-        };
-        let transformations = crate::personal_commands::TransformationClient::default();
-        let processed = process_mode_text("Use open code.", &context, &runtime, &transformations);
-
-        assert_eq!(processed.text, "Use OpenCode.");
-        assert!(processed.observation.is_none());
-    }
-
-    #[test]
-    fn windows_modes_execute_selected_transformations_after_corrections() {
-        let runtime = WindowsModeRuntime {
-            default: crate::dictation_processor::PostProcessingSettings::default(),
-            default_transformations: vec!["lowercase".into()],
-            modes: Vec::new(),
-        };
-        let transformations = crate::personal_commands::TransformationClient::default();
-
-        let processed = process_mode_text(
-            "Keep OpenCode Exact.",
-            &crate::context::ContextSnapshot::default(),
-            &runtime,
-            &transformations,
-        );
-
-        assert_eq!(processed.text, "keep opencode exact.");
-        assert_eq!(
-            processed
-                .observation
-                .as_ref()
-                .map(|observation| observation.profile.as_str()),
-            Some("Custom transformations")
-        );
-        assert_eq!(
-            processed
-                .observation
-                .as_ref()
-                .and_then(|observation| observation.fallback.as_deref()),
-            None
-        );
     }
 }

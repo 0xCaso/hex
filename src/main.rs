@@ -42,6 +42,8 @@ mod dictation_audio;
 mod dictation_diagnostics;
 #[cfg(target_os = "macos")]
 mod dictation_indicator;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+mod dictation_modes;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod dictation_processor;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
@@ -61,6 +63,10 @@ mod keys;
 mod linux;
 #[cfg(target_os = "linux")]
 mod linux_app;
+#[cfg(target_os = "linux")]
+mod linux_audio_control;
+#[cfg(target_os = "linux")]
+mod linux_context;
 #[cfg(target_os = "linux")]
 mod linux_desktop;
 #[cfg(target_os = "linux")]
@@ -146,8 +152,6 @@ mod transcription_service;
 // The Windows shell and the shared desktop layer it was built on. These
 // modules come from the `windows-shell` branch and stay Windows-only until
 // the macOS and Linux shells adopt them.
-// The shared window's strings move onto these tables next.
-#[allow(dead_code)]
 mod desktop_i18n;
 #[cfg(target_os = "windows")]
 mod desktop_indicator_model;

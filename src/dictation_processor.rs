@@ -332,7 +332,7 @@ impl Profiles {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn process_voice_action_cancellable(
     instruction: &str,
     selected_text: Option<&str>,
@@ -846,7 +846,7 @@ fn voice_action_prompt(
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn voice_action_failure(started: Instant, error: String) -> Processed {
     Processed {
         text: String::new(),
@@ -2749,14 +2749,15 @@ mod tests {
         let executable = root.join("opencode2");
         fs::write(
             &executable,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> calls\ncase \"$*\" in\n'api get /api/info') echo 'HTTP 404 Not Found' >&2; exit 1 ;;\n'api get /api/status') sleep 2; echo 'HTTP 404 Not Found' >&2; exit 1 ;;\n'api get /api/health') sleep 2; echo '{\"pid\":42,\"version\":\"fixture-version\"}' ;;\n*) exit 2 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> calls\ncase \"$*\" in\n'api get /api/info') echo 'HTTP 404 Not Found' >&2; exit 1 ;;\n'api get /api/status') sleep 2; echo 'HTTP 404 Not Found' >&2; exit 1 ;;\n'api get /api/health') sleep 10; echo '{\"pid\":42,\"version\":\"fixture-version\"}' ;;\n*) exit 2 ;;\nesac\n",
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let error = discover_opencode_service_with(
             &executable,
             &root,
-            Duration::from_secs(3),
+            // Leaves the health probe ~4 s to start on a busy machine.
+            Duration::from_secs(6),
             &AtomicBool::new(false),
         )
         .unwrap_err();

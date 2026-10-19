@@ -40,7 +40,7 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     double_tap_only: true,
     modifier_sides: true,
     indicator_position: true,
-    interface_language: false,
+    interface_language: true,
     software_updates: true,
     terminal_paste: false,
 };
@@ -52,6 +52,19 @@ pub(super) fn records_key_events() -> bool {
 }
 
 /// Sparkle has its own Check for Updates command.
+/// How the Modes pane describes website rules; `None` hides them where
+/// the listener can't read the browser's address.
+pub(super) const WEB_PAGES_DESCRIPTION: Option<&str> =
+    Some("Switch when a domain is active in Brave");
+
+/// Whether the listener knows which application is frontmost.
+pub(super) fn focused_application_known() -> bool {
+    true
+}
+
+/// The Modes application picker's button for an app it doesn't list.
+pub(super) const CHOOSE_APPLICATION_FILE: &str = "Choose from Finder…";
+
 pub(super) const MANUAL_UPDATE_CHECK: bool = true;
 
 /// What the macOS application coordinator hands a new window.
@@ -378,7 +391,7 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         vec![
-            settings_section_label("Meetings").into_any_element(),
+            settings_section_label(tr("Meetings")).into_any_element(),
             self.render_meeting_settings(window, cx).into_any_element(),
             settings_section_label("Scrawl").into_any_element(),
             self.render_scrawl_settings(window, cx).into_any_element(),
@@ -674,19 +687,21 @@ pub(super) fn command_task(command: &CommandInfo) -> String {
         return group.clone();
     }
     if command.id.starts_with("mode.") {
-        "Voice control".into()
+        tr("Voice control").into()
     } else if command.id.starts_with("dictation.") {
-        "Dictation".into()
+        tr("Dictation").into()
     } else if command.id.starts_with("meeting.") {
-        "Meetings".into()
+        tr("Meetings").into()
     } else {
         match command.description.as_str() {
-            "Open application" => "Open applications",
-            "Open website" => "Open websites",
-            "Navigate active tab" => "Browser navigation",
-            "Use keyboard shortcut" => "Keyboard",
-            "Use application shortcut" | "Open application destination" => "Application navigation",
-            _ => "Other",
+            "Open application" => tr("Open applications"),
+            "Open website" => tr("Open websites"),
+            "Navigate active tab" => tr("Browser navigation"),
+            "Use keyboard shortcut" => tr("Keyboard"),
+            "Use application shortcut" | "Open application destination" => {
+                tr("Application navigation")
+            }
+            _ => tr("Other"),
         }
         .into()
     }
@@ -727,7 +742,7 @@ pub(super) fn open_path(path: &std::path::Path) {
 
 pub(super) fn command_scope(scope: &CommandScope) -> String {
     match scope {
-        CommandScope::Sleeping | CommandScope::Global => "Global".into(),
+        CommandScope::Sleeping | CommandScope::Global => tr("Global").into(),
         CommandScope::Application(application) => application.clone(),
         CommandScope::Browser(host) => host.clone(),
     }
@@ -743,7 +758,7 @@ pub(super) fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
         .gap(px(6.0))
         .border_b_1()
         .border_color(rgb(LINE))
-        .child(section_label("Summary"))
+        .child(section_label(tr("Summary")))
         .child(
             div()
                 .text_body()
@@ -753,7 +768,7 @@ pub(super) fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
                     TEXT_SECONDARY
                 }))
                 .child(if summary.is_empty() {
-                    "Nothing to summarize.".to_string()
+                    tr("Nothing to summarize.").to_string()
                 } else {
                     summary
                 }),
@@ -768,13 +783,13 @@ pub(super) fn meeting_status_chip(
     show_ready: bool,
 ) -> Option<Div> {
     let (label, tone) = match status {
-        MeetingStatus::Recording if stop_pending => ("Transcribing", Tone::Accent),
-        MeetingStatus::Starting | MeetingStatus::Recording => ("Recording", Tone::Danger),
-        MeetingStatus::Transcribing => ("Transcribing", Tone::Accent),
-        MeetingStatus::Complete if show_ready => ("Ready", Tone::Success),
+        MeetingStatus::Recording if stop_pending => (tr("Transcribing"), Tone::Accent),
+        MeetingStatus::Starting | MeetingStatus::Recording => (tr("Recording"), Tone::Danger),
+        MeetingStatus::Transcribing => (tr("Transcribing"), Tone::Accent),
+        MeetingStatus::Complete if show_ready => (tr("Ready"), Tone::Success),
         MeetingStatus::Complete => return None,
-        MeetingStatus::Interrupted => ("Interrupted", Tone::Neutral),
-        MeetingStatus::Failed => ("Failed", Tone::Danger),
+        MeetingStatus::Interrupted => (tr("Interrupted"), Tone::Neutral),
+        MeetingStatus::Failed => (tr("Failed"), Tone::Danger),
     };
     let live =
         matches!(status, MeetingStatus::Starting | MeetingStatus::Recording) && !stop_pending;
@@ -788,9 +803,15 @@ pub(super) fn meeting_status_chip(
 pub(super) fn meeting_length(milliseconds: u64) -> String {
     let minutes = milliseconds / 60_000;
     match minutes {
-        0 => "< 1 min".into(),
-        1..=59 => format!("{minutes} min"),
-        _ => format!("{} h {:02} min", minutes / 60, minutes % 60),
+        0 => tr("< 1 min").into(),
+        1..=59 => tr_fill("{} min", &minutes.to_string()),
+        _ => tr_named(
+            "{hours} h {minutes} min",
+            &[
+                ("hours", &(minutes / 60).to_string()),
+                ("minutes", &format!("{:02}", minutes % 60)),
+            ],
+        ),
     }
 }
 
@@ -830,7 +851,7 @@ pub(super) fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement
                     .text_caption()
                     .text_color(rgb(TEXT_TERTIARY))
                     .child(div().h(px(1.0)).flex_1().bg(rgb(LINE)))
-                    .child(format!("{} pause", meeting_length(pause)))
+                    .child(tr_fill("{} pause", &meeting_length(pause)))
                     .child(div().h(px(1.0)).flex_1().bg(rgb(LINE))),
             )
         })
@@ -1068,39 +1089,41 @@ pub(super) fn command_model_notice(
     match status {
         CommandModelStatus::Disabled | CommandModelStatus::Ready => None,
         CommandModelStatus::Loading => Some((
-            "Preparing voice commands",
-            "The command model is loading. Hotkey dictation does not require it.",
+            tr("Preparing voice commands"),
+            tr("The command model is loading. Hotkey dictation does not require it."),
         )),
         CommandModelStatus::Failed => Some((
-            "Voice commands are unavailable",
-            "The command model could not load. Retry or turn off commands; hotkey dictation is unaffected.",
+            tr("Voice commands are unavailable"),
+            tr(
+                "The command model could not load. Retry or turn off commands; hotkey dictation is unaffected.",
+            ),
         )),
     }
 }
 
-pub(super) const fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'static str) {
+pub(super) fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'static str) {
     match kind {
         PermissionKind::Microphone => (
-            "Microphone access is off",
-            "Hex cannot record dictation until microphone access is restored.",
+            tr("Microphone access is off"),
+            tr("Hex cannot record dictation until microphone access is restored."),
         ),
         PermissionKind::InputMonitoring => (
-            "Input Monitoring is off",
-            "Hex cannot recognize the dictation shortcut in other apps.",
+            tr("Input Monitoring is off"),
+            tr("Hex cannot recognize the dictation shortcut in other apps."),
         ),
         PermissionKind::Accessibility => (
-            "Accessibility is off",
-            "Hex cannot paste completed dictation into the foreground app.",
+            tr("Accessibility is off"),
+            tr("Hex cannot paste completed dictation into the foreground app."),
         ),
     }
 }
 
-pub(super) const fn permission_action_label(action: PermissionAction) -> &'static str {
+pub(super) fn permission_action_label(action: PermissionAction) -> &'static str {
     match action {
-        PermissionAction::RequestMicrophone => "Allow",
-        PermissionAction::OpenMicrophoneSettings => "Open settings",
+        PermissionAction::RequestMicrophone => tr("Allow"),
+        PermissionAction::OpenMicrophoneSettings => tr("Open settings"),
         PermissionAction::OpenInputMonitoringSettings
-        | PermissionAction::OpenAccessibilitySettings => "Grant access",
+        | PermissionAction::OpenAccessibilitySettings => tr("Grant access"),
     }
 }
 
@@ -1121,11 +1144,11 @@ pub(super) fn hotkey_key(key: &str) -> std::result::Result<HotkeyKey, &'static s
         "space" => Some((49, "Space")),
         "tab" => Some((48, "Tab")),
         "enter" => Some((36, "Return")),
-        "backspace" => Some((51, "Delete")),
+        "backspace" => Some((51, tr("Delete"))),
         "up" => Some((126, "Up")),
         "down" => Some((125, "Down")),
-        "left" => Some((123, "Left")),
-        "right" => Some((124, "Right")),
+        "left" => Some((123, tr("Left"))),
+        "right" => Some((124, tr("Right"))),
         "pageup" => Some((116, "Page Up")),
         "pagedown" => Some((121, "Page Down")),
         "home" => Some((115, "Home")),
@@ -1162,12 +1185,12 @@ pub(super) fn hotkey_key(key: &str) -> std::result::Result<HotkeyKey, &'static s
     }
     let mut characters = key.chars();
     let Some(character) = characters.next() else {
-        return Err("Unsupported key");
+        return Err(tr("Unsupported key"));
     };
     if characters.next().is_some() {
-        return Err("Unsupported key");
+        return Err(tr("Unsupported key"));
     }
-    let code = crate::keyboard::key_code_for(character).map_err(|_| "Unsupported key")?;
+    let code = crate::keyboard::key_code_for(character).map_err(|_| tr("Unsupported key"))?;
     Ok(HotkeyKey {
         code,
         label: character.to_uppercase().collect(),
@@ -1182,15 +1205,15 @@ impl AppWindow {
     ) -> Vec<(&'static str, &'static str, AnyElement)> {
         let status = self.setup_status;
         let microphone = match status.microphone {
-            PermissionState::Ready => tag(Tone::Success, "Ready").into_any_element(),
-            PermissionState::NeedsRequest => button(ButtonKind::Secondary, "Allow")
+            PermissionState::Ready => tag(Tone::Success, tr("Ready")).into_any_element(),
+            PermissionState::NeedsRequest => button(ButtonKind::Secondary, tr("Allow"))
                 .id("setup-microphone")
                 .on_click(cx.listener(|_this, _, _, cx| {
                     crate::onboarding::request_microphone();
                     cx.notify();
                 }))
                 .into_any_element(),
-            PermissionState::NeedsSettings => button(ButtonKind::Secondary, "Open settings")
+            PermissionState::NeedsSettings => button(ButtonKind::Secondary, tr("Open settings"))
                 .id("setup-microphone")
                 .on_click(cx.listener(|_this, _, _, cx| {
                     crate::onboarding::open_permission_settings("microphone");
@@ -1201,17 +1224,17 @@ impl AppWindow {
         let mut permission_items: Vec<(&'static str, &'static str, AnyElement)> = Vec::new();
         if status.microphone != PermissionState::Ready {
             permission_items.push((
-                "Microphone",
+                tr("Microphone"),
                 if self.settings.commands_enabled {
-                    "Hear commands and dictation."
+                    tr("Hear commands and dictation.")
                 } else {
-                    "Record dictation while you hold the shortcut"
+                    tr("Record dictation while you hold the shortcut")
                 },
                 microphone,
             ));
         }
         if status.input_monitoring != PermissionState::Ready {
-            let input_monitoring = button(ButtonKind::Secondary, "Grant access")
+            let input_monitoring = button(ButtonKind::Secondary, tr("Grant access"))
                 .id("setup-input-monitoring")
                 .on_click(cx.listener(|_this, _, _, cx| {
                     crate::permission_guide::show_input_monitoring();
@@ -1219,13 +1242,13 @@ impl AppWindow {
                 }))
                 .into_any_element();
             permission_items.push((
-                "Input Monitoring",
-                "Recognize the dictation shortcut anywhere",
+                tr("Input Monitoring"),
+                tr("Recognize the dictation shortcut anywhere"),
                 input_monitoring,
             ));
         }
         if status.accessibility != PermissionState::Ready {
-            let accessibility = button(ButtonKind::Secondary, "Grant access")
+            let accessibility = button(ButtonKind::Secondary, tr("Grant access"))
                 .id("setup-accessibility")
                 .on_click(cx.listener(|_this, _, _, cx| {
                     crate::permission_guide::show_accessibility();
@@ -1233,11 +1256,11 @@ impl AppWindow {
                 }))
                 .into_any_element();
             permission_items.push((
-                "Accessibility",
+                tr("Accessibility"),
                 if self.settings.commands_enabled {
-                    "Paste text and run keyboard commands."
+                    tr("Paste text and run keyboard commands.")
                 } else {
-                    "Paste completed dictation into the foreground app"
+                    tr("Paste completed dictation into the foreground app")
                 },
                 accessibility,
             ));
@@ -1267,7 +1290,7 @@ impl AppWindow {
                 ),
                 |controls| {
                     controls.child(
-                        button(ButtonKind::Secondary, "Retry")
+                        button(ButtonKind::Secondary, tr("Retry"))
                             .id("retry-command-model")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if !this.preview {
@@ -1278,7 +1301,7 @@ impl AppWindow {
                 },
             )
             .child(
-                button(ButtonKind::Secondary, "Turn off commands")
+                button(ButtonKind::Secondary, tr("Turn off commands"))
                     .id("disable-unavailable-commands")
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Err(error) = this.developer_set_commands_enabled(false, cx) {
@@ -1478,7 +1501,7 @@ impl AppWindow {
     }
 
     pub(super) fn meeting_search_input(cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search meetings", ""));
+        let entity = cx.new(|cx| TextInput::picker(cx, tr("Search meetings"), ""));
         let changed = cx.subscribe(&entity, |this, _, _: &TextChanged, cx| {
             this.refresh_meeting_search(cx);
             cx.notify();
@@ -1621,7 +1644,7 @@ impl AppWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entity = cx.new(|cx| TextInput::new(cx, "Meeting title", &title));
+        let entity = cx.new(|cx| TextInput::new(cx, tr("Meeting title"), &title));
         let submitted = cx.subscribe(&entity, |this, _, _: &TextSubmitted, cx| {
             this.finish_meeting_rename(cx);
         });
@@ -1710,9 +1733,9 @@ impl AppWindow {
             .map(|relative| format!("~/{}", relative.display()))
             .unwrap_or_else(|_| folder.display().to_string());
         let permission_control = if self.platform.screen_recording_permitted {
-            tag(Tone::Success, "Ready").into_any_element()
+            tag(Tone::Success, tr("Ready")).into_any_element()
         } else {
-            button(ButtonKind::Secondary, "Open settings")
+            button(ButtonKind::Secondary, tr("Open settings"))
                 .id("meeting-screen-recording")
                 .on_click(cx.listener(|this, _, _, cx| {
                     if !crate::meeting::request_screen_recording() {
@@ -1726,8 +1749,8 @@ impl AppWindow {
         panel()
             .child(
                 settings_row(
-                    "Meetings (beta)",
-                    "Offer to record calls and save local transcripts",
+                    tr("Meetings (beta)"),
+                    tr("Offer to record calls and save local transcripts"),
                     toggle(position),
                 )
                 .when(!enabled, |row| row.border_b_0())
@@ -1751,23 +1774,23 @@ impl AppWindow {
             .when(enabled, |panel| {
                 panel
                     .child(settings_row(
-                        "Screen & System Audio Recording",
+                        tr("Screen & System Audio Recording"),
                         if self.platform.screen_recording_permitted {
-                            "Captures the other participants' audio"
+                            tr("Captures the other participants' audio")
                         } else {
-                            "Required to hear the other participants. Allow Hex, then reopen it."
+                            tr("Required to hear the other participants. Allow Hex, then reopen it.")
                         },
                         permission_control,
                     ))
                     .child(settings_row(
-                        "Transcript folder",
-                        "Finished meetings are saved here as Markdown",
+                        tr("Transcript folder"),
+                        tr("Finished meetings are saved here as Markdown"),
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
                             .child(
-                                button(ButtonKind::Secondary, "Reveal")
+                                button(ButtonKind::Secondary, tr("Reveal"))
                                     .id("reveal-meeting-folder")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         let folder =
@@ -1792,7 +1815,7 @@ impl AppWindow {
                     ))
                     .child(
                         settings_row(
-                            "Summarize with Apple Intelligence",
+                            tr("Summarize with Apple Intelligence"),
                             self.apple_intelligence_availability().description(),
                             toggle(notes_position),
                         )
@@ -1919,7 +1942,7 @@ impl AppWindow {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Use Folder".into()),
+            prompt: Some(tr("Use Folder").into()),
         });
         cx.spawn(async move |window, cx| {
             let result = receiver
@@ -1948,13 +1971,15 @@ impl AppWindow {
     pub(super) fn render_meetings(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let active_meeting = meeting::active(&self.platform.meetings);
         let action = match active_meeting.map(|meeting| meeting.status) {
-            _ if self.platform.meeting_stop_pending => busy_label("Finalizing…").into_any_element(),
-            Some(MeetingStatus::Transcribing) => busy_label("Finalizing…").into_any_element(),
-            Some(MeetingStatus::Starting) => busy_label("Starting…").into_any_element(),
+            _ if self.platform.meeting_stop_pending => {
+                busy_label(tr("Finalizing…")).into_any_element()
+            }
+            Some(MeetingStatus::Transcribing) => busy_label(tr("Finalizing…")).into_any_element(),
+            Some(MeetingStatus::Starting) => busy_label(tr("Starting…")).into_any_element(),
             // Recording is a state, not the screen's main action: a neutral
             // button in the same red-dot language as the Recording tag.
             Some(MeetingStatus::Recording) => button(ButtonKind::Secondary, status_dot(DANGER))
-                .child("Stop & transcribe")
+                .child(tr("Stop & transcribe"))
                 .children(active_meeting.map(|meeting| {
                     div()
                         .text_color(rgb(TEXT_TERTIARY))
@@ -1975,9 +2000,9 @@ impl AppWindow {
                 }))
                 .into_any_element(),
             _ if self.platform.meeting_refresh_started_ms.is_some() => {
-                busy_label("Starting…").into_any_element()
+                busy_label(tr("Starting…")).into_any_element()
             }
-            _ => button(ButtonKind::Primary, "Start recording")
+            _ => button(ButtonKind::Primary, tr("Start recording"))
                 .id("start-meeting")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.platform.meeting_refresh_started_ms = Some(now_ms());
@@ -2058,12 +2083,12 @@ impl AppWindow {
             PANE_LIST_WIDTH,
             (visible.is_empty() && self.platform.meetings_error.is_none()).then_some(
                 if searching {
-                    "No meetings match."
+                    tr("No meetings match.")
                 } else {
-                    "No meetings yet."
+                    tr("No meetings yet.")
                 },
             ),
-            "Meetings could not be loaded.",
+            tr("Meetings could not be loaded."),
             self.platform.meetings_error.clone(),
             rows,
         );
@@ -2072,7 +2097,7 @@ impl AppWindow {
             .size_full()
             .flex()
             .flex_col()
-            .child(pane_header_with_action("Meetings", Some(header_action)))
+            .child(pane_header_with_action(tr("Meetings"), Some(header_action)))
             .child(
                 pane_body().child(
                     pane_content()
@@ -2082,7 +2107,7 @@ impl AppWindow {
                             self.platform.meeting_runtime_error.clone(),
                             |column, error| {
                                 column.child(
-                                    error_panel("Meeting could not be recorded.", error)
+                                    error_panel(tr("Meeting could not be recorded."), error)
                                         .flex_none(),
                                 )
                             },
@@ -2115,9 +2140,9 @@ impl AppWindow {
             .cloned()
         else {
             return detail_placeholder(if self.platform.meetings.is_empty() {
-                "Record a call to see its notes and transcript here."
+                tr("Record a call to see its notes and transcript here.")
             } else {
-                "Select a meeting."
+                tr("Select a meeting.")
             });
         };
         let id = meeting.id.clone();
@@ -2150,9 +2175,9 @@ impl AppWindow {
                 menu_action(
                     "copy-notes",
                     menu_item(false).child(if copied("notes") {
-                        "Copied"
+                        tr("Copied")
                     } else {
-                        "Copy summary"
+                        tr("Copy summary")
                     }),
                 )
                 // Stays open so "Copied" confirms the copy.
@@ -2170,9 +2195,9 @@ impl AppWindow {
                 action(
                     "copy-transcript",
                     if copied("transcript") {
-                        "Copied"
+                        tr("Copied")
                     } else {
-                        "Copy transcript"
+                        tr("Copy transcript")
                     },
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2189,7 +2214,7 @@ impl AppWindow {
         if !active && self.platform.meeting_rename.is_none() {
             let (id, title) = (id.clone(), title.clone());
             actions.push(
-                action("rename", "Rename")
+                action("rename", tr("Rename"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.start_meeting_rename(id.clone(), title.clone(), window, cx)
                     }))
@@ -2203,9 +2228,9 @@ impl AppWindow {
                 menu_action(
                     "reveal",
                     menu_item(false).child(if export_path.is_some() {
-                        "Reveal Markdown"
+                        tr("Reveal Markdown")
                     } else {
-                        "Reveal files"
+                        tr("Reveal files")
                     }),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2223,7 +2248,7 @@ impl AppWindow {
             if notes_running {
                 menu_items.push(
                     disabled_menu_item()
-                        .child("Summarizing…")
+                        .child(tr("Summarizing…"))
                         .into_any_element(),
                 );
             } else {
@@ -2232,9 +2257,9 @@ impl AppWindow {
                     menu_action(
                         "notes",
                         menu_item(false).child(if meeting.notes.is_some() {
-                            "Regenerate summary"
+                            tr("Regenerate summary")
                         } else {
-                            "Summarize"
+                            tr("Summarize")
                         }),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2259,7 +2284,7 @@ impl AppWindow {
                 menu_items.push(menu_separator().into_any_element());
             }
             menu_items.push(
-                menu_action("delete", danger_menu_item().child("Delete…"))
+                menu_action("delete", danger_menu_item().child(tr("Delete…")))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.platform.meeting_actions_open = false;
                         this.trash_meeting(delete_id.clone(), cx)
@@ -2308,9 +2333,9 @@ impl AppWindow {
                         .as_ref()
                         .is_some_and(|path| path.exists())
                     {
-                        "Trash recording & Markdown"
+                        tr("Trash recording & Markdown")
                     } else {
-                        "Trash recording"
+                        tr("Trash recording")
                     },
                 )
                 .on_click(
@@ -2319,7 +2344,7 @@ impl AppWindow {
                 .into_any_element(),
             );
             actions.push(
-                action("cancel-delete", "Cancel")
+                action("cancel-delete", tr("Cancel"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.platform.meeting_delete_armed = None;
                         cx.notify();
@@ -2335,15 +2360,15 @@ impl AppWindow {
                 .gap_2()
                 .child(div().flex_1().min_w(px(0.0)).child(input.entity.clone()))
                 .child(
-                    action("save-title", "Save")
+                    action("save-title", tr("Save"))
                         .on_click(cx.listener(|this, _, _, cx| this.finish_meeting_rename(cx))),
                 )
-                .child(
-                    action("cancel-title", "Cancel").on_click(cx.listener(|this, _, _, cx| {
+                .child(action("cancel-title", tr("Cancel")).on_click(cx.listener(
+                    |this, _, _, cx| {
                         this.platform.meeting_rename = None;
                         cx.notify();
-                    })),
-                )
+                    },
+                )))
                 .into_any_element(),
             _ => detail_title(title).into_any_element(),
         };
@@ -2359,25 +2384,25 @@ impl AppWindow {
             self.platform
                 .meeting_action_error
                 .clone()
-                .map(|error| ("Meeting could not be updated.", error)),
+                .map(|error| (tr("Meeting could not be updated."), error)),
             meeting
                 .error
                 .clone()
-                .map(|error| ("Recording failed.", error)),
+                .map(|error| (tr("Recording failed."), error)),
             meeting
                 .export_error
                 .clone()
-                .map(|error| ("Markdown not saved.", error)),
+                .map(|error| (tr("Markdown not saved."), error)),
             meeting
                 .notes_error
                 .clone()
                 .filter(|_| !notes_running)
-                .map(|error| ("Notes could not be written.", error)),
+                .map(|error| (tr("Notes could not be written."), error)),
             meeting
                 .live_transcription_error
                 .clone()
                 .filter(|_| active)
-                .map(|error| ("Live draft unavailable.", error)),
+                .map(|error| (tr("Live draft unavailable."), error)),
         ]
         .into_iter()
         .flatten();
@@ -2388,26 +2413,26 @@ impl AppWindow {
                     .pb_5()
                     .text_footnote()
                     .text_color(rgb(TEXT_TERTIARY))
-                    .child("Writing a title and summary with Apple Intelligence…")
+                    .child(tr("Writing a title and summary with Apple Intelligence…"))
             })
         });
 
         let transcript = match &self.platform.meeting_transcript {
-            MeetingTranscript::Empty => empty_state("No transcript selected."),
+            MeetingTranscript::Empty => empty_state(tr("No transcript selected.")),
             MeetingTranscript::Loaded(lines) if lines.is_empty() => {
                 empty_state(match meeting.status {
-                    MeetingStatus::Starting => "Preparing local audio capture…",
+                    MeetingStatus::Starting => tr("Preparing local audio capture…"),
                     MeetingStatus::Recording if meeting.live_transcription_error.is_some() => {
-                        "Live transcription is unavailable. Audio is still recording safely."
+                        tr("Live transcription is unavailable. Audio is still recording safely.")
                     }
                     MeetingStatus::Recording if self.platform.meeting_stop_pending => {
-                        "Building the final transcript…"
+                        tr("Building the final transcript…")
                     }
-                    MeetingStatus::Recording => "Listening for speech…",
-                    MeetingStatus::Transcribing => "Building the final transcript…",
-                    MeetingStatus::Complete => "No speech was transcribed.",
+                    MeetingStatus::Recording => tr("Listening for speech…"),
+                    MeetingStatus::Transcribing => tr("Building the final transcript…"),
+                    MeetingStatus::Complete => tr("No speech was transcribed."),
                     MeetingStatus::Interrupted | MeetingStatus::Failed => {
-                        "No recoverable transcript is available."
+                        tr("No recoverable transcript is available.")
                     }
                 })
             }
@@ -2432,25 +2457,25 @@ impl AppWindow {
                             .text_caption()
                             .text_color(rgb(TEXT_TERTIARY))
                             .child(status_dot(DANGER))
-                            .child("Listening…"),
+                            .child(tr("Listening…")),
                     )
                 })
                 .into_any_element(),
             MeetingTranscript::Unavailable(error) => {
-                error_message("Transcript unavailable.", error.clone())
+                error_message(tr("Transcript unavailable."), error.clone())
             }
         };
         let transcript_label = match meeting.status {
             MeetingStatus::Starting | MeetingStatus::Recording
                 if !self.platform.meeting_stop_pending =>
             {
-                "Live transcript"
+                tr("Live transcript")
             }
             MeetingStatus::Starting | MeetingStatus::Recording | MeetingStatus::Transcribing => {
-                "Draft transcript"
+                tr("Draft transcript")
             }
-            MeetingStatus::Complete => "Transcript",
-            MeetingStatus::Interrupted | MeetingStatus::Failed => "Recovered draft",
+            MeetingStatus::Complete => tr("Transcript"),
+            MeetingStatus::Interrupted | MeetingStatus::Failed => tr("Recovered draft"),
         };
 
         div()
@@ -2508,16 +2533,18 @@ impl AppWindow {
             .or_else(|| self.personal_commands_status.last_reload_error.clone());
         let open_config = config_path.clone();
         let config_control = match workspace_state {
-            PersonalWorkspaceState::Missing => button(ButtonKind::Secondary, "Create config")
+            PersonalWorkspaceState::Missing => button(ButtonKind::Secondary, tr("Create config"))
                 .id("personal-commands-create")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.provision_personal_workspace();
                     cx.notify();
                 }))
                 .into_any_element(),
-            PersonalWorkspaceState::Creating => busy_label("Creating config…").into_any_element(),
+            PersonalWorkspaceState::Creating => {
+                busy_label(tr("Creating config…")).into_any_element()
+            }
             PersonalWorkspaceState::Ready | PersonalWorkspaceState::Error => {
-                button(ButtonKind::Secondary, "Edit config")
+                button(ButtonKind::Secondary, tr("Edit config"))
                     .id("personal-commands-open-config")
                     .on_click(move |_, _, _| open_path(&open_config))
                     .into_any_element()
@@ -2543,9 +2570,9 @@ impl AppWindow {
             button(
                 ButtonKind::Secondary,
                 if copied {
-                    "Copied"
+                    tr("Copied")
                 } else {
-                    "Copy agent prompt"
+                    tr("Copy agent prompt")
                 },
             )
             .id("personal-commands-copy-prompt")
@@ -2569,7 +2596,7 @@ impl AppWindow {
         {
             button(
                 ButtonKind::Primary,
-                "Keep microphone ready & enable commands",
+                tr("Keep microphone ready & enable commands"),
             )
             .id("confirm-enable-commands")
             .on_click(cx.listener(|this, _, _, cx| {
@@ -2591,7 +2618,7 @@ impl AppWindow {
                     div()
                         .text_footnote()
                         .text_color(rgb(TEXT_SECONDARY))
-                        .child("Voice commands"),
+                        .child(tr("Voice commands")),
                 )
                 .child(toggle(commands_position))
                 .into_any_element()
@@ -2691,14 +2718,17 @@ impl AppWindow {
             .size_full()
             .flex()
             .flex_col()
-            .child(pane_header_with_action("Commands", Some(commands_control)))
+            .child(pane_header_with_action(
+                tr("Commands"),
+                Some(commands_control),
+            ))
             .child(
                 pane_body().child(
                     pane_content()
                         .gap_3()
                         .when_some(last_error, |column, error| {
                             column.child(
-                                error_panel("Personal commands are not loading.", error)
+                                error_panel(tr("Personal commands are not loading."), error)
                                     .flex_none(),
                             )
                         })
@@ -2726,9 +2756,9 @@ impl AppWindow {
                                                 "commands-list",
                                                 PANE_LIST_WIDTH,
                                                 no_commands.then_some(if query.is_empty() {
-                                                    "No commands yet."
+                                                    tr("No commands yet.")
                                                 } else {
-                                                    "No matching commands."
+                                                    tr("No matching commands.")
                                                 }),
                                                 "",
                                                 None,
@@ -2762,10 +2792,10 @@ impl AppWindow {
                 .iter()
                 .find(|command| command.id == id)
         }) else {
-            return detail_placeholder("Select a command.");
+            return detail_placeholder(tr("Select a command."));
         };
         let aliases = if command.aliases.is_empty() {
-            "None".into()
+            tr("None").into()
         } else {
             command.aliases.join("\n")
         };
@@ -2781,16 +2811,16 @@ impl AppWindow {
             .child(
                 detail_body("command-detail-body")
                     .pt_1()
-                    .child(detail_row("Task", command.task.clone()))
-                    .child(detail_row("Context", command_scope(&command.scope)))
-                    .child(detail_row("Aliases", aliases))
-                    .child(detail_row("Current context", context_label.to_string())),
+                    .child(detail_row(tr("Task"), command.task.clone()))
+                    .child(detail_row(tr("Context"), command_scope(&command.scope)))
+                    .child(detail_row(tr("Aliases"), aliases))
+                    .child(detail_row(tr("Current context"), context_label.to_string())),
             )
             .into_any_element()
     }
 
     pub(super) fn command_search_input(cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search commands", ""));
+        let entity = cx.new(|cx| TextInput::picker(cx, tr("Search commands"), ""));
         let changed = cx.subscribe(&entity, |_, _, _: &TextChanged, cx| {
             cx.notify();
         });
@@ -2826,7 +2856,7 @@ impl AppWindow {
         match (application, browser_host) {
             (Some(application), Some(host)) => format!("{application} / {host}"),
             (Some(application), None) => application,
-            _ => "Unavailable".into(),
+            _ => tr("Unavailable").into(),
         }
     }
 
@@ -3163,7 +3193,7 @@ impl AppWindow {
                 Some(
                     button(
                         ButtonKind::Secondary,
-                        if copied { "Copied" } else { "Copy preset" },
+                        if copied { tr("Copied") } else { "Copy preset" },
                     )
                     .id("copy-hud-preset")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -3187,9 +3217,9 @@ impl AppWindow {
                             .items_center()
                             .gap_4()
                             .child(segmented_control().children([
-                                state_button(HudDemoState::Recording, "Recording", 0),
-                                state_button(HudDemoState::Transcribing, "Transcribing", 1),
-                                state_button(HudDemoState::Processing, "Processing", 2),
+                                state_button(HudDemoState::Recording, tr("Recording"), 0),
+                                state_button(HudDemoState::Transcribing, tr("Transcribing"), 1),
+                                state_button(HudDemoState::Processing, tr("Processing"), 2),
                             ]))
                             .child(
                                 div()
@@ -3212,7 +3242,7 @@ impl AppWindow {
                             .child(div().flex().flex_col().gap_4().children([
                                 self.render_hud_slider(HudControl::LineCount, "Line count", cx),
                                 self.render_hud_slider(HudControl::Curvature, "Curvature", cx),
-                                self.render_hud_slider(HudControl::Speed, "Speed", cx),
+                                self.render_hud_slider(HudControl::Speed, tr("Speed"), cx),
                                 self.render_hud_slider(HudControl::Blur, "Highlight blur", cx),
                                 self.render_hud_slider(HudControl::Glow, "Line glow", cx),
                                 self.render_hud_slider(HudControl::Depth, "Sphere depth", cx),
@@ -3247,7 +3277,7 @@ impl AppWindow {
         let warning_count = warnings.len();
         Some(
             div()
-                .child(settings_section_label("Permissions needed"))
+                .child(settings_section_label(tr("Permissions needed")))
                 .child(panel().children(warnings.into_iter().enumerate().map(
                     |(index, warning)| {
                         let (name, description) = permission_warning_copy(warning.kind);
