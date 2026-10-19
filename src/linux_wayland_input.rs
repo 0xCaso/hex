@@ -535,6 +535,7 @@ impl Keyboards {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     sender: SyncSender<HotkeyEvent>,
     stop: Arc<AtomicBool>,
