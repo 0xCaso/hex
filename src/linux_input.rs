@@ -385,10 +385,13 @@ fn grab_variants(
             .map_err(ReplyError::from)
             .and_then(|cookie| cookie.check());
         if let Err(error) = result {
+            // Wait for each release: another client may grab the same key
+            // right after this returns, and must not race the ungrab.
             for modifiers in grabbed {
-                let _ = connection.ungrab_key(key, root, modifiers);
+                if let Ok(cookie) = connection.ungrab_key(key, root, modifiers) {
+                    let _ = cookie.check();
+                }
             }
-            let _ = connection.flush();
             return Err(error);
         }
         grabbed.push(modifiers);
