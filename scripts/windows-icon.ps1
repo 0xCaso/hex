@@ -1,43 +1,41 @@
-# Regenerates resources/windows/hex.ico, the executable and shortcut icon,
-# from the macOS icon's glyph on the same dark vertical gradient.
+# Regenerates resources/windows/hex.ico, the executable, taskbar, and shortcut
+# icon: the macOS icon's glyph on a flat dark tile with a thin lighter rim, so
+# it reads on both dark and light taskbars. Windows icons are flat; the macOS
+# gradient collapses into a hard band at taskbar sizes.
+param([string]$Out)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
 $root = Split-Path -Parent $PSScriptRoot
+if (-not $Out) { $Out = Join-Path $root "resources\windows\hex.ico" }
 $glyph = [Drawing.Image]::FromFile((Join-Path $root "app\AppIcon.icon\Assets\Image.png"))
 $sizes = 256, 64, 48, 40, 32, 24, 20, 16
-$pngs = foreach ($size in $sizes) {
+$frames = foreach ($size in $sizes) {
     $bitmap = New-Object Drawing.Bitmap $size, $size
     $graphics = [Drawing.Graphics]::FromImage($bitmap)
     $graphics.SmoothingMode = "AntiAlias"
     $graphics.InterpolationMode = "HighQualityBicubic"
     $graphics.PixelOffsetMode = "HighQuality"
-    $inset = [Math]::Max(1, [Math]::Round($size / 32))
+    $inset = if ($size -le 24) { 0.5 } else { [Math]::Max(1, $size / 32) }
     $tile = $size - 2 * $inset
-    $radius = $tile * 0.22
+    $diameter = 2 * $tile * 0.22
     $path = New-Object Drawing.Drawing2D.GraphicsPath
-    $diameter = 2 * $radius
     $path.AddArc($inset, $inset, $diameter, $diameter, 180, 90)
     $path.AddArc($inset + $tile - $diameter, $inset, $diameter, $diameter, 270, 90)
     $path.AddArc($inset + $tile - $diameter, $inset + $tile - $diameter, $diameter, $diameter, 0, 90)
     $path.AddArc($inset, $inset + $tile - $diameter, $diameter, $diameter, 90, 90)
     $path.CloseFigure()
-    # Gray 0.2 at the top fading to black at 70% of the tile, then black,
-    # as the macOS fill does.
-    $graphics.SetClip($path)
-    for ($y = 0; $y -lt $size; $y++) {
-        $t = [Math]::Min(1, [Math]::Max(0, ($y - $inset) / ($tile * 0.7)))
-        $level = [int][Math]::Round(51 * (1 - $t))
-        $row = New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(255, $level, $level, $level))
-        $graphics.FillRectangle($row, 0, $y, $size, 1)
-        $row.Dispose()
-    }
-    $graphics.ResetClip()
-    # The glyph fills half the tile, as in the macOS icon composition.
-    $height = $tile * 0.5 * $glyph.Height / [Math]::Max($glyph.Width, $glyph.Height) * 1.12
+    $fill = New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(255, 22, 22, 22))
+    $graphics.FillPath($fill, $path)
+    $rim = New-Object Drawing.Pen ([Drawing.Color]::FromArgb(255, 70, 70, 70)), ([Math]::Max(1, $size / 48))
+    $graphics.DrawPath($rim, $path)
+    # Small frames give the glyph more of the tile so its rings stay legible.
+    $share = if ($size -le 24) { 0.68 } elseif ($size -le 40) { 0.62 } else { 0.56 }
+    $height = $tile * $share * 1.12 * $glyph.Height / [Math]::Max($glyph.Width, $glyph.Height)
     $width = $height * $glyph.Width / $glyph.Height
     $graphics.DrawImage($glyph, ($size - $width) / 2, ($size - $height) / 2, $width, $height)
     $graphics.Dispose()
+
     $stream = New-Object IO.MemoryStream
     if ($size -ge 256) {
         # Vista and later read the large frame as PNG.
@@ -65,9 +63,9 @@ $pngs = foreach ($size in $sizes) {
 }
 $glyph.Dispose()
 
-# ICO container: header, one directory entry per image, then PNG payloads.
-$out = New-Object IO.MemoryStream
-$writer = New-Object IO.BinaryWriter $out
+# ICO container: header, one directory entry per frame, then the payloads.
+$icon = New-Object IO.MemoryStream
+$writer = New-Object IO.BinaryWriter $icon
 $writer.Write([UInt16]0); $writer.Write([UInt16]1); $writer.Write([UInt16]$sizes.Count)
 $offset = 6 + 16 * $sizes.Count
 for ($i = 0; $i -lt $sizes.Count; $i++) {
@@ -75,10 +73,10 @@ for ($i = 0; $i -lt $sizes.Count; $i++) {
     $writer.Write([byte]$dimension); $writer.Write([byte]$dimension)
     $writer.Write([byte]0); $writer.Write([byte]0)
     $writer.Write([UInt16]1); $writer.Write([UInt16]32)
-    $writer.Write([UInt32]$pngs[$i].Length); $writer.Write([UInt32]$offset)
-    $offset += $pngs[$i].Length
+    $writer.Write([UInt32]$frames[$i].Length); $writer.Write([UInt32]$offset)
+    $offset += $frames[$i].Length
 }
-foreach ($png in $pngs) { $writer.Write($png) }
+foreach ($frame in $frames) { $writer.Write($frame) }
 $writer.Flush()
-[IO.File]::WriteAllBytes((Join-Path $root "resources\windows\hex.ico"), $out.ToArray())
-"wrote resources\windows\hex.ico ($($out.Length) bytes)"
+[IO.File]::WriteAllBytes($Out, $icon.ToArray())
+"wrote $Out ($($icon.Length) bytes)"
