@@ -32,21 +32,48 @@ refuses to start without Screen Recording and asks macOS to list HEX.
 
 ```ts
 Zoom / Teams / Slack huddle / FaceTime / browser call uses the microphone
+  -> CoreAudio input process -> canonical host app   // parent PID + bundle ID
   -> 4 stable observations (about 2 s)              // meetings.detect
   -> Capsule below the menu bar, focus-free          // meetings.offer
      ├── Record -> Start recording
      ├── Not now -> Close
      └── 20 s timeout -> Close                       // never records on timeout
-  -> Same call is snoozed until its app is off the microphone for about 60 s
+  -> Same call is snoozed by key and app until off the microphone for about 60 s
 ```
 
+Chromium and Electron apps (Brave, Chrome, Edge, Slack, Teams) capture microphone
+audio in sandboxed `audio.mojom.AudioService` utility processes (`*.helper`) that
+do not register with `NSRunningApplication`; Zoom uses `us.zoom.CptHost`, Firefox
+uses `org.mozilla.plugincontainer`, Safari uses `com.apple.WebKit.GPU` (`Safari
+Graphics and Media`), and FaceTime uses `com.apple.avconferenced`.
+[microphone_activity.rs](../../src/microphone_activity.rs) attributes each input
+process to its canonical host app via parent PID lineage, CoreAudio's
+`kAudioProcessPropertyBundleID`, and `NSRunningApplication`. When Brave uses the
+microphone and is not snoozed, `ContextSnapshot::capture_for_meeting` in
+[context.rs](../../src/context.rs) inspects Brave's active and open tabs for a
+`meet.google.com` call even if Brave is behind another window or tab.
+
 Sources: [meeting_detection.rs](../../src/meeting_detection.rs),
-[microphone_activity.rs](../../src/microphone_activity.rs), and the
-`MeetingPanel` capsule in [meeting_watcher.rs](../../src/meeting_watcher.rs).
-Checks: `requires_stability_and_offers_once_per_session`,
+[microphone_activity.rs](../../src/microphone_activity.rs),
+[context.rs](../../src/context.rs), and the `MeetingPanel` capsule in
+[meeting_watcher.rs](../../src/meeting_watcher.rs) (which logs `INFO` when an
+offer is triggered, shown, dismissed, or times out).
+Checks: `resolves_unregistered_chromium_and_electron_audio_helpers_to_their_host_apps`,
+`resolves_helper_bundle_ids_when_parent_lookup_is_unavailable`,
+`attributes_safari_webkit_gpu_and_facetime_avconferenced_only_when_active`,
+`canonical_bundle_matching_covers_supported_apps_and_variants`,
+`classifies_helper_and_host_microphone_applications`,
+`cleans_google_meet_titles_and_ignores_raw_meet_codes`,
+`switching_tabs_during_a_snoozed_browser_call_does_not_re_offer`,
+`parses_brave_tab_url_and_title_output`,
+`requires_stability_and_offers_once_per_session`,
 `a_brief_microphone_release_does_not_re_offer_the_same_call`, and
-`named_meetings_keep_their_title_and_app_calls_use_the_app`. They do not exercise
-CoreAudio process enumeration or a real call.
+`named_meetings_keep_their_title_and_app_calls_use_the_app`.
+Observed (2026-10-19): live CoreAudio process inspection on Studio and a headless
+Brave WebRTC `getUserMedia({audio: true})` reproduction on Pro confirmed
+`com.brave.Browser.helper` and `com.tinyspeck.slackmacgap.helper` had
+`NSRunningApplication == nil` before parent/bundle resolution and resolved to
+`com.brave.Browser` and `com.tinyspeck.slackmacgap` afterward.
 
 Preview: `scripts/capture-preview.sh OUT meeting-offer [--meeting-panel call-ended|ready]`.
 
