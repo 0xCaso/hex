@@ -332,7 +332,7 @@ impl Profiles {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn process_voice_action_cancellable(
     instruction: &str,
     selected_text: Option<&str>,
@@ -846,7 +846,7 @@ fn voice_action_prompt(
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn voice_action_failure(started: Instant, error: String) -> Processed {
     Processed {
         text: String::new(),
