@@ -86,7 +86,16 @@ with tempfile.TemporaryDirectory(prefix="hex-service-", dir=os.environ.get("TMPD
             assert call(client)["state"]["pid"] == service.pid
             assert call(client, {"SetVolume": 0.0})["error"] is None
         assert snapshot()["pid"] == service.pid
-        assert json.loads((support / "linux-settings.json").read_text())["sound_effect_volume"] == 0
+        assert json.loads((support / "settings.json").read_text())["sound_effects"] is False
+
+        # Settings saves settings.json itself and asks the service to adopt it.
+        saved = json.loads((support / "settings.json").read_text())
+        saved["paste_with_shift"] = not saved["paste_with_shift"]
+        (support / "settings.json").write_text(json.dumps(saved))
+        with connection() as client:
+            reply = call(client, "ReloadSettings")
+            assert reply["error"] is None
+            assert reply["state"]["settings"]["paste_with_shift"] == saved["paste_with_shift"]
 
         # Disconnecting an uncommitted focused shortcut capture releases only that edit.
         with connection() as client:
@@ -123,7 +132,7 @@ with tempfile.TemporaryDirectory(prefix="hex-service-", dir=os.environ.get("TMPD
         subprocess.run([binary, "stop"], env=env, check=True, capture_output=True)
         assert service.wait(timeout=8) == 0
         assert not path.exists()
-        assert (support / "linux-settings.json").exists()
+        assert (support / "settings.json").exists()
         # Custom data roots must never start/restart the user's real installed unit.
         fakebin = root / "bin"
         fakebin.mkdir()
