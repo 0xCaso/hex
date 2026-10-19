@@ -421,10 +421,6 @@ fn loudest_window_dbfs(samples: &[f32]) -> f32 {
     (20.0 * loudest.max(1e-6).log10()) as f32
 }
 
-pub(crate) fn is_near_silent_samples(samples: &[f32]) -> bool {
-    loudest_window_dbfs(samples) < SILENCE_THRESHOLD_DBFS
-}
-
 pub(crate) fn pad_for_parakeet(samples: &mut Vec<f32>) {
     samples.resize(
         samples
@@ -890,6 +886,7 @@ impl DictationCapture {
             .is_some_and(|recording| recording.intentional)
     }
 
+    #[cfg(test)]
     pub fn is_streaming(&self) -> bool {
         self.recording
             .as_ref()

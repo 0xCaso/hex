@@ -1,4 +1,5 @@
-//! Pause detection over 16 kHz capture audio for incremental transcription.
+//! Pause detection over 16 kHz meeting audio, so rolling transcription cuts
+//! chunks at natural pauses.
 //!
 //! Speech is any 20 ms frame at least 12 dB above an adaptive noise floor and
 //! never quieter than -55 dBFS. The floor starts at the first frame, falls
@@ -31,11 +32,6 @@ pub struct PauseSegmenter {
 }
 
 impl PauseSegmenter {
-    /// Number of samples consumed so far, including a partial frame.
-    pub fn consumed(&self) -> usize {
-        self.position + self.frame.len()
-    }
-
     /// Consumes contiguous samples and returns the last cut found within them,
     /// as an absolute sample offset from the first sample ever pushed.
     pub fn push(&mut self, mut samples: &[f32]) -> Option<usize> {

@@ -143,13 +143,6 @@ impl WarmTranscriber {
         })
     }
 
-    /// The warm model, only if it already serves `selection`.
-    pub fn active_for(&mut self, selection: &TranscriptionSelection) -> Option<&mut Transcriber> {
-        self.active
-            .as_mut()
-            .filter(|model| model.matches_selection(selection))
-    }
-
     /// Stream options of the warm model, when it can stream on its device.
     pub(crate) fn stream_options(&self) -> Option<&transcribe_cpp::StreamOptions> {
         match &self.active {
