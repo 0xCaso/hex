@@ -643,13 +643,15 @@ struct ListenerView {
 }
 
 /// The background update check's state, for the Software updates row.
+/// The update state the Software updates row shows. `version` is `None`
+/// where the updater does not report it.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 enum SoftwareUpdate {
     Checking,
     Current,
     Failed,
-    Available { version: String },
-    ReadyToRestart { version: String },
+    Available { version: Option<String> },
+    ReadyToRestart { version: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2968,8 +2970,10 @@ impl AppWindow {
         let control = match self.platform_software_update()? {
             SoftwareUpdate::Checking => busy_label("Checking").into_any_element(),
             SoftwareUpdate::Available { version } => {
-                button(ButtonKind::Secondary, format!("Update to {version}"))
+                let label = version.map_or_else(|| "Update".into(), |v| format!("Update to {v}"));
+                button(ButtonKind::Secondary, label)
                     .id("software-update")
+                    .debug_selector(|| "software-update".into())
                     .text_color(rgb(ACCENT_TEXT))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.install_update(cx);
@@ -2978,7 +2982,11 @@ impl AppWindow {
                     .into_any_element()
             }
             SoftwareUpdate::ReadyToRestart { version } => {
-                button(ButtonKind::Secondary, format!("Restart into {version}"))
+                let label = version.map_or_else(
+                    || "Restart to update".into(),
+                    |v| format!("Restart into {v}"),
+                );
+                button(ButtonKind::Secondary, label)
                     .id("software-update")
                     .text_color(rgb(ACCENT_TEXT))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -3052,6 +3060,7 @@ impl AppWindow {
         let indicator_position = self.indicator_position_spring.render_position(window);
         let indicator_control = sliding_segmented_control(indicator_position, &[64.0; 3])
             .id("indicator-position")
+            .debug_selector(|| "indicator-position".into())
             .children(
                 [
                     ("Top", IndicatorPosition::Top),
@@ -6790,6 +6799,25 @@ mod tests {
 
     fn history_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
         preview_fixture(pane_preview(DeveloperPane::History), window, cx)
+    }
+
+    #[gpui::test]
+    fn settings_offer_the_shared_update_and_indicator_rows(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            preview_fixture(
+                AppWindowPreview {
+                    update_available: true,
+                    ..pane_preview(DeveloperPane::Settings)
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(WINDOW_WIDTH), px(4000.0)));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("software-update").is_some());
+        assert!(cx.debug_bounds("indicator-position").is_some());
     }
 
     #[gpui::test]

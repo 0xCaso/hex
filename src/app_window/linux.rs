@@ -419,9 +419,7 @@ impl AppWindow {
             DesktopUpdateStatus::Checking => SoftwareUpdate::Checking,
             DesktopUpdateStatus::Current => SoftwareUpdate::Current,
             DesktopUpdateStatus::Failed => SoftwareUpdate::Failed,
-            DesktopUpdateStatus::ReadyToRestart => SoftwareUpdate::ReadyToRestart {
-                version: "the new version".into(),
-            },
+            DesktopUpdateStatus::ReadyToRestart => SoftwareUpdate::ReadyToRestart { version: None },
         })
     }
 
