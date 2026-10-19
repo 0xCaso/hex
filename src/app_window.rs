@@ -813,6 +813,7 @@ enum HotkeyKind {
     Dictation,
     Edit,
     PasteLast,
+    Scrawl,
 }
 
 fn set_hotkey_binding(settings: &mut AppSettings, kind: HotkeyKind, binding: HotkeyBinding) {
@@ -825,6 +826,7 @@ fn set_hotkey_binding(settings: &mut AppSettings, kind: HotkeyKind, binding: Hot
         }
         HotkeyKind::Edit => settings.edit_hotkey = binding,
         HotkeyKind::PasteLast => settings.paste_last_hotkey = Some(binding),
+        HotkeyKind::Scrawl => settings.scrawl.hotkey = binding,
     }
 }
 
@@ -962,6 +964,9 @@ pub struct AppWindow {
     incremental_toggle: ToggleSpring,
     meetings_toggle: ToggleSpring,
     meeting_notes_toggle: ToggleSpring,
+    scrawl_toggle: ToggleSpring,
+    scrawl_auto_crop_toggle: ToggleSpring,
+    scrawl_error: Option<String>,
     screen_recording_permitted: bool,
     meeting_folder_error: Option<String>,
     sound_volume_spring: ToggleSpring,
@@ -995,8 +1000,8 @@ pub struct AppWindow {
     hotkey_capture: HotkeyCaptureState,
     hotkey_capture_animation: ToggleSpring,
     hotkey_width_spring: ToggleSpring,
-    hotkey_side_animations: [ToggleSpring; 3],
-    hotkey_side_selection_springs: [ToggleSpring; 3],
+    hotkey_side_animations: [ToggleSpring; 4],
+    hotkey_side_selection_springs: [ToggleSpring; 4],
     window_focus: FocusHandle,
     hotkey_focus: FocusHandle,
     _hotkey_blur_subscription: Subscription,
@@ -1443,9 +1448,15 @@ impl AppWindow {
             meeting_notes_toggle: ToggleSpring::new(
                 settings.meetings.summarize_with_apple_intelligence,
             ),
+            scrawl_toggle: ToggleSpring::new(settings.scrawl.enabled),
+            scrawl_auto_crop_toggle: ToggleSpring::new(settings.scrawl.auto_crop),
+            scrawl_error: None,
             screen_recording_permitted: match &preview {
                 Some(preview) => !preview.screen_recording_missing,
-                None => crate::meeting::screen_recording_permitted(),
+                None => {
+                    (settings.meetings.available() || settings.scrawl.enabled)
+                        && crate::meeting::screen_recording_permitted()
+                }
             },
             meeting_folder_error: None,
             sound_volume_spring: ToggleSpring::at(sound_volume_index(&settings) as f32),
@@ -1534,6 +1545,7 @@ impl AppWindow {
                 HotkeyKind::Dictation,
                 HotkeyKind::Edit,
                 HotkeyKind::PasteLast,
+                HotkeyKind::Scrawl,
             ]
             .map(|kind| {
                 ToggleSpring::new(
@@ -1546,6 +1558,7 @@ impl AppWindow {
                 HotkeyKind::Dictation,
                 HotkeyKind::Edit,
                 HotkeyKind::PasteLast,
+                HotkeyKind::Scrawl,
             ]
             .map(|kind| {
                 ToggleSpring::at(hotkey_side_index(
@@ -1853,7 +1866,7 @@ impl AppWindow {
                 changed = true;
             }
         }
-        if self.settings.meetings.available() {
+        if self.settings.meetings.available() || self.settings.scrawl.enabled {
             let permitted = crate::meeting::screen_recording_permitted();
             if permitted != self.screen_recording_permitted {
                 self.screen_recording_permitted = permitted;
@@ -2967,6 +2980,7 @@ impl AppWindow {
                                 HotkeyKind::Dictation => "cancel-dictation-hotkey-capture",
                                 HotkeyKind::Edit => "cancel-edit-hotkey-capture",
                                 HotkeyKind::PasteLast => "cancel-paste-last-hotkey-capture",
+                                HotkeyKind::Scrawl => "cancel-scrawl-hotkey-capture",
                             })
                             .ml_1()
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3003,6 +3017,7 @@ impl AppWindow {
                 HotkeyKind::Dictation => "dictation-hotkey-control",
                 HotkeyKind::Edit => "edit-hotkey-control",
                 HotkeyKind::PasteLast => "paste-last-hotkey-control",
+                HotkeyKind::Scrawl => "scrawl-hotkey-control",
             })
             .track_focus(&self.hotkey_focus)
             .w(px(control_width))
@@ -3239,6 +3254,10 @@ impl AppWindow {
             HotkeyCaptureState::Listening { kind, .. } => kind,
             HotkeyCaptureState::Idle | HotkeyCaptureState::Saved { .. } => return,
         };
+        if kind == HotkeyKind::Scrawl && binding.key.is_none() {
+            self.set_hotkey_capture_message("Add a key", cx);
+            return;
+        }
         if hotkey_binding_conflicts(&self.settings, kind, &binding) {
             self.set_hotkey_capture_message("Already in use", cx);
             return;
@@ -3252,6 +3271,8 @@ impl AppWindow {
             .set_target(hotkey_saved_width(keycap_count));
         if kind == HotkeyKind::Edit {
             self.voice_action_inputs.error = None;
+        } else if kind == HotkeyKind::Scrawl {
+            self.scrawl_error = None;
         }
         if !self.preview {
             crate::app_settings::set_hotkey_capture_active(false);
@@ -3620,6 +3641,7 @@ impl AppWindow {
         let dock_icon_position = self.dock_icon_toggle.render_position(window);
         let incremental_position = self.incremental_toggle.render_position(window);
         let meetings_section = self.render_meeting_settings(window, cx);
+        let scrawl_section = self.render_scrawl_settings(window, cx);
         let launch_at_login_position = self.launch_at_login_toggle.render_position(window);
         let microphone_label = self
             .settings
@@ -3956,6 +3978,8 @@ impl AppWindow {
                 )
                 .child(settings_section_label("Meetings"))
                 .child(meetings_section)
+                .child(settings_section_label("Scrawl"))
+                .child(scrawl_section)
                 .child(settings_section_label("Application"))
                 .child(
                     panel()
@@ -4122,6 +4146,99 @@ impl AppWindow {
                     .when_some(self.meeting_folder_error.clone(), |panel, error| {
                         panel.child(inline_error(error))
                     })
+            })
+    }
+
+    fn render_scrawl_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let enabled = self.settings.scrawl.enabled;
+        let position = self.scrawl_toggle.render_position(window);
+        let auto_crop_position = self.scrawl_auto_crop_toggle.render_position(window);
+        let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Scrawl, window, cx);
+        let permission_control = if self.screen_recording_permitted {
+            tag(Tone::Success, "Ready").into_any_element()
+        } else {
+            button(ButtonKind::Secondary, "Open settings")
+                .id("scrawl-screen-recording")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !crate::meeting::request_screen_recording() {
+                        crate::meeting::open_screen_recording_settings();
+                    }
+                    this.permission_refresh_at = Instant::now();
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        panel()
+            .child(
+                settings_row(
+                    "Scrawl (beta)",
+                    "Record the display under the pointer with your voice and copy a visual bundle",
+                    toggle(position),
+                )
+                .when(!enabled && self.scrawl_error.is_none(), |row| row.border_b_0())
+                .id("scrawl-setting")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let enabled = !this.settings.scrawl.enabled;
+                    let mut conflict_error = None;
+                    let saved = this.update_settings(cx, |settings| {
+                        if let Err(error) = set_scrawl_enabled(settings, enabled) {
+                            conflict_error = Some(error);
+                        }
+                    });
+                    if let Some(error) = conflict_error {
+                        this.scrawl_error = Some(error.into());
+                        cx.notify();
+                        return;
+                    }
+                    if saved {
+                        this.scrawl_error = None;
+                        this.scrawl_toggle.set_enabled(enabled);
+                        if enabled {
+                            this.screen_recording_permitted =
+                                this.preview || crate::meeting::screen_recording_permitted();
+                        }
+                    }
+                })),
+            )
+            .when(enabled, |panel| {
+                panel
+                    .child(settings_row(
+                        "Screen & System Audio Recording",
+                        if self.screen_recording_permitted {
+                            "Captures the display under the pointer"
+                        } else {
+                            "Required to capture the screen. Allow Hex, then reopen it."
+                        },
+                        permission_control,
+                    ))
+                    .child(
+                        settings_row(
+                            "Scrawl shortcut",
+                            "Tap to start recording the screen and your voice, then tap again to finish",
+                            hotkey_control,
+                        )
+                        .id("scrawl-hotkey-setting"),
+                    )
+                    .child(
+                        settings_row(
+                            "Auto-crop full-screen captures",
+                            "Crop full-screen captures to the active window or click region",
+                            toggle(auto_crop_position),
+                        )
+                        .border_b_0()
+                        .id("scrawl-auto-crop-setting")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let auto_crop = !this.settings.scrawl.auto_crop;
+                            if this.update_settings(cx, |settings| {
+                                settings.scrawl.auto_crop = auto_crop;
+                            }) {
+                                this.scrawl_auto_crop_toggle.set_enabled(auto_crop);
+                            }
+                        })),
+                    )
+            })
+            .when_some(self.scrawl_error.clone(), |panel, error| {
+                panel.child(inline_error(error))
             })
     }
 
@@ -7790,6 +7907,16 @@ fn set_voice_action_enabled(settings: &mut AppSettings, enabled: bool) -> Result
     Ok(())
 }
 
+fn set_scrawl_enabled(settings: &mut AppSettings, enabled: bool) -> Result<(), &'static str> {
+    if enabled && hotkey_binding_conflicts(settings, HotkeyKind::Scrawl, &settings.scrawl.hotkey) {
+        return Err(
+            "The Scrawl shortcut is already in use. Change the other shortcut before enabling Scrawl.",
+        );
+    }
+    settings.scrawl.enabled = enabled;
+    Ok(())
+}
+
 fn hotkey_idle_width(keycap_count: usize) -> f32 {
     (112.0 + hotkey_keycaps_width(keycap_count)).max(HOTKEY_MIN_WIDTH)
 }
@@ -7799,6 +7926,7 @@ const fn hotkey_kind_index(kind: HotkeyKind) -> usize {
         HotkeyKind::Dictation => 0,
         HotkeyKind::Edit => 1,
         HotkeyKind::PasteLast => 2,
+        HotkeyKind::Scrawl => 3,
     }
 }
 
@@ -7868,7 +7996,9 @@ fn hotkey_binding_conflicts(
 ) -> bool {
     let mut others = match kind {
         HotkeyKind::Dictation => Vec::new(),
-        HotkeyKind::Edit | HotkeyKind::PasteLast => vec![settings.dictation_hotkey.clone()],
+        HotkeyKind::Edit | HotkeyKind::PasteLast | HotkeyKind::Scrawl => {
+            vec![settings.dictation_hotkey.clone()]
+        }
     };
     if kind != HotkeyKind::Edit && settings.voice_action.enabled {
         others.push(settings.edit_hotkey.clone());
@@ -7877,6 +8007,9 @@ fn hotkey_binding_conflicts(
         && let Some(paste) = &settings.paste_last_hotkey
     {
         others.push(paste.clone());
+    }
+    if kind != HotkeyKind::Scrawl && settings.scrawl.enabled {
+        others.push(settings.scrawl.hotkey.clone());
     }
     if settings.meetings.available() {
         others.push(HotkeyBinding::paste_meeting_default());
@@ -7889,6 +8022,7 @@ fn hotkey_binding(settings: &AppSettings, kind: HotkeyKind) -> Option<&HotkeyBin
         HotkeyKind::Dictation => Some(&settings.dictation_hotkey),
         HotkeyKind::Edit => Some(&settings.edit_hotkey),
         HotkeyKind::PasteLast => settings.paste_last_hotkey.as_ref(),
+        HotkeyKind::Scrawl => Some(&settings.scrawl.hotkey),
     }
 }
 
@@ -9839,6 +9973,30 @@ mod tests {
         assert!(hotkey_binding_conflicts(
             &settings,
             HotkeyKind::Edit,
+            &settings.dictation_hotkey,
+        ));
+    }
+
+    #[test]
+    fn disabled_scrawl_does_not_reserve_its_shortcut() {
+        let mut settings = AppSettings::default();
+        for enabled in [false, true] {
+            settings.scrawl.enabled = enabled;
+            for kind in [
+                HotkeyKind::Dictation,
+                HotkeyKind::Edit,
+                HotkeyKind::PasteLast,
+            ] {
+                assert_eq!(
+                    hotkey_binding_conflicts(&settings, kind, &settings.scrawl.hotkey),
+                    enabled,
+                );
+            }
+        }
+        settings.scrawl.enabled = false;
+        assert!(hotkey_binding_conflicts(
+            &settings,
+            HotkeyKind::Scrawl,
             &settings.dictation_hotkey,
         ));
     }

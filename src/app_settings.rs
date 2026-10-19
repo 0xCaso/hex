@@ -22,6 +22,9 @@ static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 static HOTKEYS: OnceLock<RwLock<RuntimeHotkeys>> = OnceLock::new();
 static PASTE_KEY_CODE: OnceLock<u16> = OnceLock::new();
+static SCRAWL_KEY_CODE: OnceLock<u16> = OnceLock::new();
+static SCRAWL_ENABLED: AtomicBool = AtomicBool::new(false);
+static SCRAWL_AUTO_CROP: AtomicBool = AtomicBool::new(true);
 static HOTKEY_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static TRANSCRIPTION_SELECTION: OnceLock<RwLock<RuntimeTranscriptionSelection>> = OnceLock::new();
@@ -256,10 +259,28 @@ impl HotkeyBinding {
             }),
         }
     }
+
+    pub fn scrawl_default() -> Self {
+        Self {
+            modifiers: HotkeyModifiers {
+                option: Some(ModifierSide::Either),
+                shift: Some(ModifierSide::Either),
+                ..Default::default()
+            },
+            key: Some(HotkeyKey {
+                code: scrawl_key_code(),
+                label: "S".into(),
+            }),
+        }
+    }
 }
 
 fn paste_key_code() -> u16 {
     *PASTE_KEY_CODE.get_or_init(|| crate::keyboard::key_code_for('v').unwrap_or(9))
+}
+
+fn scrawl_key_code() -> u16 {
+    *SCRAWL_KEY_CODE.get_or_init(|| crate::keyboard::key_code_for('s').unwrap_or(1))
 }
 
 impl HotkeyBinding {
@@ -396,6 +417,7 @@ pub struct RuntimeHotkeys {
     pub edit: Option<RuntimeHotkey>,
     pub paste_last: Option<RuntimeHotkey>,
     pub paste_meeting: Option<RuntimeHotkey>,
+    pub scrawl: Option<RuntimeHotkey>,
 }
 
 impl Default for RuntimeHotkeys {
@@ -406,6 +428,27 @@ impl Default for RuntimeHotkeys {
             paste_last: Some(HotkeyBinding::paste_last_default().runtime()),
             paste_meeting: crate::DEVELOPER_FEATURES_ENABLED
                 .then(|| HotkeyBinding::paste_meeting_default().runtime()),
+            scrawl: None,
+        }
+    }
+}
+
+/// Opt-in Scrawl screen + voice capture (`⌥⇧S`). Off by default so no shortcut
+/// is reserved and Screen Recording permission is never requested until enabled.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ScrawlSettings {
+    pub enabled: bool,
+    pub hotkey: HotkeyBinding,
+    pub auto_crop: bool,
+}
+
+impl Default for ScrawlSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: HotkeyBinding::scrawl_default(),
+            auto_crop: true,
         }
     }
 }
@@ -572,6 +615,7 @@ pub struct AppSettings {
     pub voice_action: VoiceActionSettings,
     pub history_retention: crate::history::HistoryRetention,
     pub meetings: MeetingSettings,
+    pub scrawl: ScrawlSettings,
     #[serde(skip_serializing)]
     pub text_replacements: Vec<TextReplacement>,
 }
@@ -607,6 +651,7 @@ impl Default for AppSettings {
             voice_action: VoiceActionSettings::default(),
             history_retention: crate::history::HistoryRetention::default(),
             meetings: MeetingSettings::default(),
+            scrawl: ScrawlSettings::default(),
             text_replacements: Vec::new(),
         }
     }
@@ -823,6 +868,8 @@ impl AppSettings {
             self.meetings.summarize_with_apple_intelligence,
             Ordering::Release,
         );
+        SCRAWL_ENABLED.store(self.scrawl.enabled, Ordering::Release);
+        SCRAWL_AUTO_CROP.store(self.scrawl.auto_crop, Ordering::Release);
         *MEETING_OUTPUT_FOLDER
             .get_or_init(Default::default)
             .write()
@@ -905,6 +952,7 @@ impl AppSettings {
                 .meetings
                 .available()
                 .then(|| HotkeyBinding::paste_meeting_default().runtime()),
+            scrawl: self.scrawl.enabled.then(|| self.scrawl.hotkey.runtime()),
         }
     }
 
@@ -1044,6 +1092,14 @@ pub fn meeting_notes_enabled() -> bool {
     MEETING_NOTES_ENABLED.load(Ordering::Acquire)
 }
 
+pub fn scrawl_enabled() -> bool {
+    SCRAWL_ENABLED.load(Ordering::Acquire)
+}
+
+pub fn scrawl_auto_crop() -> bool {
+    SCRAWL_AUTO_CROP.load(Ordering::Acquire)
+}
+
 pub fn meeting_output_folder() -> PathBuf {
     MEETING_OUTPUT_FOLDER
         .get_or_init(Default::default)
@@ -1165,6 +1221,10 @@ mod tests {
                 .resolved_output_folder()
                 .ends_with("Hex Meetings")
         );
+        assert!(!settings.scrawl.enabled);
+        assert_eq!(settings.scrawl.hotkey, HotkeyBinding::scrawl_default());
+        assert!(settings.scrawl.auto_crop);
+        assert_eq!(settings.runtime_hotkeys().scrawl, None);
         assert!(settings.text_replacements.is_empty());
     }
 
