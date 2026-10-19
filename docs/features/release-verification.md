@@ -235,6 +235,24 @@ after Ruby syntax, style, strict online audit, checksum fetch, and livecheck
 No installed app was replaced, physical dictation performed, or native GUI
 verification added for this release.
 
+## macOS 2.3.0
+
+**Published October 19, 2026:** [2.3.0](../releases/2.3.0.md), release commit
+`cfb4eb4` (#161 on top of #155 `e849fa4` and #160 `41fb3e2`), build `20300`.
+CI (macOS and Linux `test`, `nix`, Windows x64 and ARM64) passed on #155 and
+#161. A pre-release review of `app-v2.2.0..41fb3e2` found no blockers. The
+first three prepares, from `e849fa4`, failed uploading to the notary service
+because the release host's Wi-Fi uplink had dropped to about 20 KB/s; nothing
+from them was published. After a Wi-Fi power cycle, the `cfb4eb4` prepare was
+notarized, stapled, and accepted by Gatekeeper. The DMG SHA-256 is
+`3a2872b29bde17f3a5c3cc2643e74eaa11ae7d6911b53a803f619a62fd55e5ce`; the ZIP
+SHA-256 is
+`a3d2c06198fb93a77fe2368f747a6073702dce7fa0dca5178e0b46c623de5545`. The live
+feed leads with build `20300`, and the custom-domain, latest, and GitHub DMGs
+match the checksum. No physical dictation check was run for publication, and no
+Sparkle update from an older installed build was exercised. Linux and Windows
+2.3.0 are published separately.
+
 ## macOS 2.2.0
 
 **Published October 16, 2026:** [2.2.0](../releases/2.2.0.md), release commit

@@ -2,7 +2,7 @@ import * as m from "motion/react-m"
 import type { ReactNode } from "react"
 import ChatteringTeeth from "./ChatteringTeeth"
 
-const MAC_VERSION = "2.2.0"
+const MAC_VERSION = "2.3.0"
 const DOWNLOAD_URL =
   `https://downloads.hex.kitlangton.dev/releases/HEX-${MAC_VERSION}-arm64.dmg`
 const GITHUB_DOWNLOAD_URL =
