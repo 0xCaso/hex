@@ -3065,7 +3065,8 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn blocked_request_pipe_does_not_outlive_the_deadline() {
-        let mut command = Command::new("/bin/sleep");
+        // From PATH: the Nix build sandbox has no /bin/sleep.
+        let mut command = Command::new("sleep");
         command.arg("5");
         let started = Instant::now();
         let error = run_command(
