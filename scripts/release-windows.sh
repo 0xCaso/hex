@@ -63,7 +63,9 @@ if [ -n "$(git -C "$root" status --porcelain)" ]; then
   exit 1
 fi
 test -f "$installer"
-powershell -NoProfile -Command "[void][ScriptBlock]::Create((Get-Content -Raw '$installer'))"
+# PowerShell needs a Windows path; Git Bash converts only bare arguments.
+installer_windows=$(cygpath -w "$installer" 2>/dev/null || printf '%s' "$installer")
+powershell -NoProfile -Command "[void][ScriptBlock]::Create((Get-Content -Raw '$installer_windows'))"
 # CI checks out an exact commit from GitHub, so it is pushed by construction.
 if [ "${GITHUB_ACTIONS:-}" != true ]; then
   upstream=$(git -C "$root" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
