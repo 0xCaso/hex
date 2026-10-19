@@ -79,8 +79,8 @@ build() {
   "$root/scripts/test-install-linux-release.sh"
   # Portable native code: ggml otherwise tunes its CPU kernels to the build
   # machine (for example AVX-512), and the release would crash on older CPUs.
-  TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF${TRANSCRIBE_CMAKE_ARGS:+ $TRANSCRIBE_CMAKE_ARGS}" \
-    cargo build --locked --release --manifest-path "$root/Cargo.toml"
+  (cd "$root" && TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF${TRANSCRIBE_CMAKE_ARGS:+ $TRANSCRIBE_CMAKE_ARGS}" \
+    cargo build --locked --release)
   built="$target_dir/release/voice-control"
   sha256=$(sha256sum < "$built" | awk '{ print $1 }')
   artifact="HEX-$version-$sha256-x86_64-linux"

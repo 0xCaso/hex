@@ -125,8 +125,10 @@ build() {
     cmake_args="$cmake_args -DGGML_OPENMP=OFF"
     export CC=clang-cl CXX=clang-cl CMAKE_GENERATOR=Ninja
   fi
-  TRANSCRIBE_CMAKE_ARGS="$cmake_args" \
-    cargo build --locked --release --target "$triple" --manifest-path "$root/Cargo.toml"
+  # Cargo reads .cargo/config.toml (the static Windows runtime) from the
+  # working directory, not from --manifest-path.
+  (cd "$root" && TRANSCRIBE_CMAKE_ARGS="$cmake_args" \
+    cargo build --locked --release --target "$triple")
   built="$target_dir/$triple/release/voice-control.exe"
   sha256=$(sha256sum < "$built" | awk '{ print $1 }')
   artifact="HEX-$version-$sha256-$suffix"
