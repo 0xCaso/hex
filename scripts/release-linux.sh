@@ -1,19 +1,29 @@
 #!/bin/sh
+# Build, sign, and publish the Linux release: a content-addressed executable
+# plus the ed25519-signed linux-update.json. Locally, `prepare` builds and
+# signs; `publish` uploads after validation. CI runs `build` here and signs
+# and publishes every platform with scripts/release-feed.sh.
 set -eu
 
-root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+script_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+root=${HEX_RELEASE_SOURCE:-$script_root}
 mode=${1:-prepare}
 version=${HEX_VERSION:-$(cargo metadata --no-deps --format-version 1 --manifest-path "$root/Cargo.toml" | jq -r '.packages[0].version')}
-bucket=${HEX_RELEASE_BUCKET:-hex-releases}
-base_url=${HEX_RELEASE_BASE_URL:-https://downloads.hex.kitlangton.dev}
-dist="$root/dist"
+dist=${HEX_RELEASE_DIST:-"$root/dist"}
 target_dir=${CARGO_TARGET_DIR:-"$root/target"}
-feed="$dist/linux-update.json"
+feed_name=linux-update.json
 prepared_commit="$dist/linux-release-commit"
 installer="$root/scripts/install-linux-release.sh"
+release_feed="$script_root/scripts/release-feed.sh"
 expected_public_key=bfad02e62208ff144b5c9d21c7e79c7c16c6904299a437d857303007cd4ff7d8
-public_key_prefix=302a300506032b6570032100
 
+case "$mode" in
+  build | sign | prepare | publish) ;;
+  *)
+    echo "Usage: $0 [build|sign|prepare|publish]" >&2
+    exit 1
+    ;;
+esac
 require() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Linux releases require $1." >&2
@@ -23,9 +33,6 @@ require() {
 for command in cargo curl file flock jq openssl sha256sum sort xxd; do
   require "$command"
 done
-if [ "$mode" = publish ]; then
-  require wrangler
-fi
 if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
   echo "Linux releases must be built on x86_64 Linux." >&2
   exit 1
@@ -38,10 +45,13 @@ if [ -n "$(git -C "$root" status --porcelain)" ]; then
   echo "Commit or remove all working-tree changes before releasing." >&2
   exit 1
 fi
-upstream=$(git -C "$root" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
-if [ -z "$upstream" ] || [ "$(git -C "$root" rev-parse HEAD)" != "$(git -C "$root" rev-parse "$upstream")" ]; then
-  echo "Push the release commit to its upstream branch before releasing." >&2
-  exit 1
+# CI checks out an exact commit from GitHub, so it is pushed by construction.
+if [ "${GITHUB_ACTIONS:-}" != true ]; then
+  upstream=$(git -C "$root" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+  if [ -z "$upstream" ] || [ "$(git -C "$root" rev-parse HEAD)" != "$(git -C "$root" rev-parse "$upstream")" ]; then
+    echo "Push the release commit to its upstream branch before releasing." >&2
+    exit 1
+  fi
 fi
 test -f "$installer"
 sh -n "$installer"
@@ -53,171 +63,67 @@ if ! flock -n 9; then
   echo "Another Linux release is in progress on this host." >&2
   exit 1
 fi
-temporary=$(mktemp -d)
-trap 'rm -rf "$temporary"' EXIT HUP INT TERM
-payload="$temporary/payload.json"
-signature="$temporary/signature"
-public_der="$temporary/public.der"
-public_pem="$temporary/public.pem"
-printf '%s%s' "$public_key_prefix" "$expected_public_key" | xxd -r -p > "$public_der"
-openssl pkey -pubin -inform DER -in "$public_der" -out "$public_pem"
+export HEX_VERSION="$version" HEX_RELEASE_SOURCE="$root"
 
-verify_signed_feed() {
-  feed_path=$1
-  payload_path=$2
-  signature_path=$3
-  jq -er .payload "$feed_path" | openssl base64 -d -A > "$payload_path"
-  jq -er .signature "$feed_path" | openssl base64 -d -A > "$signature_path"
-  openssl pkeyutl -verify -rawin -pubin -inkey "$public_pem" \
-    -in "$payload_path" -sigfile "$signature_path" >/dev/null
-}
-
-verify_prepared() {
-  verify_signed_feed "$feed" "$payload" "$signature"
-  artifact=$(jq -r .artifact "$payload")
+check_artifact() {
+  artifact=$(jq -r .artifact "$1")
   artifact_path="$dist/$artifact"
   test -x "$artifact_path"
-  test "$(jq -r .schema_version "$payload")" = 1
-  test "$(jq -r .channel "$payload")" = stable
-  test "$(jq -r .target "$payload")" = x86_64-unknown-linux-gnu
-  test "$(jq -r .version "$payload")" = "$version"
-  bytes=$(wc -c < "$artifact_path" | tr -d ' ')
-  sha256=$(sha256sum "$artifact_path" | awk '{ print $1 }')
-  test "$artifact" = "HEX-$version-$sha256-x86_64-linux"
-  test "$(jq -r .bytes "$payload")" = "$bytes"
-  test "$(jq -r .sha256 "$payload")" = "$sha256"
   file "$artifact_path" | grep -E 'ELF 64-bit.*x86-64' >/dev/null
   reported_version=$("$artifact_path" --version | awk 'NF { value=$NF } END { print value }')
   test "$reported_version" = "$version"
 }
 
-published_version() {
-  remote_feed="$temporary/remote-linux-update.json"
-  status=$(curl --silent --show-error --proto '=https' --proto-redir '=https' \
-    --connect-timeout 10 --max-time 60 \
-    --header 'Cache-Control: no-cache' --write-out '%{http_code}' \
-    --output "$remote_feed" "$base_url/linux-update.json")
-  case "$status" in
-    200)
-      remote_payload="$temporary/remote-payload.json"
-      remote_signature="$temporary/remote-signature"
-      verify_signed_feed "$remote_feed" "$remote_payload" "$remote_signature"
-      test "$(jq -r .schema_version "$remote_payload")" = 1
-      test "$(jq -r .channel "$remote_payload")" = stable
-      test "$(jq -r .target "$remote_payload")" = x86_64-unknown-linux-gnu
-      remote_version=$(jq -r .version "$remote_payload")
-      printf '%s\n' "$remote_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
-      printf '%s\n' "$remote_version"
-      ;;
-    404) ;;
-    *)
-      echo "Could not inspect the published Linux feed (HTTP $status)." >&2
-      exit 1
-      ;;
-  esac
-}
-
-require_newer_than_published() {
-  current=$(published_version)
-  if [ -n "$current" ]; then
-    newest=$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)
-    if [ "$current" = "$version" ] || [ "$newest" != "$version" ]; then
-      echo "Refusing to replace Linux stable $current with $version." >&2
-      exit 1
-    fi
-  fi
-}
-
-if [ "$mode" = publish ]; then
-  if [ ! -f "$feed" ] || [ ! -f "$prepared_commit" ]; then
-    echo "Prepare and validate version $version before publishing it." >&2
+build() {
+  require python3
+  "$root/scripts/test-install-linux-release.sh"
+  # Portable native code: ggml otherwise tunes its CPU kernels to the build
+  # machine (for example AVX-512), and the release would crash on older CPUs.
+  TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF${TRANSCRIBE_CMAKE_ARGS:+ $TRANSCRIBE_CMAKE_ARGS}" \
+    cargo build --locked --release --manifest-path "$root/Cargo.toml"
+  built="$target_dir/release/voice-control"
+  sha256=$(sha256sum "$built" | awk '{ print $1 }')
+  artifact="HEX-$version-$sha256-x86_64-linux"
+  artifact_path="$dist/$artifact"
+  install -m755 "$built" "$artifact_path"
+  bytes=$(wc -c < "$artifact_path" | tr -d ' ')
+  if [ "$bytes" -gt 536870912 ]; then
+    echo "The Linux artifact exceeds the updater's 512 MiB limit." >&2
     exit 1
   fi
-  test "$(cat "$prepared_commit")" = "$(git -C "$root" rev-parse HEAD)"
-  verify_prepared
-  require_newer_than_published
-  wrangler r2 object put "$bucket/releases/$artifact" --remote \
-    --file "$artifact_path" \
-    --content-type application/octet-stream \
-    --cache-control 'public, max-age=31536000, immutable'
-  remote_artifact="$temporary/$artifact"
-  curl --fail --silent --show-error --proto '=https' --proto-redir '=https' \
-    --connect-timeout 10 --max-time 600 \
-    "$base_url/releases/$artifact" -o "$remote_artifact"
-  cmp -s "$artifact_path" "$remote_artifact"
-  wrangler r2 object put "$bucket/install-linux.sh" --remote \
-    --file "$installer" \
-    --content-type text/x-shellscript \
-    --content-disposition 'attachment; filename="install-linux.sh"' \
-    --cache-control 'public, max-age=300'
-  remote_installer="$temporary/install-linux.sh"
-  curl --fail --silent --show-error --proto '=https' --proto-redir '=https' \
-    --connect-timeout 10 --max-time 60 --header 'Cache-Control: no-cache' \
-    "$base_url/install-linux.sh?commit=$(git -C "$root" rev-parse HEAD)" \
-    -o "$remote_installer"
-  cmp -s "$installer" "$remote_installer"
-  # Recheck immediately before publishing the only mutable object.
-  require_newer_than_published
-  wrangler r2 object put "$bucket/linux-update.json" --remote \
-    --file "$feed" \
-    --content-type application/json \
-    --cache-control 'no-cache'
-  curl --fail --silent --show-error --proto '=https' --proto-redir '=https' \
-    --connect-timeout 10 --max-time 60 --header 'Cache-Control: no-cache' \
-    "$base_url/linux-update.json" \
-    -o "$temporary/published-linux-update.json"
-  cmp -s "$feed" "$temporary/published-linux-update.json"
-  echo "$base_url/releases/$artifact"
-  echo "$base_url/install-linux.sh"
-  exit 0
-fi
-if [ "$mode" != prepare ]; then
-  echo "Usage: $0 [prepare|publish]" >&2
-  exit 1
-fi
-require python3
-"$root/scripts/test-install-linux-release.sh"
-if [ -z "${HEX_LINUX_SIGNING_KEY:-}" ]; then
-  echo "Set HEX_LINUX_SIGNING_KEY to the Ed25519 private PEM." >&2
-  exit 1
-fi
+  jq -cn \
+    --arg version "$version" \
+    --arg artifact "$artifact" \
+    --arg sha256 "$sha256" \
+    --argjson bytes "$bytes" \
+    '{schema_version:1,channel:"stable",target:"x86_64-unknown-linux-gnu",version:$version,artifact:$artifact,bytes:$bytes,sha256:$sha256}' \
+    > "$dist/$feed_name.payload.json"
+  check_artifact "$dist/$feed_name.payload.json"
+  echo "$artifact_path"
+}
 
-key="$temporary/private.pem"
-printf '%s\n' "$HEX_LINUX_SIGNING_KEY" > "$key"
-chmod 600 "$key"
-actual_public_key=$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | xxd -p -c 64)
-if [ "$actual_public_key" != "$expected_public_key" ]; then
-  echo "HEX_LINUX_SIGNING_KEY does not match the public key embedded in HEX." >&2
-  exit 1
-fi
-
-cargo build --locked --release --manifest-path "$root/Cargo.toml"
-built="$target_dir/release/voice-control"
-sha256=$(sha256sum "$built" | awk '{ print $1 }')
-artifact="HEX-$version-$sha256-x86_64-linux"
-artifact_path="$dist/$artifact"
-install -m755 "$built" "$artifact_path"
-bytes=$(wc -c < "$artifact_path" | tr -d ' ')
-if [ "$bytes" -gt 536870912 ]; then
-  echo "The Linux artifact exceeds the updater's 512 MiB limit." >&2
-  exit 1
-fi
-jq -cn \
-  --arg version "$version" \
-  --arg artifact "$artifact" \
-  --arg sha256 "$sha256" \
-  --argjson bytes "$bytes" \
-  '{schema_version:1,channel:"stable",target:"x86_64-unknown-linux-gnu",version:$version,artifact:$artifact,bytes:$bytes,sha256:$sha256}' > "$payload"
-openssl pkeyutl -sign -rawin -inkey "$key" -in "$payload" -out "$signature"
-payload_base64=$(openssl base64 -A -in "$payload")
-signature_base64=$(openssl base64 -A -in "$signature")
-jq -n \
-  --arg payload "$payload_base64" \
-  --arg signature "$signature_base64" \
-  '{payload:$payload,signature:$signature}' > "$feed"
-
-verify_prepared
-git -C "$root" rev-parse HEAD > "$prepared_commit"
-echo "$artifact_path"
-echo "$feed"
-echo "Prepared but not published. Run $0 publish after validation." >&2
+case "$mode" in
+  build)
+    build
+    ;;
+  sign)
+    "$release_feed" sign "$dist" "$feed_name"
+    check_artifact "$dist/$feed_name.payload.json"
+    ;;
+  prepare)
+    build
+    "$release_feed" sign "$dist" "$feed_name"
+    "$release_feed" verify "$dist" "$feed_name"
+    git -C "$root" rev-parse HEAD > "$prepared_commit"
+    echo "Prepared but not published. Run $0 publish after validation." >&2
+    ;;
+  publish)
+    if [ ! -f "$dist/$feed_name" ] || [ ! -f "$prepared_commit" ]; then
+      echo "Prepare and validate version $version before publishing it." >&2
+      exit 1
+    fi
+    test "$(cat "$prepared_commit")" = "$(git -C "$root" rev-parse HEAD)"
+    require wrangler
+    "$release_feed" publish "$dist" "$feed_name"
+    ;;
+esac

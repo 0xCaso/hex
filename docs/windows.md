@@ -221,10 +221,10 @@ builds and tests x64 and ARM64 on every pull request. The remaining code
 parity slice is the developer-only Meetings surface after the physical matrix
 is green; opt-in Commands wait on a Windows streaming command model. Shared
 first-run onboarding, complete OpenCode mode rewriting controls, and the bounded
-TypeScript transformation host already ship. Windows releases are
-prepared and published, once per architecture (`HEX_WINDOWS_ARCH=x86_64` or
-`aarch64`), with
+TypeScript transformation host already ship. Windows releases are built for
+x64 and ARM64 by
+[`release-desktop.yml`](../.github/workflows/release-desktop.yml) with
 [`scripts/release-windows.sh`](../scripts/release-windows.sh), which signs
-the update feed with the same release key as Linux and publishes
+the update feeds with the same release key as Linux and publishes
 [`scripts/install-windows.ps1`](../scripts/install-windows.ps1). Users install
 with the command under [Install](#install).

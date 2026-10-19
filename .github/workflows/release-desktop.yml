@@ -1,0 +1,287 @@
+name: Release desktop
+
+# Builds the Linux and Windows releases from one exact commit, signs their
+# update feeds in a job that never compiles code, and publishes artifacts
+# first and feeds last. macOS is released locally with scripts/release-app.sh.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, tag, or branch to release
+        required: true
+        default: main
+      dry_run:
+        description: Build, sign, and validate without publishing
+        type: boolean
+        default: true
+  push:
+    tags: ["app-v*"]
+
+permissions:
+  contents: read
+
+# Never run two publishes against the same feeds at once.
+concurrency:
+  group: release-desktop
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          persist-credentials: false
+      - id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Stable releases need a non-prerelease version, not $version."
+            exit 1
+          fi
+          publish=true
+          if [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then
+            publish=false
+          fi
+          if [ "$EVENT" = push ] && [ "$REF_NAME" != "app-v$version" ]; then
+            echo "::error::Tag $REF_NAME does not match version $version."
+            exit 1
+          fi
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing $version from $sha (publish: $publish)." >> "$GITHUB_STEP_SUMMARY"
+
+  linux:
+    name: Linux x86_64
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # The supported Linux host is x86_64 Arch, so the release links against
+    # current Arch libraries; the glibc floor is reported in the summary.
+    container: archlinux:base-devel
+    env:
+      HEX_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git rustup python alsa-lib curl jq openssl \
+            xxd file binutils util-linux gtk3 gtk-layer-shell libappindicator-gtk3 \
+            libxkbcommon libxkbcommon-x11 libx11 libxcb libxcursor libxi libxrandr \
+            fontconfig freetype2 wayland systemd-libs openblas vulkan-headers \
+            vulkan-icd-loader shaderc spirv-headers clang cmake pkgconf
+          useradd --create-home builder
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+          persist-credentials: false
+      - name: Build
+        run: |
+          mkdir -p dist
+          chown -R builder: "$GITHUB_WORKSPACE"
+          runuser -u builder -- env HOME=/home/builder \
+            HEX_RELEASE_SOURCE="$GITHUB_WORKSPACE/source" \
+            HEX_RELEASE_DIST="$GITHUB_WORKSPACE/dist" \
+            CARGO_BUILD_JOBS=4 BLA_VENDOR=OpenBLAS OPENSSL_NO_VENDOR=1 \
+            CC=clang CXX=clang++ \
+            sh -c 'rustup default stable && tools/scripts/release-linux.sh build'
+      - name: Report the glibc floor
+        run: |
+          artifact=$(jq -r .artifact dist/linux-update.json.payload.json)
+          floor=$(objdump -T "dist/$artifact" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          ldd --version | head -1
+          echo "Linux artifact requires $floor." | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hex-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+            dumpbin_host: Hostx64\\x64
+          - arch: aarch64
+            runner: windows-11-arm
+            dumpbin_host: Hostarm64\\arm64
+    env:
+      HEX_VERSION: ${{ needs.resolve.outputs.version }}
+      HEX_WINDOWS_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-pc-windows-msvc
+      - name: Install the Vulkan SDK
+        if: matrix.arch == 'x86_64'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+      - name: Install SPIRV-Headers for the Vulkan backend
+        if: matrix.arch == 'x86_64'
+        shell: pwsh
+        run: |
+          vcpkg install spirv-headers:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install spirv-headers failed" }
+          $prefix = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -replace '\\','/'
+          $combined = if ($env:CMAKE_PREFIX_PATH) { "$prefix;$env:CMAKE_PREFIX_PATH" } else { $prefix }
+          Add-Content $env:GITHUB_ENV "CMAKE_PREFIX_PATH=$combined"
+      - name: Configure clang-cl for ARM64
+        if: matrix.arch == 'aarch64'
+        shell: pwsh
+        run: |
+          @(
+            "CMAKE_C_COMPILER=clang-cl",
+            "CMAKE_CXX_COMPILER=clang-cl",
+            "CMAKE_C_COMPILER_TARGET=aarch64-pc-windows-msvc",
+            "CMAKE_CXX_COMPILER_TARGET=aarch64-pc-windows-msvc",
+            "CL=/EHsc"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Locate the GPUI shader compiler
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\(x64|arm64)\\' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $fxc) { throw "fxc.exe was not found in the Windows SDK" }
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build
+        shell: bash
+        run: |
+          export HEX_RELEASE_SOURCE="$GITHUB_WORKSPACE/source"
+          export HEX_RELEASE_DIST="$(cygpath -u "$GITHUB_WORKSPACE")/dist"
+          tools/scripts/release-windows.sh build
+      - name: Check the executable needs no Visual C++ Redistributable
+        shell: pwsh
+        run: |
+          $payload = Get-Content "dist/$(if ($env:HEX_WINDOWS_ARCH -eq 'x86_64') { 'windows-update.json' } else { 'windows-aarch64-update.json' }).payload.json" | ConvertFrom-Json
+          $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '${{ matrix.dumpbin_host }}' } | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe was not found" }
+          $imports = & $dumpbin.FullName /dependents "dist/$($payload.artifact)"
+          $imports
+          $redist = $imports | Select-String -Pattern 'VCRUNTIME|MSVCP|vcomp'
+          if ($redist) { throw "hex.exe imports Visual C++ runtime DLLs: $redist" }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hex-windows-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  sign:
+    name: Sign and validate
+    needs: [resolve, linux, windows]
+    runs-on: ubuntu-24.04
+    environment: release
+    env:
+      HEX_VERSION: ${{ needs.resolve.outputs.version }}
+      FEEDS: linux-update.json windows-update.json windows-aarch64-update.json
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: hex-*-*
+          path: dist
+          merge-multiple: true
+      - name: Sign the update feeds
+        env:
+          HEX_RELEASE_SIGNING_KEY: ${{ secrets.HEX_RELEASE_SIGNING_KEY }}
+        run: tools/scripts/release-feed.sh sign dist $FEEDS
+      - name: Verify signatures, artifacts, and version order
+        run: |
+          tools/scripts/release-feed.sh verify dist $FEEDS
+          for feed in $FEEDS; do
+            jq -r .payload "dist/$feed" | base64 -d | jq -c . | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: signed-release
+          path: |
+            dist/HEX-*
+            dist/*-update.json
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, sign]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    environment: release
+    env:
+      HEX_VERSION: ${{ needs.resolve.outputs.version }}
+      FEEDS: linux-update.json windows-update.json windows-aarch64-update.json
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: signed-release
+          path: dist
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm install --global wrangler@4.151.2
+      - name: Publish artifacts, installers, then feeds
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          HEX_RELEASE_SOURCE: ${{ github.workspace }}/source
+        run: tools/scripts/release-feed.sh publish dist $FEEDS
+      - name: Re-download and verify every published object
+        run: |
+          base=https://downloads.hex.kitlangton.dev
+          tools/scripts/release-feed.sh verify dist $FEEDS
+          for feed in $FEEDS; do
+            curl -fsS -H 'Cache-Control: no-cache' "$base/$feed?verify=$GITHUB_RUN_ID" -o "fresh-$feed"
+            cmp "dist/$feed" "fresh-$feed"
+            payload=$(jq -r .payload "fresh-$feed" | base64 -d)
+            artifact=$(printf '%s' "$payload" | jq -r .artifact)
+            curl -fsS "$base/releases/$artifact?verify=$GITHUB_RUN_ID" -o fresh-artifact
+            test "$(sha256sum fresh-artifact | awk '{ print $1 }')" = "$(printf '%s' "$payload" | jq -r .sha256)"
+            test "$(wc -c < fresh-artifact)" = "$(printf '%s' "$payload" | jq -r .bytes)"
+            echo "$base/$feed serves $(printf '%s' "$payload" | jq -r .version) -> $artifact" | tee -a "$GITHUB_STEP_SUMMARY"
+          done

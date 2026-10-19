@@ -671,22 +671,29 @@ Verify both registration and unregistration with `sfltool dumpbtm`, and restore
 the user's original login-item state after the test. Do not add release test
 hooks or persist a second launch-at-login flag.
 
-Linux releases are prepared and published separately on the supported x86_64
-Linux host. Inject the Ed25519 private PEM as `HEX_LINUX_SIGNING_KEY`, run
-`scripts/release-linux.sh prepare`, validate the artifact, then run
-`scripts/release-linux.sh publish`. The script refuses a key that does not match
-the public key compiled into HEX, refuses a non-monotonic stable release, and
-publishes the signed feed last.
+Linux and Windows releases are published by `.github/workflows/release-desktop.yml`.
+Pushing an `app-v<VERSION>` tag publishes that commit; `workflow_dispatch` takes
+a `ref` and `dry_run` (default true, which builds, signs, and validates only).
+It builds Linux x86_64 in an Arch container and Windows x64 and ARM64 on native
+runners with each script's `build` mode, then a job that compiles nothing signs
+all three feeds with `scripts/release-feed.sh`. Publishing uploads
+content-addressed artifacts first (never replacing different bytes), then the
+installers, then the feeds, and re-downloads each object. The `release`
+environment holds `HEX_RELEASE_SIGNING_KEY`, `CLOUDFLARE_API_TOKEN`, and
+`CLOUDFLARE_ACCOUNT_ID`.
 
-Windows releases use the same key, bucket, and `downloads.hex.kitlangton.dev`
-origin. From Git Bash, run `scripts/release-windows.sh prepare` and `publish`
-once per architecture with `HEX_WINDOWS_ARCH=x86_64` (the default; Vulkan SDK
-required) and `HEX_WINDOWS_ARCH=aarch64` (clang-cl and Ninja; best on an ARM64
-host). Each architecture has its own feed: `windows-update.json` for x64 and
-`windows-aarch64-update.json` for ARM64. The script builds with
-`-DGGML_NATIVE=OFF` so the CPU kernels stay portable, and the static runtime in
-`.cargo/config.toml` keeps the Visual C++ Redistributable unnecessary.
-`check-windows.yml` asserts the x64 executable imports no Visual C++ runtime.
+Both scripts still work locally: `prepare` builds and signs with the Ed25519
+private PEM in `HEX_RELEASE_SIGNING_KEY` (or `HEX_LINUX_SIGNING_KEY`), and
+`publish` uploads after validation. Run the Linux script on x86_64 Linux and the
+Windows script from Git Bash once per architecture with `HEX_WINDOWS_ARCH=x86_64`
+(the default; Vulkan SDK required) or `aarch64` (clang-cl and Ninja; best on an
+ARM64 host). The feeds are `linux-update.json`, `windows-update.json` for x64,
+and `windows-aarch64-update.json` for ARM64, all on the same key, bucket, and
+`downloads.hex.kitlangton.dev` origin. Signing refuses a key that does not match
+the public key compiled into HEX, and publishing refuses a non-monotonic stable
+release. Builds use `-DGGML_NATIVE=OFF` so the CPU kernels stay portable, and the
+static runtime in `.cargo/config.toml` keeps the Visual C++ Redistributable
+unnecessary; the release workflow asserts neither Windows executable imports it.
 
 Use `termctrl` to verify TUI changes at both wide and narrow dimensions. The
 dashboard keys are `1` for commands, `2` for the activity log, `3` for meetings,
