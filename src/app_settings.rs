@@ -1082,8 +1082,17 @@ impl AppSettings {
     /// Applies each one-time change this file has not seen, then records it
     /// so a later choice, such as switching back, sticks.
     fn apply_one_time_migrations(&mut self) {
+        self.apply_one_time_migrations_with(|model| {
+            crate::transcription_models::is_installed(model, "en")
+        });
+    }
+
+    fn apply_one_time_migrations_with(
+        &mut self,
+        installed: impl Fn(&crate::transcription_models::ModelDefinition) -> bool,
+    ) {
         if !self.has_migration(STREAMING_ENGLISH_MIGRATION) {
-            self.switch_english_to_streaming_model();
+            self.switch_english_to_streaming_model(installed);
             self.migrations.push(STREAMING_ENGLISH_MIGRATION.into());
         }
     }
@@ -1095,8 +1104,13 @@ impl AppSettings {
     /// English dictation moves to Parakeet Unified English, which streams
     /// while the shortcut is held. The previous model stays downloaded and
     /// in the recent models, one click away. Other languages and Auto keep
-    /// their model because Parakeet Unified is English-only.
-    fn switch_english_to_streaming_model(&mut self) {
+    /// their model because Parakeet Unified is English-only. Only an installed
+    /// model is switched to, so an upgrade never leaves dictation waiting on a
+    /// download.
+    fn switch_english_to_streaming_model(
+        &mut self,
+        installed: impl Fn(&crate::transcription_models::ModelDefinition) -> bool,
+    ) {
         if self.transcription.language != "en"
             || self.transcription.model == TranscriptionModelId::ParakeetUnifiedEnglish
         {
@@ -1104,6 +1118,9 @@ impl AppSettings {
         }
         let model =
             crate::transcription_models::definition(TranscriptionModelId::ParakeetUnifiedEnglish);
+        if !installed(model) {
+            return;
+        }
         let selection = TranscriptionSelection {
             model: model.id,
             language: "en".into(),
@@ -1507,11 +1524,10 @@ mod tests {
     }
 
     #[test]
-    fn english_dictation_switches_to_the_streaming_model_once() {
-        let dir = TestSettingsDir::new("streaming-english");
-        fs::write(&dir.path, english(TranscriptionModelId::ParakeetV3)).unwrap();
-
-        let settings = AppSettings::load_from(&dir.path).unwrap();
+    fn english_dictation_switches_to_the_installed_streaming_model_once() {
+        let mut settings: AppSettings =
+            serde_json::from_str(&english(TranscriptionModelId::ParakeetV3)).unwrap();
+        settings.apply_one_time_migrations_with(|_| true);
         assert_eq!(
             settings.transcription.model,
             TranscriptionModelId::ParakeetUnifiedEnglish
@@ -1524,10 +1540,9 @@ mod tests {
                 .any(|recent| recent.model == TranscriptionModelId::ParakeetV3),
             "the previous model stays one click away"
         );
-        let saved: AppSettings = serde_json::from_slice(&fs::read(&dir.path).unwrap()).unwrap();
-        assert!(saved.has_migration(STREAMING_ENGLISH_MIGRATION));
 
         // Switching back after the migration sticks.
+        let dir = TestSettingsDir::new("streaming-english");
         let mut chosen = settings.clone();
         chosen.transcription.model = TranscriptionModelId::ParakeetV3;
         chosen.write_to(&dir.path).unwrap();
@@ -1535,6 +1550,21 @@ mod tests {
         assert_eq!(
             reloaded.transcription.model,
             TranscriptionModelId::ParakeetV3
+        );
+    }
+
+    #[test]
+    fn english_dictation_keeps_its_model_when_the_streaming_model_is_missing() {
+        let mut settings: AppSettings =
+            serde_json::from_str(&english(TranscriptionModelId::ParakeetV3)).unwrap();
+        settings.apply_one_time_migrations_with(|_| false);
+        assert_eq!(
+            settings.transcription.model,
+            TranscriptionModelId::ParakeetV3
+        );
+        assert!(
+            settings.has_migration(STREAMING_ENGLISH_MIGRATION),
+            "a later download never switches the model behind the user's back"
         );
     }
 
