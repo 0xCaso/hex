@@ -203,6 +203,21 @@ pub(super) fn sidebar(sidebar: Div) -> Div {
     sidebar
 }
 
+/// Empty sidebar space moves the window, as the titlebar does.
+pub(super) fn window_drag_region(region: Div) -> Div {
+    region.on_mouse_down(MouseButton::Left, |_, _, _| {
+        let Some(main_thread) = objc2::MainThreadMarker::new() else {
+            return;
+        };
+        let application = objc2_app_kit::NSApplication::sharedApplication(main_thread);
+        if let Some(event) = application.currentEvent()
+            && let Some(ns_window) = event.window()
+        {
+            ns_window.performWindowDragWithEvent(&event);
+        }
+    })
+}
+
 pub(super) fn caption(_: &mut Window) -> Option<AnyElement> {
     None
 }

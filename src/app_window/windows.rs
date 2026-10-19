@@ -133,6 +133,13 @@ pub(super) fn sidebar(sidebar: Div) -> Div {
         .child(div().h(px(8.0)).flex_none())
 }
 
+/// Empty sidebar space moves the window like the caption, with snapping.
+pub(super) fn window_drag_region(region: Div) -> Div {
+    region
+        .occlude()
+        .window_control_area(gpui::WindowControlArea::Drag)
+}
+
 pub(super) fn caption(window: &mut Window) -> Option<AnyElement> {
     Some(crate::windows_ui::caption_controls(window).into_any_element())
 }

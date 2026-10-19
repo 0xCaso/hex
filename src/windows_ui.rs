@@ -257,8 +257,12 @@ pub(crate) fn caption_controls(window: &Window) -> impl IntoElement {
         )
 }
 
+/// The caption row blocks the window's own mouse handling beneath it (such as
+/// focus-on-click), which would otherwise claim the press before Windows can
+/// start a drag, snap, or caption-button click.
 fn caption_row() -> Div {
     div()
+        .occlude()
         .w_full()
         .h(px(CAPTION_HEIGHT))
         // Leave a thin non-interactive strip at the very top so the OS

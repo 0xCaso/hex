@@ -75,6 +75,11 @@ pub(super) fn sidebar(sidebar: Div) -> Div {
     sidebar
 }
 
+/// Empty sidebar space moves the window.
+pub(super) fn window_drag_region(region: Div) -> Div {
+    region.on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+}
+
 pub(super) fn caption(_: &mut Window) -> Option<AnyElement> {
     None
 }

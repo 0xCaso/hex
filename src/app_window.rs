@@ -2127,7 +2127,7 @@ impl AppWindow {
 
         platform::sidebar(sidebar_frame())
             .child(div().flex().flex_col().gap_0p5().children(items))
-            .child(div().flex_1())
+            .child(platform::window_drag_region(div().flex_1()))
             .child(
                 div()
                     .flex_none()

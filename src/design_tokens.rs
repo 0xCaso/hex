@@ -159,6 +159,9 @@ pub(crate) fn icon_radius(size: f32) -> Pixels {
 pub(crate) const CONTROL_HEIGHT: f32 = 30.0;
 pub(crate) const CONTROL_HEIGHT_SMALL: f32 = 24.0;
 pub(crate) const KEYCAP_WIDTH: f32 = 34.0;
+/// The narrowest a settings row's title and description get before its
+/// control wraps below them.
+pub(crate) const SETTINGS_COPY_MIN_WIDTH: f32 = 180.0;
 pub(crate) const TAG_HEIGHT: f32 = 18.0;
 pub(crate) const MENU_ITEM_HEIGHT: f32 = 28.0;
 pub(crate) const MENU_WIDTH: f32 = 180.0;
