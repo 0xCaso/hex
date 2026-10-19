@@ -742,9 +742,18 @@ pub struct AppSettings {
     /// The interface language code; `None` follows the system language.
     pub ui_language: Option<String>,
     pub indicator_position: IndicatorPosition,
+    /// One-time settings changes already applied. A file that predates a
+    /// change lacks its ID, so the change runs once on the next load; new
+    /// settings start with every ID because they need none.
+    #[serde(default)]
+    pub migrations: Vec<String>,
     #[serde(skip_serializing)]
     pub text_replacements: Vec<TextReplacement>,
 }
+
+/// Moves English dictation to the streaming English model once.
+const STREAMING_ENGLISH_MIGRATION: &str = "streaming-english-model";
+const MIGRATIONS: &[&str] = &[STREAMING_ENGLISH_MIGRATION];
 
 fn deserialize_edit_hotkey<'de, D>(deserializer: D) -> std::result::Result<HotkeyBinding, D::Error>
 where
@@ -780,6 +789,7 @@ impl Default for AppSettings {
             paste_with_shift: false,
             ui_language: None,
             indicator_position: IndicatorPosition::default(),
+            migrations: MIGRATIONS.iter().map(|id| id.to_string()).collect(),
             text_replacements: Vec::new(),
         }
     }
@@ -925,7 +935,7 @@ impl AppSettings {
         Ok(settings)
     }
 
-    fn load_from(path: &std::path::Path) -> Result<Self> {
+    pub(crate) fn load_from(path: &std::path::Path) -> Result<Self> {
         match fs::read(path) {
             Ok(data) => {
                 let mut settings: Self = serde_json::from_slice(&data)?;
@@ -936,6 +946,7 @@ impl AppSettings {
                 settings.migrate_legacy_replacements();
                 settings.normalize_mode_application_names();
                 settings.migrate_disabled_transcription_model();
+                settings.apply_one_time_migrations();
                 settings.normalize_transcription_recents();
                 crate::transcription_models::validate(&settings.transcription)?;
                 settings.repair_hotkey_conflict();
@@ -1062,6 +1073,50 @@ impl AppSettings {
             }
         }
         self.text_replacements.clear();
+    }
+
+    /// Applies each one-time change this file has not seen, then records it
+    /// so a later choice, such as switching back, sticks.
+    fn apply_one_time_migrations(&mut self) {
+        if !self.has_migration(STREAMING_ENGLISH_MIGRATION) {
+            self.switch_english_to_streaming_model();
+            self.migrations.push(STREAMING_ENGLISH_MIGRATION.into());
+        }
+    }
+
+    fn has_migration(&self, id: &str) -> bool {
+        self.migrations.iter().any(|applied| applied == id)
+    }
+
+    /// English dictation moves to Parakeet Unified English, which streams
+    /// while the shortcut is held. The previous model stays downloaded and
+    /// in the recent models, one click away. Other languages and Auto keep
+    /// their model because Parakeet Unified is English-only.
+    fn switch_english_to_streaming_model(&mut self) {
+        if self.transcription.language != "en"
+            || self.transcription.model == TranscriptionModelId::ParakeetUnifiedEnglish
+        {
+            return;
+        }
+        let model =
+            crate::transcription_models::definition(TranscriptionModelId::ParakeetUnifiedEnglish);
+        let selection = TranscriptionSelection {
+            model: model.id,
+            language: "en".into(),
+            recognition_hints: if model.supports_recognition_hints {
+                self.transcription.recognition_hints.clone()
+            } else {
+                String::new()
+            },
+        };
+        if crate::transcription_models::validate(&selection).is_err() {
+            return;
+        }
+        tracing::info!(
+            from = self.transcription.model.as_str(),
+            "switched English dictation to the streaming English model"
+        );
+        self.remember_transcription(selection);
     }
 
     fn migrate_disabled_transcription_model(&mut self) {
@@ -1352,9 +1407,10 @@ pub(crate) fn migrate_legacy_settings(path: &std::path::Path) -> Result<()> {
         let _ = directory;
         None
     };
-    let Some((legacy_path, settings)) = legacy else {
+    let Some((legacy_path, mut settings)) = legacy else {
         return Ok(());
     };
+    settings.migrations.clear();
     settings.write_to(path)?;
     let mut migrated = legacy_path.clone().into_os_string();
     migrated.push(".migrated");
@@ -1426,6 +1482,89 @@ mod tests {
         assert_ne!(
             settings_temporary_path(&path),
             settings_temporary_path(&path)
+        );
+    }
+
+    fn english(model: TranscriptionModelId) -> String {
+        format!(
+            r#"{{"transcription":{{"model":"{}","language":"en","recognition_hints":""}}}}"#,
+            model.as_str()
+        )
+    }
+
+    #[test]
+    fn english_dictation_switches_to_the_streaming_model_once() {
+        let dir = TestSettingsDir::new("streaming-english");
+        fs::write(&dir.path, english(TranscriptionModelId::ParakeetV3)).unwrap();
+
+        let settings = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(
+            settings.transcription.model,
+            TranscriptionModelId::ParakeetUnifiedEnglish
+        );
+        assert!(settings.has_migration(STREAMING_ENGLISH_MIGRATION));
+        assert!(
+            settings
+                .transcription_recents
+                .iter()
+                .any(|recent| recent.model == TranscriptionModelId::ParakeetV3),
+            "the previous model stays one click away"
+        );
+        let saved: AppSettings = serde_json::from_slice(&fs::read(&dir.path).unwrap()).unwrap();
+        assert!(saved.has_migration(STREAMING_ENGLISH_MIGRATION));
+
+        // Switching back after the migration sticks.
+        let mut chosen = settings.clone();
+        chosen.transcription.model = TranscriptionModelId::ParakeetV3;
+        chosen.write_to(&dir.path).unwrap();
+        let reloaded = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(
+            reloaded.transcription.model,
+            TranscriptionModelId::ParakeetV3
+        );
+    }
+
+    #[test]
+    fn other_languages_and_auto_keep_their_model() {
+        for language in ["de", "auto"] {
+            let model = crate::transcription_models::choices_for_runtime(language)
+                .iter()
+                .map(|choice| choice.model.id)
+                .find(|model| *model != TranscriptionModelId::ParakeetUnifiedEnglish)
+                .expect("a model for the language");
+            let dir = TestSettingsDir::new("streaming-other");
+            fs::write(
+                &dir.path,
+                format!(
+                    r#"{{"transcription":{{"model":"{}","language":"{language}","recognition_hints":""}}}}"#,
+                    model.as_str()
+                ),
+            )
+            .unwrap();
+            let settings = AppSettings::load_from(&dir.path).unwrap();
+            assert_eq!(settings.transcription.model, model);
+            assert_eq!(settings.transcription.language, language);
+            assert!(settings.has_migration(STREAMING_ENGLISH_MIGRATION));
+        }
+    }
+
+    #[test]
+    fn new_settings_need_no_one_time_migration() {
+        assert!(AppSettings::default().has_migration(STREAMING_ENGLISH_MIGRATION));
+        let dir = TestSettingsDir::new("streaming-new");
+        let settings = AppSettings {
+            transcription: TranscriptionSelection {
+                model: TranscriptionModelId::ParakeetV3,
+                language: "en".into(),
+                recognition_hints: String::new(),
+            },
+            ..AppSettings::default()
+        };
+        settings.write_to(&dir.path).unwrap();
+        let reloaded = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(
+            reloaded.transcription.model,
+            TranscriptionModelId::ParakeetV3
         );
     }
 

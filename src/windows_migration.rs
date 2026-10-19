@@ -236,6 +236,20 @@ mod tests {
     }
 
     #[test]
+    fn an_english_beta_moves_to_the_streaming_model_on_first_load() {
+        let directory = scratch_directory("streaming");
+        fs::write(directory.join("windows-settings.json"), br#"{"transcription": {"model": "parakeet_v3", "language": "en", "recognition_hints": ""}}"#).unwrap();
+        let path = directory.join("settings.json");
+        crate::app_settings::migrate_legacy_settings(&path).unwrap();
+        let settings = AppSettings::load_from(&path).unwrap();
+        assert_eq!(
+            settings.transcription.model,
+            crate::transcription_models::TranscriptionModelId::ParakeetUnifiedEnglish
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn files_that_predate_a_setting_keep_the_beta_defaults() {
         let legacy: LegacySettings = serde_json::from_str(r#"{"platform":"windows"}"#).unwrap();
         let mut settings = AppSettings::default();
