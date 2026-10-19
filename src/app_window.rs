@@ -959,7 +959,6 @@ pub struct AppWindow {
     double_tap_toggle: ToggleSpring,
     double_tap_only_visibility: ToggleSpring,
     dock_icon_toggle: ToggleSpring,
-    incremental_toggle: ToggleSpring,
     meetings_toggle: ToggleSpring,
     meeting_notes_toggle: ToggleSpring,
     screen_recording_permitted: bool,
@@ -1438,7 +1437,6 @@ impl AppWindow {
                 settings.double_tap_lock && settings.dictation_hotkey.key.is_some(),
             ),
             dock_icon_toggle: ToggleSpring::new(settings.show_dock_icon),
-            incremental_toggle: ToggleSpring::new(settings.incremental_transcription),
             meetings_toggle: ToggleSpring::new(settings.meetings.enabled),
             meeting_notes_toggle: ToggleSpring::new(
                 settings.meetings.summarize_with_apple_intelligence,
@@ -3618,7 +3616,6 @@ impl AppWindow {
             .render_position(window)
             .clamp(0.0, 1.0);
         let dock_icon_position = self.dock_icon_toggle.render_position(window);
-        let incremental_position = self.incremental_toggle.render_position(window);
         let meetings_section = self.render_meeting_settings(window, cx);
         let launch_at_login_position = self.launch_at_login_toggle.render_position(window);
         let microphone_label = self
@@ -3914,22 +3911,6 @@ impl AppWindow {
                                         this.set_double_tap_only(enabled, cx);
                                     })),
                                 ),
-                        )
-                        .child(
-                            settings_row(
-                                "Transcribe during pauses",
-                                "Finish long dictations sooner by transcribing at each pause",
-                                toggle(incremental_position),
-                            )
-                            .id("incremental-transcription-setting")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let enabled = !this.settings.incremental_transcription;
-                                if this.update_settings(cx, |settings| {
-                                    settings.incremental_transcription = enabled
-                                }) {
-                                    this.incremental_toggle.set_enabled(enabled);
-                                }
-                            })),
                         )
                         .child(
                             settings_row(
