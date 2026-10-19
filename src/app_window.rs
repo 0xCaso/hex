@@ -2973,6 +2973,7 @@ impl AppWindow {
                 let label = version.map_or_else(|| "Update".into(), |v| format!("Update to {v}"));
                 button(ButtonKind::Secondary, label)
                     .id("software-update")
+                    .debug_selector(|| "software-update".into())
                     .text_color(rgb(ACCENT_TEXT))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.install_update(cx);
@@ -3059,6 +3060,7 @@ impl AppWindow {
         let indicator_position = self.indicator_position_spring.render_position(window);
         let indicator_control = sliding_segmented_control(indicator_position, &[64.0; 3])
             .id("indicator-position")
+            .debug_selector(|| "indicator-position".into())
             .children(
                 [
                     ("Top", IndicatorPosition::Top),
@@ -6797,6 +6799,25 @@ mod tests {
 
     fn history_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
         preview_fixture(pane_preview(DeveloperPane::History), window, cx)
+    }
+
+    #[gpui::test]
+    fn settings_offer_the_shared_update_and_indicator_rows(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            preview_fixture(
+                AppWindowPreview {
+                    update_available: true,
+                    ..pane_preview(DeveloperPane::Settings)
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(WINDOW_WIDTH), px(4000.0)));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("software-update").is_some());
+        assert!(cx.debug_bounds("indicator-position").is_some());
     }
 
     #[gpui::test]
