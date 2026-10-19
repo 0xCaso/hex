@@ -386,3 +386,15 @@ bin/tests Clippy, and the release build passed. The replacement executable
 (SHA-256 `470be7569cf9fa8be60e73554c8311df2b68487b221cefffc7cfd26cb7e11629`)
 was reinstalled and restarted on the same Arch/i3/X11 host and reached Listening.
 There is no measured native key-to-sound latency or additional macOS/Wayland proof.
+
+## Linux And Windows 2.3.0
+
+The first Linux x86_64, Windows x64, and Windows ARM64 releases were built from
+`cfb4eb4` by [Release desktop run 39340404218](https://github.com/anomalyco/hex/actions/runs/39340404218)
+and published from the Pro with `scripts/publish-desktop-release.sh`. The three
+public feeds serve 2.3.0, their signatures verify against the embedded public
+key, the downloaded artifacts match the signed size and SHA-256, and both
+public installers match `cfb4eb4` byte for byte. The Linux artifact requires
+GLIBC_2.44. No installer run, self-update, or dictation was performed on Linux
+or Windows hardware.
+

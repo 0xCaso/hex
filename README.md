@@ -214,9 +214,9 @@ streams while you speak, as on macOS and Windows. Native Wayland requires explic
 access and compositor support for clipboard, virtual-keyboard, and layer-shell
 protocols. Voice commands and meetings are not included.
 
-Use the [Linux installation guide](docs/linux.md) to build from source until
-the first signed Linux release is published. It also describes the planned
-user-local installer, requirements, and limitations.
+Use the [Linux installation guide](docs/linux.md) to install the signed
+release with the user-local installer or build from source. It also describes
+requirements and limitations.
 For Nix/NixOS packaging and per-user autostart, see the [Nix guide](docs/nix.md).
 
 ## Build With HEX

@@ -71,8 +71,7 @@ Legacy `hex app --hidden` now means `hex start`; it never creates a hidden UI.
 
 ## Install A Published Build
 
-After the first signed Linux release is published, download and inspect the
-installer before running it:
+Download and inspect the installer before running it:
 
 ```sh
 sudo pacman -S --needed alsa-lib curl gtk3 gtk-layer-shell jq libappindicator-gtk3 \
