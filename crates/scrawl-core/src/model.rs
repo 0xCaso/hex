@@ -265,7 +265,7 @@ pub struct DeviceInfo {
     pub app_short_version: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetInfo {
     pub mode: CaptureMode,
@@ -281,9 +281,10 @@ pub struct TargetInfo {
     pub frame: TargetFrame,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureMode {
+    #[default]
     Display,
     Window,
     Region,
@@ -299,6 +300,18 @@ pub struct TargetFrame {
     pub width: f64,
     pub height: f64,
     pub scale: f64,
+}
+
+impl Default for TargetFrame {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 900.0,
+            scale: 2.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

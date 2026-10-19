@@ -1,15 +1,22 @@
-//! Composable bundle builder and artifact pipeline for `.scrawl` bundles.
+//! Composable bundle pipeline and stage functions for `.scrawl` bundles.
 //!
-//! No global state or filesystem config is read here: callers pass explicit inputs
-//! (`TargetInfo`, candidate `RgbaFrame`s, `Stroke`s, `InteractionEvent`s, `TranscriptData`,
-//! optional `autocrop::Settings`, and optional full-resolution frame decoders) via
-//! [`BundleBuilder`] or [`build_bundle_from_parts`].
+//! Inputs are grouped into [`Recording`], [`Interactions`], [`TranscriptData`], and
+//! [`OutputOptions`], and flow through four pure, swappable stages:
+//!
+//! 1. [`plan_keyframes`] — groups strokes/flags into marks, selects keyframes within the duration
+//!    budget, and optionally upgrades candidate frames via full-resolution video decode.
+//! 2. [`solve_crop`] — annotates frames (ink, click markers, ripples) and solves the
+//!    activity-weighted auto-crop when configured.
+//! 3. [`render_frames`] — packs the contact sheet (and optional uncropped backup sheet) and stamps
+//!    uniform corner badges.
+//! 4. [`assemble_bundle`] — produces an in-memory [`BuiltBundle`] ready for inspection or writing
+//!    to disk via [`BuiltBundle::write_to`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
@@ -20,9 +27,94 @@ use crate::model::{
     RgbaFrame, SCALE, ScrawlBundle, ScreenSpan, Shape, Stroke, TargetFrame, TargetInfo,
     TranscriptData, TranscriptSegment, WordTiming, keyframe_budget,
 };
-use crate::render::{render_contact_sheet, render_synthetic_demo_frame};
+use crate::render::{
+    render_contact_sheet, render_contact_sheet_for_duration, render_synthetic_demo_frame,
+};
 use crate::sketch::{marks_of, summary_markdown};
+use crate::traits::ScrawlInputBatch;
 use crate::windows::{ActivityLog, CursorSample, WindowSnapshot};
+
+pub const FRAME_SAMPLE_INTERVAL: Duration = Duration::from_millis(220);
+/// Candidate frames only feed scene diffs and keyframe selection; keyframes can be decoded from
+/// `recording.mp4` at full size afterwards.
+pub const CANDIDATE_EDGE: f64 = 480.0;
+/// Without a video recording to decode from, the candidates are the keyframes, so keep them sharper.
+pub const CANDIDATE_EDGE_NO_VIDEO: f64 = 1280.0;
+/// Memory ceiling for candidate frames regardless of capture length.
+pub const CANDIDATE_BUDGET_BYTES: usize = 384 << 20;
+
+/// Bounded-memory candidate frame buffer. When full, drops every other regular frame (preserving
+/// the first frame and urgent click/stroke/shortcut frames) and doubles the sampling interval.
+#[derive(Clone, Debug)]
+pub struct CandidateBuffer {
+    frames: Vec<(RgbaFrame, bool)>,
+    cap: usize,
+    budget: usize,
+    interval: Duration,
+}
+
+impl CandidateBuffer {
+    pub fn new(budget_bytes: usize) -> Self {
+        Self {
+            frames: Vec::new(),
+            cap: 0,
+            budget: budget_bytes,
+            interval: FRAME_SAMPLE_INTERVAL,
+        }
+    }
+
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    pub fn push(&mut self, frame: RgbaFrame, urgent: bool) {
+        if self.cap == 0 {
+            self.cap = (self.budget / frame.rgba.len().max(1)).clamp(60, 1_200);
+        }
+        self.frames.push((frame, urgent));
+        if self.frames.len() >= self.cap {
+            self.thin();
+        }
+    }
+
+    fn thin(&mut self) {
+        let mut regular = 0_usize;
+        let mut kept: Vec<(RgbaFrame, bool)> = std::mem::take(&mut self.frames)
+            .into_iter()
+            .enumerate()
+            .filter(|(i, (_, urgent))| {
+                let keep = *i == 0 || *urgent || regular.is_multiple_of(2);
+                if !urgent {
+                    regular += 1;
+                }
+                keep
+            })
+            .map(|(_, f)| f)
+            .collect();
+        if kept.len() > self.cap * 3 / 4 {
+            kept = kept
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| i.is_multiple_of(2))
+                .map(|(_, f)| f)
+                .collect();
+        }
+        self.frames = kept;
+        self.interval *= 2;
+    }
+
+    pub fn into_frames(self) -> Vec<RgbaFrame> {
+        self.frames.into_iter().map(|(f, _)| f).collect()
+    }
+}
 
 pub fn now_epoch_ms() -> u64 {
     SystemTime::now()
@@ -72,6 +164,312 @@ pub fn merge_full_keyframes(
         })
         .collect();
     (merged, matched)
+}
+
+/// Captured media, timing, and target context for a Scrawl session.
+#[derive(Clone, Debug, Default)]
+pub struct Recording {
+    pub target: TargetInfo,
+    pub created_at_ms: Option<u64>,
+    pub duration_ms: u64,
+    pub frames: Vec<RgbaFrame>,
+    pub video: Option<String>,
+    pub video_offset_ms: u64,
+    pub audio: Option<String>,
+    pub source: Option<String>,
+    pub device: Option<DeviceInfo>,
+    pub context: BTreeMap<String, String>,
+    pub context_changes: Vec<ContextChange>,
+    pub screens: Vec<ScreenSpan>,
+}
+
+impl Recording {
+    pub fn new(target: TargetInfo, duration_ms: u64, frames: Vec<RgbaFrame>) -> Self {
+        Self {
+            target,
+            duration_ms,
+            frames,
+            ..Default::default()
+        }
+    }
+}
+
+/// User interactions, pointer trajectory, window snapshots, and time flags observed during a capture.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Interactions {
+    pub strokes: Vec<Stroke>,
+    pub events: Vec<InteractionEvent>,
+    pub cursor: Vec<CursorSample>,
+    pub windows: Vec<WindowSnapshot>,
+    pub flags: Vec<u64>,
+}
+
+impl Interactions {
+    pub fn from_batch(batch: ScrawlInputBatch) -> Self {
+        Self {
+            strokes: batch.strokes,
+            events: batch.events,
+            cursor: batch.cursor,
+            windows: batch.windows,
+            flags: Vec::new(),
+        }
+    }
+
+    pub fn extend_batch(&mut self, batch: ScrawlInputBatch) {
+        self.strokes.extend(batch.strokes);
+        self.events.extend(batch.events);
+        self.cursor.extend(batch.cursor);
+        self.windows.extend(batch.windows);
+    }
+}
+
+/// Function signature for decoding frames at specific capture-relative timestamps at full quality.
+pub type FullFramesFn = dyn Fn(&[u64]) -> Result<Vec<RgbaFrame>>;
+
+/// Owned decoder closure for full-quality keyframes.
+pub type FullFrames = Box<FullFramesFn>;
+
+/// Options controlling auto-crop, full-resolution frame replacement, and user notes.
+#[derive(Default)]
+pub struct OutputOptions {
+    /// `Some(settings)` enables activity-weighted auto-crop; `None` disables it.
+    pub auto_crop: Option<autocrop::Settings>,
+    /// Optional decoder that upgrades selected keyframe timestamps to full-resolution frames.
+    pub full_frames: Option<FullFrames>,
+    /// Optional user note attached to the bundle.
+    pub note: Option<String>,
+}
+
+impl OutputOptions {
+    /// Default options for `target`: enables default [`autocrop::Settings`] for full-display captures.
+    pub fn for_target(target: &TargetInfo) -> Self {
+        Self {
+            auto_crop: (target.mode == CaptureMode::Display).then(autocrop::Settings::default),
+            full_frames: None,
+            note: None,
+        }
+    }
+}
+
+/// Stage 1 output: grouped marks, selected keyframes + frames, and baseline frame for diffing.
+#[derive(Clone, Debug)]
+pub struct KeyframePlan {
+    pub marks: Vec<Mark>,
+    pub selected: Vec<(Keyframe, RgbaFrame)>,
+    pub baseline: Option<RgbaFrame>,
+}
+
+/// Stage 2 output: annotated keyframe images and optional auto-crop solution + uncropped backups.
+#[derive(Clone, Debug)]
+pub struct CroppedFrames {
+    pub marks: Vec<Mark>,
+    pub annotated_frames: Vec<(Keyframe, RgbaFrame)>,
+    pub autocrop: Option<AutocropInfo>,
+    pub uncropped_frames: Option<Vec<(Keyframe, RgbaFrame)>>,
+}
+
+/// Uncropped annotated frames and contact sheet saved beside an auto-cropped bundle.
+pub type FullFrameBundle = (AutocropInfo, Vec<(Keyframe, RgbaFrame)>, RgbaFrame);
+
+/// Stage 3 output: badged keyframe images, packed contact sheet, and optional uncropped backup bundle.
+#[derive(Clone, Debug)]
+pub struct RenderedFrames {
+    pub marks: Vec<Mark>,
+    pub keyframes: Vec<Keyframe>,
+    pub annotated_frames: Vec<(Keyframe, RgbaFrame)>,
+    pub contact_sheet: RgbaFrame,
+    pub full_frames: Option<FullFrameBundle>,
+}
+
+/// Stage 1: Groups strokes and flags into [`Mark`]s, selects keyframes within the duration budget,
+/// and optionally replaces candidate frames with full-resolution decoded frames.
+pub fn plan_keyframes(
+    recording: &Recording,
+    interactions: &Interactions,
+    transcript: &TranscriptData,
+    full_frames: Option<&FullFramesFn>,
+) -> KeyframePlan {
+    let mut marks = marks_of(&interactions.strokes);
+    for (i, &t) in interactions.flags.iter().enumerate() {
+        marks.push(Mark {
+            id: format!("f{}", i + 1),
+            strokes: Vec::new(),
+            t0: t,
+            t1: t,
+            box_norm: [0.0, 0.0, 1.0, 1.0],
+            shape: Shape::Flag,
+            from: None,
+            to: None,
+            pin: None,
+            on: None,
+            description: "flagged this moment".into(),
+            frame: None,
+        });
+    }
+    let selected = select_keyframes(
+        &recording.frames,
+        &interactions.strokes,
+        &mut marks,
+        &interactions.events,
+        transcript,
+        keyframe_budget(recording.duration_ms),
+    );
+    let baseline = recording.frames.first().cloned();
+    let selected = match full_frames {
+        Some(decode) if !selected.is_empty() => {
+            let times: Vec<u64> = selected.iter().map(|(k, _)| k.t).collect();
+            match decode(&times) {
+                Ok(full) => merge_full_keyframes(selected, full).0,
+                Err(_) => selected,
+            }
+        }
+        _ => selected,
+    };
+    KeyframePlan {
+        marks,
+        selected,
+        baseline,
+    }
+}
+
+/// Stage 2: Annotates selected frames with ink/click/laser overlays and solves the activity-weighted
+/// auto-crop when `crop_settings` is `Some`.
+pub fn solve_crop(
+    plan: KeyframePlan,
+    recording: &Recording,
+    interactions: &Interactions,
+    crop_settings: Option<&autocrop::Settings>,
+) -> CroppedFrames {
+    let (annotated_frames, cropped) = autocrop::annotate_and_crop(
+        plan.selected,
+        plan.baseline.as_ref(),
+        crop_settings,
+        &recording.target,
+        recording.duration_ms,
+        &interactions.strokes,
+        &plan.marks,
+        &interactions.events,
+        &interactions.windows,
+        &interactions.cursor,
+    );
+    let (autocrop, uncropped_frames) = match cropped {
+        Some((info, full)) => (Some(info), Some(full)),
+        None => (None, None),
+    };
+    CroppedFrames {
+        marks: plan.marks,
+        annotated_frames,
+        autocrop,
+        uncropped_frames,
+    }
+}
+
+/// Stage 3: Renders the justified contact sheet (plus uncropped contact sheet when auto-cropped)
+/// and stamps uniform corner badges onto the keyframe images.
+pub fn render_frames(duration_ms: u64, mut cropped: CroppedFrames) -> RenderedFrames {
+    let keyframes: Vec<Keyframe> = cropped
+        .annotated_frames
+        .iter()
+        .map(|(kf, _)| kf.clone())
+        .collect();
+    let (full_sheet, contact_sheet) = thread::scope(|scope| {
+        let full_handle = cropped
+            .uncropped_frames
+            .as_ref()
+            .map(|full| scope.spawn(|| render_contact_sheet_for_duration(duration_ms, full)));
+        let sheet = render_contact_sheet_for_duration(duration_ms, &cropped.annotated_frames);
+        (full_handle.map(|h| h.join().unwrap()), sheet)
+    });
+    crate::render::stamp_keyframe_badges(&mut cropped.annotated_frames);
+    if let Some(full) = &mut cropped.uncropped_frames {
+        crate::render::stamp_keyframe_badges(full);
+    }
+    let full_frames = match (cropped.autocrop, cropped.uncropped_frames, full_sheet) {
+        (Some(info), Some(full), Some(sheet)) => Some((info, full, sheet)),
+        _ => None,
+    };
+    RenderedFrames {
+        marks: cropped.marks,
+        keyframes,
+        annotated_frames: cropped.annotated_frames,
+        contact_sheet,
+        full_frames,
+    }
+}
+
+/// Stage 4: Assembles the final [`BuiltBundle`] from the recording, interactions, transcript, and
+/// rendered frame artifacts.
+pub fn assemble_bundle(
+    id: impl Into<String>,
+    recording: Recording,
+    interactions: Interactions,
+    transcript: TranscriptData,
+    note: Option<String>,
+    rendered: RenderedFrames,
+) -> BuiltBundle {
+    let autocrop = rendered
+        .full_frames
+        .as_ref()
+        .map(|(info, _, _)| info.clone());
+    let bundle = ScrawlBundle {
+        version: 1,
+        id: id.into(),
+        created_at_ms: recording.created_at_ms.unwrap_or_else(now_epoch_ms),
+        duration_ms: recording.duration_ms,
+        target: recording.target,
+        transcript,
+        note,
+        strokes: interactions.strokes,
+        marks: rendered.marks,
+        events: interactions.events,
+        keyframes: rendered.keyframes,
+        contact_sheet: "contact-sheet.png".into(),
+        video: recording.video,
+        video_offset_ms: recording.video_offset_ms,
+        audio: recording.audio,
+        source: recording.source,
+        device: recording.device,
+        context: recording.context,
+        context_changes: recording.context_changes,
+        screens: recording.screens,
+        windows: interactions.windows,
+        cursor: interactions.cursor,
+        autocrop,
+        destination: None,
+    };
+    BuiltBundle {
+        bundle,
+        annotated_frames: rendered.annotated_frames,
+        contact_sheet: rendered.contact_sheet,
+        full_frames: rendered.full_frames,
+    }
+}
+
+/// Runs all four stages ([`plan_keyframes`] → [`solve_crop`] → [`render_frames`] → [`assemble_bundle`])
+/// over grouped inputs.
+pub fn build_bundle(
+    id: impl Into<String>,
+    recording: Recording,
+    interactions: Interactions,
+    transcript: TranscriptData,
+    options: OutputOptions,
+) -> BuiltBundle {
+    let plan = plan_keyframes(
+        &recording,
+        &interactions,
+        &transcript,
+        options.full_frames.as_deref(),
+    );
+    let cropped = solve_crop(plan, &recording, &interactions, options.auto_crop.as_ref());
+    let rendered = render_frames(recording.duration_ms, cropped);
+    assemble_bundle(
+        id,
+        recording,
+        interactions,
+        transcript,
+        options.note,
+        rendered,
+    )
 }
 
 /// Per-stage timing breakdown.
@@ -186,9 +584,6 @@ pub fn prepare_visuals(
     })
 }
 
-/// Decodes frames at these times at full quality.
-pub type FullFrames = Box<dyn Fn(&[u64]) -> Result<Vec<RgbaFrame>>>;
-
 /// What a source other than this Mac's screen adds to a bundle.
 #[derive(Default)]
 pub struct SourceExtras {
@@ -213,10 +608,8 @@ pub struct SourceExtras {
     pub timings: StageTimings,
 }
 
-/// Uncropped annotated frames and contact sheet saved beside an auto-cropped bundle.
-pub type FullFrameBundle = (AutocropInfo, Vec<(Keyframe, RgbaFrame)>, RgbaFrame);
-
-/// In-memory result of [`BundleBuilder::build`], ready for inspection or writing to disk via [`BuiltBundle::write_to`].
+/// In-memory result of [`build_bundle`] or [`BundleBuilder::build`], ready for inspection or
+/// writing to disk via [`BuiltBundle::write_to`].
 pub struct BuiltBundle {
     pub bundle: ScrawlBundle,
     pub annotated_frames: Vec<(Keyframe, RgbaFrame)>,
@@ -256,82 +649,29 @@ impl BuiltBundle {
     }
 }
 
-/// Composable builder for constructing a [`BuiltBundle`] without global state.
+/// Composable builder over grouped [`Recording`], [`Interactions`], [`TranscriptData`], and [`OutputOptions`].
 pub struct BundleBuilder {
     id: String,
-    created_at_ms: Option<u64>,
-    duration_ms: u64,
-    target: TargetInfo,
-    frames: Vec<RgbaFrame>,
-    strokes: Vec<Stroke>,
-    events: Vec<InteractionEvent>,
+    recording: Recording,
+    interactions: Interactions,
     transcript: TranscriptData,
-    video: Option<String>,
-    video_offset_ms: u64,
-    audio: Option<String>,
-    note: Option<String>,
-    source: Option<String>,
-    device: Option<DeviceInfo>,
-    context: BTreeMap<String, String>,
-    context_changes: Vec<ContextChange>,
-    screens: Vec<ScreenSpan>,
-    windows: Vec<WindowSnapshot>,
-    cursor: Vec<CursorSample>,
-    flags: Vec<u64>,
-    autocrop: Option<Option<autocrop::Settings>>,
-    full_frames: Option<FullFrames>,
+    options: OutputOptions,
 }
 
 impl BundleBuilder {
-    pub fn new(id: impl Into<String>, target: TargetInfo) -> Self {
+    pub fn new(id: impl Into<String>, recording: Recording) -> Self {
+        let options = OutputOptions::for_target(&recording.target);
         Self {
             id: id.into(),
-            created_at_ms: None,
-            duration_ms: 0,
-            target,
-            frames: Vec::new(),
-            strokes: Vec::new(),
-            events: Vec::new(),
+            recording,
+            interactions: Interactions::default(),
             transcript: TranscriptData::default(),
-            video: None,
-            video_offset_ms: 0,
-            audio: None,
-            note: None,
-            source: None,
-            device: None,
-            context: BTreeMap::new(),
-            context_changes: Vec::new(),
-            screens: Vec::new(),
-            windows: Vec::new(),
-            cursor: Vec::new(),
-            flags: Vec::new(),
-            autocrop: None,
-            full_frames: None,
+            options,
         }
     }
 
-    pub fn created_at_ms(mut self, created_at_ms: u64) -> Self {
-        self.created_at_ms = Some(created_at_ms);
-        self
-    }
-
-    pub fn duration_ms(mut self, duration_ms: u64) -> Self {
-        self.duration_ms = duration_ms;
-        self
-    }
-
-    pub fn frames(mut self, frames: Vec<RgbaFrame>) -> Self {
-        self.frames = frames;
-        self
-    }
-
-    pub fn strokes(mut self, strokes: Vec<Stroke>) -> Self {
-        self.strokes = strokes;
-        self
-    }
-
-    pub fn events(mut self, events: Vec<InteractionEvent>) -> Self {
-        self.events = events;
+    pub fn interactions(mut self, interactions: Interactions) -> Self {
+        self.interactions = interactions;
         self
     }
 
@@ -340,170 +680,20 @@ impl BundleBuilder {
         self
     }
 
-    pub fn video_file(mut self, video: Option<String>) -> Self {
-        self.video = video;
+    pub fn options(mut self, options: OutputOptions) -> Self {
+        self.options = options;
         self
     }
 
-    pub fn video_offset_ms(mut self, video_offset_ms: u64) -> Self {
-        self.video_offset_ms = video_offset_ms;
-        self
-    }
-
-    pub fn audio_file(mut self, audio: Option<String>) -> Self {
-        self.audio = audio;
-        self
-    }
-
-    pub fn note(mut self, note: Option<String>) -> Self {
-        self.note = note;
-        self
-    }
-
-    pub fn activity(mut self, activity: ActivityLog) -> Self {
-        self.windows = activity.windows;
-        self.cursor = activity.cursor;
-        self
-    }
-
-    pub fn windows(mut self, windows: Vec<WindowSnapshot>) -> Self {
-        self.windows = windows;
-        self
-    }
-
-    pub fn cursor(mut self, cursor: Vec<CursorSample>) -> Self {
-        self.cursor = cursor;
-        self
-    }
-
-    pub fn flags(mut self, flags: Vec<u64>) -> Self {
-        self.flags = flags;
-        self
-    }
-
-    pub fn auto_crop(mut self, settings: Option<autocrop::Settings>) -> Self {
-        self.autocrop = Some(settings);
-        self
-    }
-
-    pub fn auto_crop_enabled(mut self, enabled: bool) -> Self {
-        self.autocrop = Some(enabled.then(autocrop::Settings::default));
-        self
-    }
-
-    pub fn full_frames(mut self, full_frames: FullFrames) -> Self {
-        self.full_frames = Some(full_frames);
-        self
-    }
-
-    /// Selects keyframes, runs auto-crop when configured, stamps badges, and renders the contact
-    /// sheet in memory without touching the filesystem.
+    /// Runs [`plan_keyframes`] → [`solve_crop`] → [`render_frames`] → [`assemble_bundle`] in memory.
     pub fn build(self) -> BuiltBundle {
-        let mut marks = marks_of(&self.strokes);
-        for (i, &t) in self.flags.iter().enumerate() {
-            marks.push(Mark {
-                id: format!("f{}", i + 1),
-                strokes: Vec::new(),
-                t0: t,
-                t1: t,
-                box_norm: [0.0, 0.0, 1.0, 1.0],
-                shape: Shape::Flag,
-                from: None,
-                to: None,
-                pin: None,
-                on: None,
-                description: "flagged this moment".into(),
-                frame: None,
-            });
-        }
-        let selected = select_keyframes(
-            &self.frames,
-            &self.strokes,
-            &mut marks,
-            &self.events,
-            &self.transcript,
-            keyframe_budget(self.duration_ms),
-        );
-        let baseline = {
-            let mut frames = self.frames;
-            frames.truncate(1);
-            frames.pop()
-        };
-        let selected = match &self.full_frames {
-            Some(decode) if !selected.is_empty() => {
-                let times: Vec<u64> = selected.iter().map(|(k, _)| k.t).collect();
-                match decode(&times) {
-                    Ok(full) => merge_full_keyframes(selected, full).0,
-                    Err(_) => selected,
-                }
-            }
-            _ => selected,
-        };
-        let crop_settings = match self.autocrop {
-            Some(settings) => settings,
-            None if self.target.mode == CaptureMode::Display => Some(autocrop::Settings::default()),
-            None => None,
-        };
-        let (mut annotated_frames, mut cropped) = autocrop::annotate_and_crop(
-            selected,
-            baseline.as_ref(),
-            crop_settings.as_ref(),
-            &self.target,
-            self.duration_ms,
-            &self.strokes,
-            &marks,
-            &self.events,
-            &self.windows,
-            &self.cursor,
-        );
-        let keyframes: Vec<Keyframe> = annotated_frames.iter().map(|(kf, _)| kf.clone()).collect();
-        let bundle = ScrawlBundle {
-            version: 1,
-            id: self.id,
-            created_at_ms: self.created_at_ms.unwrap_or_else(now_epoch_ms),
-            duration_ms: self.duration_ms,
-            target: self.target,
-            transcript: self.transcript,
-            note: self.note,
-            strokes: self.strokes,
-            marks,
-            events: self.events,
-            keyframes,
-            contact_sheet: "contact-sheet.png".into(),
-            video: self.video,
-            video_offset_ms: self.video_offset_ms,
-            audio: self.audio,
-            source: self.source,
-            device: self.device,
-            context: self.context,
-            context_changes: self.context_changes,
-            screens: self.screens,
-            windows: self.windows,
-            cursor: self.cursor,
-            autocrop: cropped.as_ref().map(|(info, _)| info.clone()),
-            destination: None,
-        };
-        let (full_sheet, contact_sheet) = thread::scope(|scope| {
-            let full_handle = cropped
-                .as_ref()
-                .map(|(_, full)| scope.spawn(|| render_contact_sheet(&bundle, full)));
-            let sheet = render_contact_sheet(&bundle, &annotated_frames);
-            (full_handle.map(|h| h.join().unwrap()), sheet)
-        });
-        crate::render::stamp_keyframe_badges(&mut annotated_frames);
-        if let Some((_, full)) = &mut cropped {
-            crate::render::stamp_keyframe_badges(full);
-        }
-        let full_frames = match (cropped, full_sheet) {
-            (Some((info, full)), Some(sheet)) => Some((info, full, sheet)),
-            _ => None,
-        };
-        BuiltBundle {
-            bundle,
-            annotated_frames,
-            contact_sheet,
-            full_frames,
-        }
+        build_bundle(
+            self.id,
+            self.recording,
+            self.interactions,
+            self.transcript,
+            self.options,
+        )
     }
 }
 
@@ -671,30 +861,38 @@ pub fn build_bundle_from_parts(
         return Ok((bundle_dir.to_path_buf(), bundle, summary));
     }
 
-    let mut builder = BundleBuilder::new(id, target)
-        .duration_ms(duration_ms)
-        .frames(frames)
-        .strokes(strokes)
-        .events(events)
-        .transcript(transcript)
-        .video_file(video_rel)
-        .video_offset_ms(extras.video_offset_ms)
-        .audio_file(audio_rel)
-        .note(note)
-        .activity(extras.activity)
-        .flags(extras.flags);
-    builder.source = extras.source;
-    builder.device = extras.device;
-    builder.context = extras.context;
-    builder.context_changes = extras.context_changes;
-    builder.screens = extras.screens;
-    if let Some(crop) = extras.autocrop {
-        builder = builder.auto_crop(crop);
-    }
-    if let Some(full) = extras.full_frames {
-        builder = builder.full_frames(full);
-    }
-    builder.build().write_to(bundle_dir)
+    let auto_crop = match extras.autocrop {
+        Some(settings) => settings,
+        None => (target.mode == CaptureMode::Display).then(autocrop::Settings::default),
+    };
+    let recording = Recording {
+        target,
+        created_at_ms: None,
+        duration_ms,
+        frames,
+        video: video_rel,
+        video_offset_ms: extras.video_offset_ms,
+        audio: audio_rel,
+        source: extras.source,
+        device: extras.device,
+        context: extras.context,
+        context_changes: extras.context_changes,
+        screens: extras.screens,
+    };
+    let interactions = Interactions {
+        strokes,
+        events,
+        cursor: extras.activity.cursor,
+        windows: extras.activity.windows,
+        flags: extras.flags,
+    };
+    let options = OutputOptions {
+        auto_crop,
+        full_frames: extras.full_frames,
+        note,
+    };
+    let _ = render_contact_sheet;
+    build_bundle(id, recording, interactions, transcript, options).write_to(bundle_dir)
 }
 
 /// Generates a rich, deterministic multi-frame demo bundle showcasing clicks, circles, arrows, pins, and aligned speech.
@@ -941,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_builder_composes_in_memory_without_disk_io() {
+    fn stages_compose_and_allow_intermediate_inspection_or_override() {
         let target = TargetInfo {
             mode: CaptureMode::Display,
             app: Some("OpenCode".into()),
@@ -957,53 +1155,113 @@ mod tests {
                 scale: 2.0,
             },
         };
-        let built = BundleBuilder::new("builder-test", target)
-            .created_at_ms(1_700_000_000_000)
-            .duration_ms(4_000)
-            .frames(vec![
+        let recording = Recording {
+            target: target.clone(),
+            created_at_ms: Some(1_700_000_000_000),
+            duration_ms: 4_000,
+            frames: vec![
                 render_synthetic_demo_frame(320, 200, 500, 0),
                 render_synthetic_demo_frame(320, 200, 2_500, 1),
-            ])
-            .events(vec![InteractionEvent::Click {
+            ],
+            video: Some("recording.mp4".into()),
+            video_offset_ms: 40,
+            audio: Some("audio.wav".into()),
+            ..Default::default()
+        };
+        let interactions = Interactions {
+            events: vec![InteractionEvent::Click {
                 t: 2_400,
                 x: 0.45,
                 y: 0.35,
                 button: Some("left".into()),
                 label: Some("Run".into()),
                 role: None,
-            }])
-            .transcript(TranscriptData {
-                source: "hex".into(),
-                model: Some("parakeet-tdt-0.6b-v3".into()),
-                text: "Click Run here.".into(),
-                segments: Vec::new(),
-                words: vec![
-                    WordTiming {
-                        t0: 2_100,
-                        t1: 2_350,
-                        text: "Click".into(),
-                    },
-                    WordTiming {
-                        t0: 2_350,
-                        t1: 2_600,
-                        text: "Run".into(),
-                    },
-                    WordTiming {
-                        t0: 2_600,
-                        t1: 2_900,
-                        text: "here.".into(),
-                    },
-                ],
-                estimated: false,
-            })
-            .auto_crop_enabled(true)
-            .build();
+            }],
+            flags: vec![500],
+            ..Default::default()
+        };
+        let transcript = TranscriptData {
+            source: "hex".into(),
+            model: Some("parakeet-tdt-0.6b-v3".into()),
+            text: "Click Run here.".into(),
+            segments: Vec::new(),
+            words: vec![
+                WordTiming {
+                    t0: 2_100,
+                    t1: 2_350,
+                    text: "Click".into(),
+                },
+                WordTiming {
+                    t0: 2_350,
+                    t1: 2_600,
+                    text: "Run".into(),
+                },
+                WordTiming {
+                    t0: 2_600,
+                    t1: 2_900,
+                    text: "here.".into(),
+                },
+            ],
+            estimated: false,
+        };
+        let options = OutputOptions::for_target(&target);
 
-        assert_eq!(built.bundle.id, "builder-test");
-        assert!(!built.bundle.keyframes.is_empty());
-        assert_eq!(built.annotated_frames.len(), built.bundle.keyframes.len());
-        assert!(built.contact_sheet.width > 0 && built.contact_sheet.height > 0);
-        let summary = built.summary_markdown(Path::new("/tmp/builder-test.scrawl"));
+        // Run stages individually and verify intermediate seam outputs:
+        let plan = plan_keyframes(
+            &recording,
+            &interactions,
+            &transcript,
+            options.full_frames.as_deref(),
+        );
+        assert_eq!(plan.marks.len(), 1);
+        assert_eq!(plan.marks[0].shape, Shape::Flag);
+        assert!(!plan.selected.is_empty());
+
+        // Swap crop stage to disable auto-crop even on Display mode:
+        let uncropped = solve_crop(plan.clone(), &recording, &interactions, None);
+        assert!(uncropped.autocrop.is_none());
+        let rendered = render_frames(recording.duration_ms, uncropped);
+        let built_manual = assemble_bundle(
+            "manual-stages",
+            recording.clone(),
+            interactions.clone(),
+            transcript.clone(),
+            Some("Stage override".into()),
+            rendered,
+        );
+        assert!(built_manual.bundle.autocrop.is_none());
+        assert_eq!(built_manual.bundle.note.as_deref(), Some("Stage override"));
+
+        // Builder with default options runs auto-crop on Display:
+        let built_default = BundleBuilder::new("builder-test", recording)
+            .interactions(interactions)
+            .transcript(transcript)
+            .options(options)
+            .build();
+        assert_eq!(built_default.bundle.id, "builder-test");
+        assert!(!built_default.bundle.keyframes.is_empty());
+        assert_eq!(
+            built_default.annotated_frames.len(),
+            built_default.bundle.keyframes.len()
+        );
+        let summary = built_default.summary_markdown(Path::new("/tmp/builder-test.scrawl"));
         assert!(summary.contains("Click Run here."));
+    }
+
+    #[test]
+    fn candidate_buffer_thins_regular_frames_and_preserves_urgent_ones() {
+        // Each 1x1 RGBA frame is 4 bytes; cap clamps to at least 60 frames.
+        let mut buf = CandidateBuffer::new(240);
+        assert_eq!(buf.interval(), FRAME_SAMPLE_INTERVAL);
+        for i in 0..60_u64 {
+            let urgent = i == 17 || i == 41;
+            buf.push(RgbaFrame::new(i * 100, 1, 1, vec![1, 2, 3, 255]), urgent);
+        }
+        assert_eq!(buf.interval(), FRAME_SAMPLE_INTERVAL * 2);
+        let kept = buf.into_frames();
+        assert!(kept.len() < 60);
+        assert_eq!(kept[0].t_ms, 0);
+        assert!(kept.iter().any(|f| f.t_ms == 1_700));
+        assert!(kept.iter().any(|f| f.t_ms == 4_100));
     }
 }
