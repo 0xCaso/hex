@@ -27,6 +27,18 @@ struct Job {
     audio_ms: u64,
 }
 
+enum OutputJob {
+    Dictation(Job),
+    /// Pastes the newest completed dictation again.
+    PasteLast,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum OutputKind {
+    Dictation,
+    PasteLast,
+}
+
 /// A release whose capture is still collecting its post-release tail.
 struct Finishing {
     ended_at: CaptureInstant,
@@ -137,19 +149,51 @@ pub fn run(
     let hotkey_label = binding.label();
     let toggle = settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
     let paste_with_shift = settings.paste_with_shift;
-    let hotkey =
-        LinuxHotkeyMonitor::start(binding, settings.double_tap_lock, toggle, hotkey_status)?;
+    let options = crate::linux_input::HotkeyOptions {
+        double_tap: settings.double_tap_lock,
+        // Double-tap-only needs the double-tap window and a non-modifier key.
+        double_tap_only: settings.double_tap_lock
+            && settings.double_tap_only
+            && settings.dictation_hotkey.key.is_some(),
+        toggle,
+        paste_last: settings
+            .paste_last_hotkey
+            .as_ref()
+            .map(crate::linux_input::LinuxHotkey::from),
+    };
+    let hotkey = LinuxHotkeyMonitor::start_with(binding, options, hotkey_status)?;
     let wayland_modifiers = hotkey.wayland_modifiers();
     let indicator = LinuxIndicator::new();
-    let (jobs, job_receiver) = mpsc::sync_channel::<Job>(2);
+    let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
     output.worker = Some(thread::spawn(move || {
         let mut paster = LinuxPaster::new(worker_stop.clone(), paste_with_shift, wayland_modifiers);
+        let mut last_dictation: Option<String> = None;
         while let Ok(job) = job_receiver.recv() {
             if worker_stop.load(Ordering::Acquire) {
                 break;
             }
+            let job = match job {
+                OutputJob::Dictation(job) => job,
+                OutputJob::PasteLast => {
+                    let result = last_dictation
+                        .clone()
+                        .ok_or_else(|| eyre!("there is no completed dictation to paste"))
+                        .and_then(|text| {
+                            paster
+                                .as_mut()
+                                .map_err(|error| eyre!("{error:#}"))?
+                                .paste(&text)
+                        })
+                        .map(|()| String::new())
+                        .map_err(|error| format!("{error:#}"));
+                    if result_sender.send((OutputKind::PasteLast, result)).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let started = Instant::now();
             let result = (|| -> Result<String> {
                 let transcribed = job.transcript.wait().map_err(|error| eyre!(error))?;
@@ -173,7 +217,10 @@ pub fn run(
                 elapsed_ms = started.elapsed().as_millis(),
                 "completed Linux dictation job"
             );
-            if result_sender.send(result).is_err() {
+            if let Ok(text) = &result {
+                last_dictation = Some(text.clone());
+            }
+            if result_sender.send((OutputKind::Dictation, result)).is_err() {
                 break;
             }
         }
@@ -232,6 +279,14 @@ pub fn run(
                 HotkeyEvent::Finish if capture.is_recording() => {
                     finishing = Some(begin_finishing(&capture, captured_through));
                 }
+                HotkeyEvent::PasteLast if !capture.is_recording() => {
+                    match jobs.try_send(OutputJob::PasteLast) {
+                        Ok(()) | Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Disconnected(_)) => {
+                            return Err(eyre!("dictation worker is unavailable"));
+                        }
+                    }
+                }
                 HotkeyEvent::Cancel if capture.is_recording() => {
                     capture.cancel();
                     feedback::play(Tone::Cancel);
@@ -245,7 +300,14 @@ pub fn run(
                 _ => {}
             }
         }
-        while let Ok(result) = results.try_recv() {
+        while let Ok((kind, result)) = results.try_recv() {
+            // A repeated paste has no transcript and is not pending work.
+            if kind == OutputKind::PasteLast {
+                if let Err(error) = result {
+                    events.dictation(DictationPhase::Failed(error), "")?;
+                }
+                continue;
+            }
             pending = pending.saturating_sub(1);
             match result {
                 Ok(text) => {
@@ -351,7 +413,7 @@ fn submit_capture(
     capture: &mut DictationCapture,
     ended_at: CaptureInstant,
     engine: &TranscriptionEngine,
-    jobs: &SyncSender<Job>,
+    jobs: &SyncSender<OutputJob>,
     events: &mut EventLog,
     pending: &mut usize,
 ) -> Result<()> {
@@ -367,7 +429,7 @@ fn submit_capture(
                 transcript: engine.finish(clip.take_stream(), clip.into_transcription_samples())?,
                 audio_ms,
             };
-            match jobs.try_send(job) {
+            match jobs.try_send(OutputJob::Dictation(job)) {
                 Ok(()) => {
                     *pending += 1;
                     events.dictation(DictationPhase::Transcribing, "")?;
@@ -511,7 +573,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pending, 1);
-        let job = queued.try_recv().unwrap();
+        let Ok(OutputJob::Dictation(job)) = queued.try_recv() else {
+            panic!("a dictation job");
+        };
         assert_eq!(job.audio_ms, 2_000);
         let received = commands.try_iter().collect::<Vec<_>>();
         let fed: usize = received

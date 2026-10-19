@@ -162,7 +162,11 @@ impl Pressed {
 #[derive(Clone, Copy, PartialEq)]
 enum Capture {
     Idle,
-    Held { second_tap: bool },
+    /// Double-tap-only: the first tap is down and waits for the second.
+    Armed,
+    Held {
+        second_tap: bool,
+    },
     Locked,
 }
 
@@ -171,8 +175,10 @@ struct HotkeyState {
     trigger: KeyCode,
     required: [bool; 4],
     double_tap: bool,
+    double_tap_only: bool,
     /// Every press acts as the second tap of a double-tap: releasing locks.
     toggle: bool,
+    paste_last: Option<(KeyCode, [bool; 4])>,
     capture: Capture,
     last_release: Option<Instant>,
     modifiers: WaylandModifierState,
@@ -216,7 +222,9 @@ impl HotkeyState {
                 binding.super_key,
             ],
             double_tap,
+            double_tap_only: false,
             toggle: false,
+            paste_last: None,
             capture: Capture::Idle,
             last_release: None,
             modifiers,
@@ -224,7 +232,7 @@ impl HotkeyState {
     }
 
     fn cancel(&mut self) -> Option<HotkeyEvent> {
-        let active = self.capture != Capture::Idle;
+        let active = matches!(self.capture, Capture::Held { .. } | Capture::Locked);
         self.capture = Capture::Idle;
         self.last_release = None;
         active.then_some(HotkeyEvent::Cancel)
@@ -243,6 +251,21 @@ impl HotkeyState {
             return self.cancel();
         }
         let modifiers = self.pressed.modifiers();
+        if self.capture == Capture::Armed
+            && (!self.pressed.contains(self.trigger) || modifiers != self.required)
+        {
+            self.capture = Capture::Idle;
+            self.last_release = Some(now);
+            return None;
+        }
+        if down
+            && self.capture == Capture::Idle
+            && self
+                .paste_last
+                .is_some_and(|(paste, required)| key == paste && modifiers == required)
+        {
+            return Some(HotkeyEvent::PasteLast);
+        }
         if let Capture::Held { second_tap } = self.capture {
             if modifiers
                 .iter()
@@ -282,10 +305,14 @@ impl HotkeyState {
                         now.checked_duration_since(released)
                             .is_some_and(|gap| gap < DOUBLE_TAP_WINDOW)
                     });
+                if self.double_tap_only && !second_tap {
+                    self.capture = Capture::Armed;
+                    return None;
+                }
                 self.capture = Capture::Held { second_tap };
                 Some(HotkeyEvent::Start)
             }
-            Capture::Held { .. } => None,
+            Capture::Armed | Capture::Held { .. } => None,
         }
     }
 
@@ -535,19 +562,25 @@ impl Keyboards {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     sender: SyncSender<HotkeyEvent>,
     stop: Arc<AtomicBool>,
     ready: SyncSender<Result<()>>,
     binding: LinuxHotkey,
-    double_tap_enabled: bool,
-    toggle: bool,
+    options: crate::linux_input::HotkeyOptions,
     started: Arc<AtomicBool>,
     modifiers: WaylandModifierState,
 ) -> Result<()> {
-    let mut state = HotkeyState::with_modifiers(&binding, double_tap_enabled, modifiers)?;
-    state.toggle = toggle;
+    let mut state = HotkeyState::with_modifiers(&binding, options.double_tap, modifiers)?;
+    state.toggle = options.toggle;
+    state.double_tap_only = options.double_tap_only;
+    state.paste_last = match &options.paste_last {
+        Some(paste) => Some((
+            key_code(&paste.key)?,
+            [paste.control, paste.alt, paste.shift, paste.super_key],
+        )),
+        None => None,
+    };
     let (mut keyboards, initial) = Keyboards::open(&stop)?;
     for input in initial {
         state.update(input, Instant::now());
@@ -645,7 +678,7 @@ fn should_monitor_input(is_mouse: bool, supports_hotkeys: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use HotkeyEvent::{Cancel, Finish, Start};
+    use HotkeyEvent::{Cancel, Finish, PasteLast, Start};
 
     struct Test {
         state: HotkeyState,
@@ -756,6 +789,42 @@ mod tests {
         assert!(modifiers.held());
         state.update(Input::Disconnected("keyboard".into()), Instant::now());
         assert!(!modifiers.held());
+    }
+
+    #[test]
+    fn double_tap_only_ignores_a_single_hold_and_locks_on_the_second_tap() {
+        let mut test = Test::new(true);
+        test.state.double_tap_only = true;
+        test.key(KeyCode::KEY_LEFTALT, 1);
+        test.key(KeyCode::KEY_SPACE, 1);
+        test.now += Duration::from_millis(600);
+        test.key(KeyCode::KEY_SPACE, 0);
+        assert!(test.events.is_empty(), "a hold alone never records");
+        test.key(KeyCode::KEY_LEFTALT, 0);
+        test.now += Duration::from_secs(1);
+        test.tap();
+        test.now += Duration::from_millis(20);
+        test.tap();
+        assert_eq!(test.events, [Start]);
+        assert!(test.state.capture == Capture::Locked);
+        test.tap();
+        assert_eq!(test.events, [Start, Finish]);
+    }
+
+    #[test]
+    fn paste_last_fires_on_its_own_chord_when_idle() {
+        let mut test = Test::new(true);
+        test.state.paste_last = Some((KeyCode::KEY_V, [true, true, false, false]));
+        test.key(KeyCode::KEY_LEFTCTRL, 1);
+        test.key(KeyCode::KEY_LEFTALT, 1);
+        test.key(KeyCode::KEY_V, 1);
+        test.key(KeyCode::KEY_V, 0);
+        test.key(KeyCode::KEY_LEFTALT, 0);
+        test.key(KeyCode::KEY_LEFTCTRL, 0);
+        assert_eq!(test.events, [PasteLast]);
+        test.key(KeyCode::KEY_LEFTALT, 1);
+        test.key(KeyCode::KEY_V, 1);
+        assert_eq!(test.events, [PasteLast], "a different chord does nothing");
     }
 
     #[test]
