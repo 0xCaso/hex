@@ -190,6 +190,9 @@ jobs:
       - name: Build
         shell: bash
         run: |
+          # Git Bash would rewrite CL=/EHsc into a path that clang-cl reads as
+          # a second source file.
+          export MSYS2_ENV_CONV_EXCL=CL
           export HEX_RELEASE_SOURCE="$GITHUB_WORKSPACE/source"
           export HEX_RELEASE_DIST="$(cygpath -u "$GITHUB_WORKSPACE")/dist"
           tools/scripts/release-windows.sh build
