@@ -117,10 +117,11 @@ capture actions. Keep the callback regressions for delayed releases and Fn
 evidence alongside physical Option-hold checks; a physical Fn/Globe smoke test
 and general cross-tap delivery-order validation remain outstanding.
 
-After these reliability fixes, evaluate an explicit press-once-to-start,
-press-again-to-finish option, especially for key chords and standalone function
-keys. Keep it distinct from hold-to-dictate and double-tap-only activation;
-do not add new shortcut modes to the regression release.
+Settings > Shortcut mode now offers Toggle (press to start, press again to
+finish) beside Hold on macOS, Linux, and Windows; see
+[dictation](docs/features/dictation.md#shortcut-mode). Physically check it with
+modifier-only, key-chord, Fn/Globe, and standalone function-key bindings, and
+with cold-microphone capture, before calling #77 done.
 
 Track the remaining shortcut requests explicitly:
 
@@ -130,8 +131,8 @@ Track the remaining shortcut requests explicitly:
   suspend capture shortcuts and command activation, cancel only active capture,
   retain accepted output, and require key release before resuming. Test event-tap
   suppression as well as the recognition state. App exclusions are a later slice.
-- [#77](https://github.com/anomalyco/hex/issues/77): single-tap hands-free
-  activation needs its own hold/lock, chord-discard, and cold-microphone checks.
+- [#77](https://github.com/anomalyco/hex/issues/77): Toggle mode is implemented;
+  it still needs physical chord-discard and cold-microphone checks.
 - [#67](https://github.com/anomalyco/hex/issues/67): standalone keypad/character
   bindings need explicit key-consumption, cancellation, and rebinding semantics.
 - [#37](https://github.com/anomalyco/hex/issues/37): the original Voice Action

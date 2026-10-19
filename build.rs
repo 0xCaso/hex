@@ -10,6 +10,22 @@ fn main() {
             // GNU ld's --as-needed does not discard it before seeing cblas_*.
             println!("cargo:rustc-link-arg=-lopenblas");
         }
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            // transcribe-cpp's Vulkan backend links the vulkan-1 import
+            // library by name without its search path. The DLL itself ships
+            // with the GPU driver.
+            println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+            if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
+                && let Some(sdk) = std::env::var_os("VULKAN_SDK")
+            {
+                println!(
+                    "cargo:rustc-link-search=native={}",
+                    PathBuf::from(sdk).join("Lib").display()
+                );
+            }
+            #[cfg(windows)]
+            embed_windows_resources();
+        }
         return;
     }
     let output = Command::new("xcode-select")
@@ -40,6 +56,59 @@ fn main() {
         );
         println!("cargo:rustc-link-arg=-Wl,-rpath,{swift_runtime}");
     }
+}
+
+/// Gives the executable its icon and the "HEX" name Explorer and Task
+/// Manager show, whatever the file is called.
+#[cfg(windows)]
+fn embed_windows_resources() {
+    let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let output_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let icon = manifest_dir.join("resources/windows/hex.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+    let numeric = version
+        .split(['.', '-'])
+        .take(3)
+        .map(|part| part.parse::<u16>().unwrap_or(0).to_string())
+        .chain(std::iter::repeat("0".to_string()))
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        r#"#include <winver.h>
+1 ICON "{icon}"
+1 VERSIONINFO
+FILEVERSION {numeric}
+PRODUCTVERSION {numeric}
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "HEX"
+      VALUE "ProductName", "HEX"
+      VALUE "FileVersion", "{version}"
+      VALUE "ProductVersion", "{version}"
+      VALUE "OriginalFilename", "hex.exe"
+      VALUE "InternalName", "hex"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+"#,
+        icon = icon.display().to_string().replace('\\', "/"),
+    );
+    let resource = output_dir.join("hex.rc");
+    std::fs::write(&resource, script).expect("write the Windows resource script");
+    embed_resource::compile(&resource, embed_resource::NONE)
+        .manifest_optional()
+        .expect("compile the Windows resources");
 }
 
 fn compile_permission_guide() {

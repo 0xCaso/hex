@@ -696,6 +696,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "replacement detection uses Unix file identity")]
     fn reader_resets_partial_record_state_on_truncation_and_replacement() {
         let path = std::env::temp_dir().join(format!(
             "hex-replaced-event-reader-{}-{}.ndjson",

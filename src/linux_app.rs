@@ -45,7 +45,7 @@ type PreparationResult = std::result::Result<PreparedTranscription, String>;
 
 struct PreparedTranscription {
     selection: crate::transcription_models::TranscriptionSelection,
-    transcriber: crate::linux_transcriber::LinuxTranscriber,
+    transcriber: crate::local_transcriber::LocalTranscriber,
 }
 
 struct TranscriptionPreparation {
@@ -61,6 +61,7 @@ enum SettingsChange {
     Capture,
     Hotkey(crate::linux_settings::LinuxHotkey),
     DoubleTap(bool),
+    ShortcutMode(crate::dictation::ShortcutMode),
     PasteWithShift(bool),
 }
 
@@ -117,7 +118,7 @@ struct LinuxDesktopHost {
     // Dismissing a load error must not authorize recording with fallback defaults.
     settings_valid: bool,
     settings_edit: Option<SettingsEdit>,
-    prepared_transcriber: Option<crate::linux_transcriber::LinuxTranscriber>,
+    prepared_transcriber: Option<crate::local_transcriber::LocalTranscriber>,
     transcription_preparation: Option<TranscriptionPreparation>,
     transcription_error: Option<String>,
     update: UpdateState,
@@ -233,6 +234,7 @@ impl DesktopHost for RemoteHost {
                 activity: DesktopActivity::default(),
                 dictation_shortcut: self.settings.dictation_hotkey.keycaps(),
                 double_tap_lock: self.settings.double_tap_lock,
+                shortcut_mode: self.settings.shortcut_mode,
                 listener: DesktopListenerSnapshot {
                     running: false,
                     status: "Service disconnected".into(),
@@ -495,7 +497,7 @@ impl LinuxDesktopHost {
             activity,
             listener: None,
             listen_when_ready: false,
-            status: "Ready".into(),
+            status: "Disabled".into(),
             error: None,
             dismissed_failure_at: None,
             settings_valid: error.is_none(),
@@ -520,7 +522,7 @@ impl LinuxDesktopHost {
         // Defaults are only an editable recovery projection after a failed load.
         // They must never become a recording configuration until saved successfully.
         if !self.settings_valid {
-            self.status = "Unavailable".into();
+            self.status = "Couldn't enable".into();
             return;
         }
         let model = crate::transcription_models::definition(self.settings.transcription.model);
@@ -557,7 +559,7 @@ impl LinuxDesktopHost {
             },
             hotkey_status,
         });
-        self.status = "Starting".into();
+        self.status = "Enabling…".into();
     }
 
     fn stop(&mut self) {
@@ -568,7 +570,7 @@ impl LinuxDesktopHost {
         }
         if let Some(listener) = &self.listener {
             listener.stop();
-            self.status = "Stopping".into();
+            self.status = "Disabling…".into();
         }
     }
 
@@ -622,7 +624,7 @@ impl LinuxDesktopHost {
                                 self.prepared_transcriber = Some(prepared.transcriber);
                                 self.transcription_error = None;
                                 self.settings_error = None;
-                                self.status = "Ready".into();
+                                self.status = "Disabled".into();
                                 start_listener = self.listen_when_ready;
                             }
                             Err(error) => {
@@ -648,9 +650,9 @@ impl LinuxDesktopHost {
         {
             let result = listener.finish();
             match result {
-                Ok(()) => self.status = "Ready".into(),
+                Ok(()) => self.status = "Disabled".into(),
                 Err(error) => {
-                    self.status = "Unavailable".into();
+                    self.status = "Couldn't enable".into();
                     self.error = Some(error);
                 }
             }
@@ -815,6 +817,10 @@ impl LinuxDesktopHost {
                         candidate.double_tap_lock = enabled;
                         None
                     }
+                    SettingsChange::ShortcutMode(mode) => {
+                        candidate.shortcut_mode = mode;
+                        None
+                    }
                     SettingsChange::PasteWithShift(enabled) => {
                         candidate.paste_with_shift = enabled;
                         None
@@ -824,6 +830,7 @@ impl LinuxDesktopHost {
                     binding.validate()?;
                     crate::linux_input::LinuxHotkeyMonitor::start(
                         binding.clone(),
+                        false,
                         false,
                         Default::default(),
                     )?;
@@ -844,7 +851,7 @@ impl LinuxDesktopHost {
             return;
         }
         let resume = self.settings_edit.take().is_some_and(|edit| edit.resume);
-        self.status = "Ready".into();
+        self.status = "Disabled".into();
         if resume {
             self.start();
         }
@@ -863,7 +870,9 @@ impl LinuxDesktopHost {
         language: String,
     ) -> Result<()> {
         if self.is_running() || self.settings_edit.is_some() {
-            let error = "Stop listening and finish shortcut editing before changing the transcription model".to_string();
+            let error =
+                "Disable Hex and finish shortcut editing before changing the transcription model"
+                    .to_string();
             self.transcription_error = Some(error.clone());
             return Err(color_eyre::eyre::eyre!(error));
         }
@@ -900,7 +909,7 @@ impl LinuxDesktopHost {
                     return Err(color_eyre::eyre::eyre!("model activation canceled"));
                 }
                 crate::transcription_models::ModelPreparationStage::Loading.store(&worker_stage);
-                let transcriber = crate::linux_transcriber::LinuxTranscriber::load(&selection)?;
+                let transcriber = crate::local_transcriber::LocalTranscriber::load(&selection)?;
                 if worker_canceled.load(Ordering::Relaxed) {
                     return Err(color_eyre::eyre::eyre!("model activation canceled"));
                 }
@@ -1007,6 +1016,7 @@ impl DesktopHost for LinuxDesktopHost {
             activity: self.activity.clone(),
             dictation_shortcut: self.settings.dictation_hotkey.keycaps(),
             double_tap_lock: self.settings.double_tap_lock,
+            shortcut_mode: self.settings.shortcut_mode,
             listener: DesktopListenerSnapshot {
                 running: self.is_running(),
                 status: self.status.clone(),
@@ -1063,6 +1073,9 @@ impl DesktopHost for LinuxDesktopHost {
             DesktopAction::SetDictationShortcut(shortcut) => {
                 self.set_dictation_hotkey(shortcut)?;
             }
+            DesktopAction::SetShortcutMode(mode) => {
+                self.begin_settings_edit(SettingsChange::ShortcutMode(mode));
+            }
             DesktopAction::SetDoubleTapLock(enabled) => {
                 self.begin_settings_edit(SettingsChange::DoubleTap(enabled));
             }
@@ -1117,6 +1130,27 @@ impl LinuxApp {
                         }))
                 }),
         );
+        let toggle_mode = snapshot.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
+        let shortcut_mode = segmented_control().children(
+            [
+                ("Hold", crate::dictation::ShortcutMode::Hold),
+                ("Toggle", crate::dictation::ShortcutMode::Toggle),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, mode))| {
+                segmented_item(snapshot.shortcut_mode == mode)
+                    .id(("linux-shortcut-mode", index))
+                    .child(label)
+                    .when(editing, |item| item.opacity(DISABLED_OPACITY))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.quitting && !editing {
+                            let _ = this.host.dispatch(DesktopAction::SetShortcutMode(mode));
+                            cx.notify();
+                        }
+                    }))
+            }),
+        );
         let shortcut =
             if self.host.capturing_hotkey() {
                 div()
@@ -1127,7 +1161,7 @@ impl LinuxApp {
                     .child(status_dot(DANGER))
                     .child(div().text_footnote().text_color(rgb(TEXT_SECONDARY)).child(
                         if running {
-                            "Stopping listener…"
+                            "Disabling Hex…"
                         } else {
                             "Press a shortcut…"
                         },
@@ -1136,6 +1170,14 @@ impl LinuxApp {
             } else {
                 hotkey_keycaps(snapshot.dictation_shortcut.clone(), 1.0)
             };
+        let shortcut_label = snapshot.dictation_shortcut.join("+");
+        let status_hint = match (running, toggle_mode) {
+            (true, true) => {
+                format!("Ready anywhere · Press {shortcut_label} to start and stop dictating")
+            }
+            (true, false) => format!("Ready anywhere · Hold {shortcut_label} to dictate"),
+            (false, _) => format!("Enable Hex to dictate into any app with {shortcut_label}"),
+        };
         let update_ready = snapshot.update_status == DesktopUpdateStatus::ReadyToRestart;
         let transcription = &snapshot.transcription;
         let transcription_label = format!(
@@ -1155,14 +1197,14 @@ impl LinuxApp {
                     "settings-scroll",
                             pane_content()
                                 .relative()
-                                .child(settings_section_label("Listener"))
+                                .child(settings_section_label("Hex"))
                                 .child(panel().child(settings_row(
                                     "Dictation",
-                                    "Global hotkey dictation",
+                                    status_hint,
                                     div().flex().items_center().gap_3()
                                         .child(div().text_footnote().text_color(rgb(TEXT_TERTIARY))
                                             .child(snapshot.listener.status.clone()))
-                                        .child(button(ButtonKind::Secondary, if running { "Stop" } else { "Start" })
+                                        .child(button(ButtonKind::Secondary, if running { "Disable" } else { "Enable" })
                                         .id("linux-listener-toggle")
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if !this.quitting {
@@ -1226,10 +1268,19 @@ impl LinuxApp {
                                             "Automatically chooses the preferred available input",
                                             disclosure_button("Automatic"),
                                         ))
+                                        .child(settings_row(
+                                            "Shortcut mode",
+                                            if toggle_mode {
+                                                "Press to start dictating, press again to transcribe"
+                                            } else {
+                                                "Hold to dictate, release to transcribe"
+                                            },
+                                            shortcut_mode,
+                                        ))
                                         .child(
                                             settings_row(
                                                 "Dictation shortcut",
-                                                "Hold to dictate, release to transcribe",
+                                                "Click to record a new shortcut",
                                                 shortcut,
                                             )
                                             .border_b_0()
@@ -1249,7 +1300,7 @@ impl LinuxApp {
                                         )
                                         .when(editing, |panel| panel.child(settings_row(
                                             "Updating shortcut settings",
-                                            "Listening resumes after the change if it was previously running.",
+                                            "Hex is enabled again after the change if it was enabled before.",
                                             button(ButtonKind::Secondary, "Cancel").id("linux-cancel-shortcut")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.host.cancel_settings_edit();
@@ -1259,7 +1310,7 @@ impl LinuxApp {
                                 )
                                 .child(settings_section_label("Behavior"))
                                 .child(
-                                    panel().child(
+                                    panel().when(!toggle_mode, |panel| panel.child(
                                         settings_row(
                                             "Double-tap to lock",
                                             "Double-tap the shortcut for hands-free dictation",
@@ -1279,7 +1330,7 @@ impl LinuxApp {
                                                 }
                                             }),
                                         ),
-                                    ).child(
+                                    )).child(
                                         settings_row(
                                             "Terminal paste shortcut",
                                             "Use Ctrl-Shift-V instead of Ctrl-V",
@@ -1519,11 +1570,11 @@ mod tests {
         );
         host.start();
         assert!(!host.is_running());
-        assert_eq!(host.status, "Unavailable");
+        assert_eq!(host.status, "Couldn't enable");
         host.dispatch(DesktopAction::ClearError).unwrap();
         host.start();
         assert!(!host.is_running());
-        assert_eq!(host.status, "Unavailable");
+        assert_eq!(host.status, "Couldn't enable");
         assert!(!host.settings_valid);
 
         host.begin_settings_edit(SettingsChange::DoubleTap(false));
@@ -1560,7 +1611,7 @@ mod tests {
     #[test]
     fn listener_warning_is_nonfatal_and_round_trips_in_service_snapshots() {
         let mut host = host_for_edit(true);
-        host.status = "Listening".into();
+        host.status = "Enabled".into();
         let status = host.listener.as_ref().unwrap().hotkey_status.clone();
         status.update_escape_availability(false);
         let snapshot = service_snapshot(&host, false);
@@ -1568,7 +1619,7 @@ mod tests {
         let received: ServiceSnapshot = serde_json::from_slice(&serialized).unwrap();
         let listener = received.desktop.listener;
         assert!(listener.running);
-        assert_eq!(listener.status, "Listening");
+        assert_eq!(listener.status, "Enabled");
         assert_eq!(
             listener.warning.as_deref(),
             Some(crate::linux_input::ESCAPE_CANCEL_WARNING),
@@ -1624,9 +1675,9 @@ mod tests {
             assert_eq!(
                 host.status,
                 if expected.is_some() {
-                    "Unavailable"
+                    "Couldn't enable"
                 } else {
-                    "Ready"
+                    "Disabled"
                 }
             );
         }
@@ -1876,7 +1927,7 @@ mod tests {
         host.dispatch(DesktopAction::StartListening).unwrap();
 
         assert!(host.listen_when_ready);
-        assert_eq!(host.status, "Ready");
+        assert_eq!(host.status, "Disabled");
         assert!(!host.is_running());
         assert!(host.listener.is_none());
         assert!(host.transcription_preparation.is_some());

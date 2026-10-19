@@ -1,11 +1,19 @@
 use std::collections::HashSet;
+#[cfg(not(target_os = "windows"))]
 use std::ffi::OsStr;
+#[cfg(not(target_os = "windows"))]
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(not(target_os = "windows"))]
+use std::io::Write;
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::ExitStatus;
+#[cfg(not(target_os = "windows"))]
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,9 +29,61 @@ const VOICE_ACTION_PROTOCOL_PROMPT: &str = "You execute a one-off voice instruct
 const VOICE_ACTION_PROFILE: &str = "Voice Action";
 const MAX_OPENCODE_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 /// Newest service info route first; older OpenCode V2 builds only serve the later names.
+#[cfg(not(target_os = "windows"))]
 const SERVICE_INFO_ENDPOINTS: [&str; 3] = ["/api/info", "/api/status", "/api/health"];
 /// Newest one-shot generation route first; older OpenCode V2 builds only serve the later name.
 const GENERATE_ENDPOINTS: [&str; 2] = ["/api/experimental/generate", "/api/generate"];
+
+/// Persisted OpenCode rewrite settings for one mode, shared by the macOS and
+/// Windows settings schemas.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct PostProcessingSettings {
+    pub enabled: bool,
+    pub prompt: String,
+    /// Optional `provider/model` key from the OpenCode catalog.
+    pub model: Option<String>,
+    pub variant: Option<String>,
+    pub deadline_seconds: u64,
+}
+
+impl Default for PostProcessingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prompt: "Rewrite the transcript into clear, natural text while preserving the speaker's intended meaning.".into(),
+            model: None,
+            variant: None,
+            deadline_seconds: 30,
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl PostProcessingSettings {
+    /// Applies an edited deadline; text that is not a number keeps the last
+    /// value, and zero clamps to one second.
+    pub fn update_deadline_from_text(&mut self, text: &str) -> bool {
+        let Ok(seconds) = text.trim().parse::<u64>() else {
+            return false;
+        };
+        let seconds = seconds.max(1);
+        if self.deadline_seconds == seconds {
+            return false;
+        }
+        self.deadline_seconds = seconds;
+        true
+    }
+
+    /// A variant needs a concrete model, so choosing one while the profile
+    /// follows the default pins the current default model.
+    pub fn set_variant(&mut self, variant: Option<String>, default_model: Option<&str>) {
+        if variant.is_some() && self.model.is_none() {
+            self.model = default_model.map(str::to_owned);
+        }
+        self.variant = variant;
+    }
+}
 
 #[derive(Clone)]
 pub struct Profile {
@@ -85,14 +145,44 @@ impl Profile {
         self.deadline = deadline;
         self
     }
+
+    /// Builds a runtime profile from persisted settings. A malformed model key
+    /// falls back to the default model rather than disabling the mode.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn configured(
+        name: impl Into<String>,
+        replacements: ReplacementSet,
+        transformations: Vec<String>,
+        settings: &PostProcessingSettings,
+    ) -> Self {
+        let mut profile = Self::new(name, &settings.prompt)
+            .ai_enabled(settings.enabled)
+            .replacements(replacements)
+            .transformations(transformations);
+        if let Some((provider, model)) = settings
+            .model
+            .as_deref()
+            .and_then(|key| key.split_once('/'))
+        {
+            profile = profile.model(provider, model);
+            if let Some(variant) = settings
+                .variant
+                .as_deref()
+                .filter(|variant| !variant.is_empty())
+            {
+                profile = profile.variant(variant);
+            }
+        }
+        profile.deadline(Duration::from_secs(settings.deadline_seconds.max(1)))
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Model {
     #[serde(rename = "providerID")]
     pub provider: String,
     pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
 }
 
@@ -265,6 +355,7 @@ impl Profiles {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn process_voice_action_cancellable(
     instruction: &str,
     selected_text: Option<&str>,
@@ -272,7 +363,6 @@ pub fn process_voice_action_cancellable(
     cancelled: &AtomicBool,
 ) -> Processed {
     let settings = crate::app_settings::voice_action_settings();
-    let prompt = voice_action_prompt(instruction, selected_text, context);
     let deadline = Duration::from_secs(settings.deadline_seconds.max(1));
     let started = Instant::now();
     let model = match settings.model.as_deref() {
@@ -291,9 +381,33 @@ pub fn process_voice_action_cancellable(
             })
         }
     };
+    process_voice_action(
+        instruction,
+        selected_text,
+        context,
+        model.as_ref(),
+        deadline,
+        cancelled,
+        started,
+    )
+}
+
+/// One Voice Action: the instruction and optional selection go to OpenCode,
+/// and only paste-ready text comes back. Failures leave the text empty and
+/// record the reason in the observation.
+pub fn process_voice_action(
+    instruction: &str,
+    selected_text: Option<&str>,
+    context: &ContextSnapshot,
+    model: Option<&Model>,
+    deadline: Duration,
+    cancelled: &AtomicBool,
+    started: Instant,
+) -> Processed {
+    let prompt = voice_action_prompt(instruction, selected_text, context);
     let (text, observation) = generate_observed(
         &prompt,
-        model.as_ref(),
+        model,
         deadline,
         cancelled,
         VOICE_ACTION_PROFILE,
@@ -352,7 +466,33 @@ pub struct ModelCatalog {
     pub default_variant: Option<String>,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl ModelChoice {
+    /// The request-shaped model this catalog entry selects.
+    pub fn model(&self) -> Model {
+        let (provider, id) = self
+            .key
+            .split_once('/')
+            .unwrap_or((self.provider.as_str(), self.key.as_str()));
+        Model {
+            provider: provider.into(),
+            id: id.into(),
+            variant: None,
+        }
+    }
+}
+
 impl ModelCatalog {
+    /// Variants for the explicit selection, or for the default model when the
+    /// profile leaves the model unset.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn variants_for(&self, selected_key: Option<&str>) -> &[String] {
+        selected_key
+            .or(self.default_key.as_deref())
+            .and_then(|key| self.models.iter().find(|choice| choice.key == key))
+            .map_or(&[], |choice| choice.variants.as_slice())
+    }
+
     pub fn recommended_variant_for(&self, key: &str) -> Option<&str> {
         let choice = self.models.iter().find(|choice| choice.key == key)?;
         recommended_variant_for_choice(choice)
@@ -476,15 +616,18 @@ fn model_is_available(model: &ModelInfo) -> bool {
             .any(|output| output == "text")
 }
 
+#[cfg(not(target_os = "windows"))]
 static CACHED_RANKED_CANDIDATES: std::sync::Mutex<Option<(String, Vec<Model>)>> =
     std::sync::Mutex::new(None);
 
+#[cfg(not(target_os = "windows"))]
 fn cache_ranked_candidates(endpoint: &str, catalog: &ModelCatalog) {
     if let Ok(mut guard) = CACHED_RANKED_CANDIDATES.lock() {
         *guard = Some((endpoint.to_owned(), catalog.ranked_candidates(None)));
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn ranked_candidates_for_endpoint(endpoint: &str, password: &str) -> Vec<Model> {
     if let Ok(guard) = CACHED_RANKED_CANDIDATES.lock()
         && let Some((cached_endpoint, candidates)) = guard.as_ref()
@@ -505,6 +648,7 @@ fn ranked_candidates_for_endpoint(endpoint: &str, password: &str) -> Vec<Model> 
     candidates
 }
 
+#[cfg(not(target_os = "windows"))]
 pub fn load_model_catalog() -> Result<ModelCatalog> {
     let (endpoint, password) =
         discover_opencode_service(Duration::from_secs(10), &AtomicBool::new(false))?;
@@ -580,11 +724,13 @@ pub fn opencode_installed() -> bool {
     })
 }
 
+#[cfg(not(target_os = "windows"))]
 fn is_executable(path: &std::path::Path) -> bool {
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn opencode_api<T: for<'de> Deserialize<'de>>(
     endpoint: &str,
     password: &str,
@@ -612,6 +758,7 @@ fn opencode_api<T: for<'de> Deserialize<'de>>(
         .wrap_err_with(|| format!("OpenCode {path} returned an invalid response"))
 }
 
+#[cfg(not(target_os = "windows"))]
 struct HttpResponse {
     status: u16,
     body: Vec<u8>,
@@ -620,6 +767,7 @@ struct HttpResponse {
 /// One authenticated loopback request through the system curl. A non-zero
 /// curl exit is a transport failure; HTTP error statuses return normally so
 /// callers can distinguish a missing route from a served error body.
+#[cfg(not(target_os = "windows"))]
 fn opencode_http(
     endpoint: &str,
     password: &str,
@@ -642,6 +790,7 @@ fn opencode_http(
 }
 
 /// curl appends `\n<status>` after the body; see `opencode_http_command`.
+#[cfg(not(target_os = "windows"))]
 fn split_http_status(mut stdout: Vec<u8>) -> Option<HttpResponse> {
     let newline = stdout.iter().rposition(|byte| *byte == b'\n')?;
     let status = std::str::from_utf8(&stdout[newline + 1..])
@@ -662,6 +811,37 @@ pub struct Processed {
 }
 
 pub type ProcessingObservation = crate::events::DictationProcessing;
+
+impl Processed {
+    /// Runs the selected transformations, the last processing stage. The chain
+    /// is one stage: a failure keeps the previous text and records the error.
+    pub fn apply_transformations(
+        &mut self,
+        client: &crate::personal_commands::TransformationClient,
+        context: &ContextSnapshot,
+        cancelled: &AtomicBool,
+    ) {
+        if self.transformations.is_empty() || cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let started = Instant::now();
+        let transformed = client.transform(&self.transformations, &self.text, context, cancelled);
+        let observation = self
+            .observation
+            .get_or_insert_with(|| ProcessingObservation {
+                profile: "Custom transformations".into(),
+                latency_ms: 0,
+                fallback: None,
+            });
+        observation.latency_ms = observation
+            .latency_ms
+            .saturating_add(started.elapsed().as_millis() as u64);
+        match transformed {
+            Ok(text) => self.text = text,
+            Err(error) => observation.fallback = Some(error),
+        }
+    }
+}
 
 fn prompt(profile: &Profile, transcript: &str, context: &ContextSnapshot) -> String {
     let application = context.application.as_deref().unwrap_or("unknown");
@@ -689,6 +869,7 @@ fn voice_action_prompt(
     )
 }
 
+#[cfg(target_os = "macos")]
 fn voice_action_failure(started: Instant, error: String) -> Processed {
     Processed {
         text: String::new(),
@@ -725,6 +906,7 @@ fn generate(prompt: &str, model: Option<&Model>, deadline: Duration) -> Result<S
     generate_cancellable(prompt, model, deadline, &AtomicBool::new(false))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn generate_cancellable(
     prompt: &str,
     model: Option<&Model>,
@@ -753,6 +935,7 @@ fn generate_cancellable(
     )
 }
 
+#[cfg(not(target_os = "windows"))]
 fn generate_with_ranked_candidates(
     prompt: &str,
     candidates: &[Model],
@@ -793,6 +976,7 @@ fn generate_with_ranked_candidates(
     Err(last_error.unwrap_or_else(|| eyre!("no OpenCode models available")))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn generate_single_model(
     prompt: &str,
     model: Option<&Model>,
@@ -829,6 +1013,7 @@ fn generate_single_model(
 
 /// Posts to the newest generation route and falls back to the older name only
 /// when the server reports that route missing. Every attempt shares one deadline.
+#[cfg(not(target_os = "windows"))]
 fn post_generation(
     endpoint: &str,
     password: &str,
@@ -868,6 +1053,7 @@ fn post_generation(
         .wrap_err("opencode2 returned an invalid generation response")
 }
 
+#[cfg(not(target_os = "windows"))]
 fn discover_opencode_service(
     deadline: Duration,
     cancelled: &AtomicBool,
@@ -882,6 +1068,7 @@ fn discover_opencode_service(
     )
 }
 
+#[cfg(not(target_os = "windows"))]
 fn discover_opencode_service_with(
     executable: &Path,
     workspace: &Path,
@@ -950,6 +1137,7 @@ fn endpoint_is_missing(output: &CommandOutput) -> bool {
         && String::from_utf8_lossy(&output.stderr).trim() == "HTTP 404 Not Found"
 }
 
+#[cfg(not(target_os = "windows"))]
 fn read_service_registration(state: &Path, pid: u32, version: &str) -> Result<(String, String)> {
     #[derive(Deserialize)]
     struct Registration {
@@ -1007,6 +1195,7 @@ fn read_service_registration(state: &Path, pid: u32, version: &str) -> Result<(S
     found.ok_or_else(|| eyre!("OpenCode active service registration is unavailable"))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn opencode_http_command(
     endpoint: &str,
     password: &str,
@@ -1142,6 +1331,7 @@ struct CommandOutput {
     stderr: Vec<u8>,
 }
 
+#[cfg(not(target_os = "windows"))]
 fn run_command(
     mut command: Command,
     input: Option<Vec<u8>>,
@@ -1223,12 +1413,14 @@ fn run_command(
     })
 }
 
+#[cfg(not(target_os = "windows"))]
 fn terminate_process_group(child: &mut Child) {
     kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
 
+#[cfg(not(target_os = "windows"))]
 fn kill_process_group(pid: u32) {
     // run_command creates a new process group whose ID is the child PID.
     unsafe {
@@ -1265,6 +1457,7 @@ fn opencode_executable() -> PathBuf {
     .unwrap_or_else(|| "opencode2".into())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn find_opencode_executable(
     configured: Option<PathBuf>,
     path: Option<&OsStr>,
@@ -1316,6 +1509,7 @@ fn absolute_path(path: PathBuf, current_directory: Option<&Path>) -> PathBuf {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn version_manager_candidates(home: Option<&Path>) -> Vec<PathBuf> {
     let Some(home) = home else {
         return Vec::new();
@@ -1362,6 +1556,523 @@ fn encode_uri_component(value: &str) -> String {
     encoded
 }
 
+// Windows reaches the service through the `opencode2 api` CLI. Discovery,
+// the ranked catalog, and generation follow the same policy as the curl
+// transport above.
+#[cfg(target_os = "windows")]
+pub use cli::load_model_catalog;
+#[cfg(target_os = "windows")]
+use cli::{find_opencode_executable, generate_cancellable, is_executable};
+
+#[cfg(target_os = "windows")]
+mod cli {
+    use std::ffi::OsStr;
+    use std::os::windows::process::CommandExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use color_eyre::eyre::{Result, WrapErr, eyre};
+    use serde::Deserialize;
+
+    use super::{
+        CommandOutput, DefaultModelResponse, GENERATE_ENDPOINTS, Model, ModelCatalog,
+        ModelsResponse, Request, Response, absolute_path, build_model_catalog,
+        encode_uri_component, endpoint_is_missing, read_output, retryable_generation_error,
+        wait_for_generation_retry,
+    };
+
+    /// Binary names the CLI ships under, newest first; any `opencode2` beats
+    /// every `opencode`.
+    const OPENCODE_BINARY_NAMES: [&str; 2] = ["opencode2", "opencode"];
+    const CATALOG_DEADLINE: Duration = Duration::from_secs(10);
+
+    static CACHED_RANKED_CANDIDATES: std::sync::Mutex<Option<Vec<Model>>> =
+        std::sync::Mutex::new(None);
+
+    pub fn load_model_catalog() -> Result<ModelCatalog> {
+        let models: ModelsResponse = api_get("/api/model")?;
+        let default: DefaultModelResponse = api_get("/api/model/default")?;
+        let catalog = build_model_catalog(models.data, default.data);
+        cache_ranked_candidates(&catalog);
+        Ok(catalog)
+    }
+
+    fn cache_ranked_candidates(catalog: &ModelCatalog) {
+        if let Ok(mut guard) = CACHED_RANKED_CANDIDATES.lock() {
+            *guard = Some(catalog.ranked_candidates(None));
+        }
+    }
+
+    fn ranked_candidates() -> Vec<Model> {
+        if let Ok(guard) = CACHED_RANKED_CANDIDATES.lock()
+            && let Some(candidates) = guard.as_ref()
+        {
+            return candidates.clone();
+        }
+        let Ok(models) = api_get::<ModelsResponse>("/api/model") else {
+            return Vec::new();
+        };
+        let catalog = build_model_catalog(models.data, None);
+        cache_ranked_candidates(&catalog);
+        catalog.ranked_candidates(None)
+    }
+
+    pub(super) fn generate_cancellable(
+        prompt: &str,
+        model: Option<&Model>,
+        deadline: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<String> {
+        let started = Instant::now();
+        if model.is_none() {
+            let candidates = ranked_candidates();
+            if !candidates.is_empty() {
+                return generate_with_ranked_candidates(
+                    prompt,
+                    &candidates,
+                    started,
+                    deadline,
+                    cancelled,
+                );
+            }
+        }
+        let data = serde_json::to_string(&Request { prompt, model })?;
+        for attempt in 0..2 {
+            let remaining = remaining(started, deadline)?;
+            match post_generation(&data, remaining, cancelled)? {
+                Response::Success { data } => return Ok(data.text),
+                Response::Error { message }
+                    if attempt == 0 && retryable_generation_error(&message) =>
+                {
+                    tracing::warn!(%message, "OpenCode model unavailable during startup; retrying");
+                    wait_for_generation_retry(started, deadline, cancelled)?;
+                }
+                Response::Error { message } => {
+                    return Err(eyre!("OpenCode generation failed: {message}"));
+                }
+            }
+        }
+        unreachable!("generation loop returns on its second attempt")
+    }
+
+    fn generate_with_ranked_candidates(
+        prompt: &str,
+        candidates: &[Model],
+        started: Instant,
+        deadline: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<String> {
+        let mut last_error = None;
+        for (index, candidate) in candidates.iter().enumerate() {
+            let remaining = remaining(started, deadline)?;
+            let data = serde_json::to_string(&Request {
+                prompt,
+                model: Some(candidate),
+            })?;
+            match post_generation(&data, remaining, cancelled)? {
+                Response::Success { data } => return Ok(data.text),
+                Response::Error { message } => {
+                    if index + 1 < candidates.len() {
+                        tracing::warn!(
+                            provider = %candidate.provider,
+                            model = %candidate.id,
+                            %message,
+                            "ranked OpenCode model failed; trying next available candidate"
+                        );
+                    }
+                    last_error = Some(eyre!("OpenCode generation failed: {message}"));
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| eyre!("no OpenCode models available")))
+    }
+
+    fn remaining(started: Instant, deadline: Duration) -> Result<Duration> {
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            Err(eyre!(
+                "opencode2 generation exceeded {} seconds",
+                deadline.as_secs()
+            ))
+        } else {
+            Ok(remaining)
+        }
+    }
+
+    /// Posts to the newest generation route, falling back to the older name
+    /// only when the CLI reports that route missing. One deadline covers both.
+    fn post_generation(data: &str, deadline: Duration, cancelled: &AtomicBool) -> Result<Response> {
+        let started = Instant::now();
+        let mut output = None;
+        for path in GENERATE_ENDPOINTS {
+            let mut command = opencode_command()?;
+            command.args(["post", path, "--data", data]);
+            let attempt = run_command(
+                command,
+                deadline.saturating_sub(started.elapsed()),
+                path,
+                cancelled,
+            )?;
+            let missing = endpoint_is_missing(&attempt);
+            output = Some(attempt);
+            if !missing {
+                break;
+            }
+        }
+        let output = output.expect("at least one generation route");
+        if endpoint_is_missing(&output) {
+            return Err(eyre!("OpenCode does not serve a generation route"));
+        }
+        if !output.status.success() {
+            return Err(eyre!(
+                "opencode2 exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        serde_json::from_slice(&output.stdout)
+            .wrap_err("opencode2 returned an invalid generation response")
+    }
+
+    fn api_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T> {
+        let mut command = opencode_command()?;
+        command.args(["get", path]);
+        let output = run_command(command, CATALOG_DEADLINE, path, &AtomicBool::new(false))?;
+        if !output.status.success() {
+            return Err(eyre!(
+                "OpenCode {path} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .wrap_err_with(|| format!("OpenCode {path} returned invalid JSON"))?;
+        if let Some(message) = value.get("message").and_then(|message| message.as_str())
+            && value.get("_tag").is_some()
+        {
+            return Err(eyre!("OpenCode {path} failed: {message}"));
+        }
+        serde_json::from_value(value)
+            .wrap_err_with(|| format!("OpenCode {path} returned an invalid response"))
+    }
+
+    fn opencode_command() -> Result<Command> {
+        opencode_command_in(&crate::app_paths::opencode_workspace()?)
+    }
+
+    /// An `opencode2 api` command scoped to the HEX OpenCode workspace.
+    fn opencode_command_in(workspace: &Path) -> Result<Command> {
+        std::fs::create_dir_all(workspace).wrap_err_with(|| {
+            format!(
+                "could not create OpenCode workspace {}",
+                workspace.display()
+            )
+        })?;
+        let workspace = workspace.canonicalize().wrap_err_with(|| {
+            format!(
+                "could not resolve OpenCode workspace {}",
+                workspace.display()
+            )
+        })?;
+        let directory = workspace
+            .to_str()
+            .ok_or_else(|| eyre!("OpenCode workspace path is not valid UTF-8"))?;
+        // canonicalize returns a verbatim path; OpenCode wants the drive form.
+        let directory = directory.strip_prefix(r"\\?\").unwrap_or(directory);
+        let mut command = Command::new(super::opencode_executable());
+        command.current_dir(&workspace).args([
+            "api",
+            "--header",
+            &format!("x-opencode-directory:{}", encode_uri_component(directory)),
+        ]);
+        Ok(command)
+    }
+
+    fn run_command(
+        mut command: Command,
+        deadline: Duration,
+        operation: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<CommandOutput> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(eyre!("opencode2 {operation} was cancelled"));
+        }
+        if deadline.is_zero() {
+            return Err(eyre!("opencode2 {operation} deadline expired"));
+        }
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut job = job::Job::kill_on_close();
+        let mut child = command
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    eyre!("opencode2 is not installed")
+                } else {
+                    eyre!("could not start opencode2 for {operation}: {error}")
+                }
+            })?;
+        // Descendants started after this join the job, so killing it reaps
+        // the whole tree and the pipe readers always reach EOF.
+        if job.as_ref().is_some_and(|job| !job.assign(&child)) {
+            job = None;
+        }
+        let stdout = child.stdout.take().expect("opencode2 stdout must be piped");
+        let stderr = child.stderr.take().expect("opencode2 stderr must be piped");
+        let stdout = thread::spawn(move || read_output(stdout));
+        let stderr = thread::spawn(move || read_output(stderr));
+        let started = Instant::now();
+        let outcome = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(error) => break Err(error).wrap_err("could not inspect opencode2"),
+            }
+            if cancelled.load(Ordering::Acquire) {
+                break Err(eyre!("opencode2 {operation} was cancelled"));
+            }
+            if started.elapsed() >= deadline {
+                break Err(eyre!(
+                    "opencode2 {operation} exceeded {} seconds",
+                    deadline.as_secs()
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        terminate(&mut child, job.as_ref(), outcome.is_err());
+        let stdout = stdout.join();
+        let stderr = stderr.join();
+        let status = outcome?;
+        let stdout = stdout.map_err(|_| eyre!("opencode2 stdout reader panicked"))??;
+        let stderr = stderr.map_err(|_| eyre!("opencode2 stderr reader panicked"))??;
+        Ok(CommandOutput {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn terminate(child: &mut Child, job: Option<&job::Job>, aborted: bool) {
+        if let Some(job) = job {
+            job.terminate();
+        }
+        if aborted {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// Spawning only ever runs `.exe` files; npm's extensionless shell shims
+    /// must not count as installed.
+    pub(super) fn is_executable(path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+            && path.is_file()
+    }
+
+    pub(super) fn find_opencode_executable(
+        configured: Option<PathBuf>,
+        path: Option<&OsStr>,
+        _home: Option<&Path>,
+        current_directory: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if let Some(configured) = configured {
+            return Some(absolute_path(configured, current_directory));
+        }
+        OPENCODE_BINARY_NAMES.into_iter().find_map(|name| {
+            // Prefer the real binary npm shims wrap: JSON request bodies
+            // survive .exe argv quoting but are shredded by cmd shims.
+            path.into_iter()
+                .flat_map(std::env::split_paths)
+                .flat_map(|directory| {
+                    [
+                        directory.join(format!(r"node_modules\@opencode-ai\cli\bin\{name}.exe")),
+                        directory.join(format!("{name}.exe")),
+                    ]
+                })
+                .map(|candidate| absolute_path(candidate, current_directory))
+                .find(|candidate| is_executable(candidate))
+        })
+    }
+
+    mod job {
+        use std::os::windows::io::AsRawHandle;
+        use std::process::Child;
+
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject,
+        };
+
+        /// A job that kills its remaining members when the handle closes, so
+        /// even an early return reaps the whole process tree.
+        pub(super) struct Job(HANDLE);
+
+        impl Job {
+            pub(super) fn kill_on_close() -> Option<Self> {
+                unsafe {
+                    let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                    if handle.is_null() {
+                        return None;
+                    }
+                    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                    let set = SetInformationJobObject(
+                        handle,
+                        JobObjectExtendedLimitInformation,
+                        std::ptr::from_ref(&info).cast(),
+                        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    );
+                    if set == 0 {
+                        CloseHandle(handle);
+                        return None;
+                    }
+                    Some(Self(handle))
+                }
+            }
+
+            pub(super) fn assign(&self, child: &Child) -> bool {
+                unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) != 0 }
+            }
+
+            pub(super) fn terminate(&self) {
+                unsafe {
+                    TerminateJobObject(self.0, 1);
+                }
+            }
+        }
+
+        impl Drop for Job {
+            fn drop(&mut self) {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn discovery_root(label: &str) -> PathBuf {
+            std::env::temp_dir().join(format!(
+                "hex-opencode-{label}-{}-{:?}",
+                std::process::id(),
+                thread::current().id()
+            ))
+        }
+
+        fn write_fake_executable(path: &Path) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+
+        #[test]
+        fn opencode_requests_are_scoped_to_the_hex_workspace() {
+            let root = discovery_root("workspace").join("scope %2F café");
+
+            let command = opencode_command_in(&root).unwrap();
+            let workspace = root.canonicalize().unwrap();
+            let directory = workspace.to_str().unwrap();
+            let directory = directory.strip_prefix(r"\\?\").unwrap_or(directory);
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+
+            assert_eq!(command.get_current_dir(), Some(workspace.as_path()));
+            assert_eq!(
+                args,
+                [
+                    "api",
+                    "--header",
+                    &format!("x-opencode-directory:{}", encode_uri_component(directory))
+                ]
+            );
+            std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn opencode2_wins_over_an_opencode_earlier_on_path() {
+            let root = discovery_root("prefer2");
+            let old = root.join(r"first\opencode.exe");
+            let new = root.join(r"second\opencode2.exe");
+            write_fake_executable(&old);
+            write_fake_executable(&new);
+            let path = std::env::join_paths([root.join("first"), root.join("second")]).unwrap();
+
+            let found = find_opencode_executable(None, Some(&path), None, Some(&root));
+
+            assert_eq!(found, Some(new));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn plain_opencode_is_found_when_opencode2_is_absent() {
+            let root = discovery_root("plain");
+            let shim = root.join(r"bin\opencode.exe");
+            let real = root.join(r"bin\node_modules\@opencode-ai\cli\bin\opencode.exe");
+            write_fake_executable(&shim);
+            write_fake_executable(&real);
+            let path = std::env::join_paths([root.join("bin")]).unwrap();
+
+            // The real npm-installed binary beats the shim exe alongside it.
+            let found = find_opencode_executable(None, Some(&path), None, Some(&root));
+            assert_eq!(found, Some(real.clone()));
+
+            std::fs::remove_file(&real).unwrap();
+            let found = find_opencode_executable(None, Some(&path), None, Some(&root));
+            assert_eq!(found, Some(shim));
+
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn cancelled_generation_process_is_killed_promptly() {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 6 127.0.0.1 > NUL"]);
+            let started = Instant::now();
+
+            let error = run_command(
+                command,
+                Duration::from_secs(5),
+                "test generation",
+                &AtomicBool::new(true),
+            )
+            .err()
+            .expect("cancelled command unexpectedly completed");
+
+            assert!(error.to_string().contains("was cancelled"));
+            assert!(started.elapsed() < Duration::from_secs(1));
+        }
+
+        #[test]
+        fn descendant_holding_output_cannot_outlive_the_deadline() {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 6 127.0.0.1"]);
+            let started = Instant::now();
+
+            let _ = run_command(
+                command,
+                Duration::from_millis(500),
+                "test descendant",
+                &AtomicBool::new(false),
+            );
+
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1383,6 +2094,7 @@ mod tests {
             .browser_host("x.com", Profile::new("x", "x prompt"))
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn fake_executable(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "#!/bin/sh\n").unwrap();
@@ -1390,6 +2102,7 @@ mod tests {
     }
 
     /// Reads one authenticated request and returns its headers and body.
+    #[cfg(not(target_os = "windows"))]
     fn receive_request(stream: &mut std::net::TcpStream, start_line: &str) -> (String, Vec<u8>) {
         use std::io::BufRead;
         stream
@@ -1432,6 +2145,7 @@ mod tests {
         (headers, body)
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn standard_install_location_finds_opencode_outside_the_gui_path() {
         let root = std::env::temp_dir().join(format!(
@@ -1459,6 +2173,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn catalog_http_decodes_large_responses_with_private_auth_and_workspace_scope() {
         let root = std::env::temp_dir().join(format!(
@@ -1543,6 +2258,7 @@ mod tests {
         std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn configured_relative_executable_is_resolved_before_the_workspace_changes() {
         let current = Path::new("/tmp/hex-launch");
@@ -1557,6 +2273,7 @@ mod tests {
         assert_eq!(found, Some(current.join("bin/opencode2")));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn official_install_preserves_override_path_and_executable_checks() {
         let root = std::env::temp_dir().join(format!(
@@ -1587,6 +2304,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn version_manager_discovery_is_bounded_to_known_roots() {
         let root = std::env::temp_dir().join(format!(
@@ -1834,7 +2552,7 @@ mod tests {
     fn mode_corrections_run_before_registered_transformations() {
         let profile = Profile::new("Global", "")
             .replacements(ReplacementSet::new(&[
-                crate::app_settings::TextReplacement {
+                crate::text_replacements::TextReplacement {
                     matched_phrase: "open code".into(),
                     output: "OpenCode".into(),
                 },
@@ -1853,6 +2571,7 @@ mod tests {
         assert!(processed.observation.is_none());
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn cancelled_generation_process_is_killed_promptly() {
         let mut command = Command::new("/bin/sleep");
@@ -1875,6 +2594,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn descendant_holding_output_cannot_outlive_the_command() {
         let mut command = Command::new("/bin/sh");
@@ -1921,6 +2641,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn service_discovery_supports_current_and_legacy_endpoints() {
         let root = std::env::temp_dir().join(format!(
@@ -2039,6 +2760,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn service_discovery_fallback_shares_deadline_and_observes_cancellation() {
         let root = std::env::temp_dir().join(format!(
@@ -2079,6 +2801,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn service_discovery_uses_private_active_registration_without_rewriting_config() {
         let root = std::env::temp_dir().join(format!(
@@ -2129,6 +2852,7 @@ mod tests {
     }
 
     /// Answers each expected route in order and returns the request bodies it saw.
+    #[cfg(not(target_os = "windows"))]
     fn generation_server(
         routes: Vec<(&'static str, u16, &'static str)>,
     ) -> (String, thread::JoinHandle<Vec<Vec<u8>>>) {
@@ -2153,6 +2877,7 @@ mod tests {
         (endpoint, server)
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn generation_pipes_credentials_and_large_json_without_argv_exposure() {
         let (endpoint, server) = generation_server(vec![(
@@ -2193,6 +2918,7 @@ mod tests {
         assert_eq!(server.join().unwrap(), [data.as_bytes()]);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn generation_falls_back_to_the_legacy_route_only_when_the_new_one_is_missing() {
         let success = r#"{"data":{"text":"fixture result"}}"#;
@@ -2245,6 +2971,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn http_status_is_split_from_the_body() {
         let response = split_http_status(b"{\"data\":1}\n200".to_vec()).unwrap();
@@ -2257,6 +2984,7 @@ mod tests {
         assert!(split_http_status(b"no status".to_vec()).is_none());
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn generation_refuses_non_loopback_or_ambiguous_endpoints() {
         for endpoint in [
@@ -2301,6 +3029,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn generation_http_wait_observes_cancellation_and_deadline() {
         for cancel in [false, true] {
@@ -2343,6 +3072,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn blocked_request_pipe_does_not_outlive_the_deadline() {
         let mut command = Command::new("/bin/sleep");
@@ -2446,6 +3176,7 @@ mod tests {
         assert_eq!(catalog3.default_variant.as_deref(), Some("none"));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn ranked_generation_walks_candidates_until_one_succeeds() {
         let candidates = vec![

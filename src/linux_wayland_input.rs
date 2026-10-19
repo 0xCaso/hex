@@ -171,6 +171,8 @@ struct HotkeyState {
     trigger: KeyCode,
     required: [bool; 4],
     double_tap: bool,
+    /// Every press acts as the second tap of a double-tap: releasing locks.
+    toggle: bool,
     capture: Capture,
     last_release: Option<Instant>,
     modifiers: WaylandModifierState,
@@ -214,6 +216,7 @@ impl HotkeyState {
                 binding.super_key,
             ],
             double_tap,
+            toggle: false,
             capture: Capture::Idle,
             last_release: None,
             modifiers,
@@ -274,10 +277,11 @@ impl HotkeyState {
                 Some(HotkeyEvent::Finish)
             }
             Capture::Idle => {
-                let second_tap = self.last_release.take().is_some_and(|released| {
-                    now.checked_duration_since(released)
-                        .is_some_and(|gap| gap < DOUBLE_TAP_WINDOW)
-                });
+                let second_tap = self.toggle
+                    || self.last_release.take().is_some_and(|released| {
+                        now.checked_duration_since(released)
+                            .is_some_and(|gap| gap < DOUBLE_TAP_WINDOW)
+                    });
                 self.capture = Capture::Held { second_tap };
                 Some(HotkeyEvent::Start)
             }
@@ -537,10 +541,12 @@ pub(crate) fn run(
     ready: SyncSender<Result<()>>,
     binding: LinuxHotkey,
     double_tap_enabled: bool,
+    toggle: bool,
     started: Arc<AtomicBool>,
     modifiers: WaylandModifierState,
 ) -> Result<()> {
     let mut state = HotkeyState::with_modifiers(&binding, double_tap_enabled, modifiers)?;
+    state.toggle = toggle;
     let (mut keyboards, initial) = Keyboards::open(&stop)?;
     for input in initial {
         state.update(input, Instant::now());
@@ -787,6 +793,26 @@ mod tests {
         test.key(KeyCode::KEY_ESC, 0);
         test.tap();
         assert_eq!(test.events, [Cancel, Start, Finish]);
+    }
+
+    #[test]
+    fn toggle_mode_starts_on_a_tap_and_finishes_on_the_next() {
+        for double_tap in [false, true] {
+            let mut test = Test::new(double_tap);
+            test.state.toggle = true;
+            test.tap();
+            assert_eq!(test.events, [Start]);
+            assert!(test.state.capture == Capture::Locked);
+            test.now += Duration::from_secs(5);
+            test.tap();
+            assert_eq!(test.events, [Start, Finish]);
+            // A quick third tap starts a fresh capture rather than locking a double tap.
+            test.now += Duration::from_millis(20);
+            test.tap();
+            assert_eq!(test.events, [Start, Finish, Start]);
+            test.key(KeyCode::KEY_ESC, 1);
+            assert_eq!(test.events, [Start, Finish, Start, Cancel]);
+        }
     }
 
     #[test]

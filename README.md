@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://downloads.hex.kitlangton.dev/releases/HEX-latest-arm64.dmg"><strong>Download for macOS</strong></a>
   · <a href="https://hex.kitlangton.dev/">Website</a>
+  · <a href="docs/windows.md">Windows beta</a>
   · <a href="docs/linux.md">Linux beta</a>
   · <a href="sdk/typescript/README.md">TypeScript SDK</a>
   · <a href="CONTRIBUTING.md">Contributing</a>
@@ -29,8 +30,9 @@ pastes the result into the app you are using.
   them. Both start off; provider-backed rewriting is separate from local speech
   recognition.
 
-The macOS app is available now. The [Linux beta](#linux-beta) has a smaller feature
-set and requires a source build or Nix. See [Privacy and local data](#privacy-and-local-data)
+The macOS app is available now. The [Windows beta](#windows-beta) covers x64 and
+ARM64 PCs, and the [Linux beta](#linux-beta) has a smaller feature set and requires
+a source build or Nix. See [Privacy and local data](#privacy-and-local-data)
 for what stays on your device and what optional features send to a provider.
 
 ## Install HEX
@@ -190,7 +192,18 @@ redact any attachments; do not upload private dictation, recordings, or full log
 Diagnostics are stored at:
 
 - macOS: `~/Library/Application Support/voice-control/logs/`
+- Windows: `%APPDATA%\voice-control\logs\`
 - Linux: `~/.local/share/voice-control/logs/`, or under `XDG_DATA_HOME`
+
+## Windows Beta
+
+The Windows beta runs on Windows 10 and 11, x64 and ARM64. It covers hotkey
+dictation (Hold or Toggle, `Ctrl+Space` by default), Modes, Voice Action,
+History, a tray icon, and signed self-updates. On x64 with a Vulkan graphics
+driver, Parakeet Unified English streams while you speak, so text arrives within
+about 100 ms of release even after minutes of talking; ARM64 transcribes on the
+CPU. Voice commands, meetings, and the local transcription API are not included.
+See the [Windows guide](docs/windows.md) to install or build from source.
 
 ## Linux Beta
 

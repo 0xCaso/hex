@@ -2,7 +2,13 @@ use std::sync::OnceLock;
 
 use regex::{Regex, RegexBuilder};
 
-use crate::app_settings::TextReplacement;
+/// One configured phrase and the text that replaces it.
+#[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(default)]
+pub struct TextReplacement {
+    pub matched_phrase: String,
+    pub output: String,
+}
 
 #[derive(Clone)]
 struct CompiledRule {

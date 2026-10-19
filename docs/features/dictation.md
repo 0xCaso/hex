@@ -51,6 +51,31 @@ Checks in [suppression.rs](../../src/suppression.rs):
 `callback_press_reaches_intentional_hold_on_the_audio_clock`.
 These cover constructed callback/reducer timing, not physical event delivery.
 
+### Shortcut Mode
+
+```ts
+Settings > Shortcut mode = Hold (default)            // dictate.shortcut-mode
+  -> Hold and lock behave as described above
+Settings > Shortcut mode = Toggle
+  Press -> Start (pre-roll as usual) -> Release keeps recording
+  -> Fresh shortcut press -> Finish (with the release tail)
+  -> Escape -> Cancel
+  // Double-tap to lock and Double-tap only are hidden and ignored
+  // Shortcut chords during the first 300 ms still discard
+```
+
+Toggle reuses the lock state on every platform: each press behaves as the
+second tap of a double-tap. Persisted as `shortcut_mode` (`hold`/`toggle`) in
+each platform's settings; files without it load as Hold. Checks:
+`toggle_mode_starts_on_a_press_and_finishes_on_the_next` and
+`toggle_mode_escape_cancels_a_locked_capture` in
+[suppression.rs](../../src/suppression.rs) (macOS reducer), the same names in
+[windows_input.rs](../../src/windows_input.rs), and
+`toggle_mode_starts_on_a_tap_and_finishes_on_the_next` in
+[linux_wayland_input.rs](../../src/linux_wayland_input.rs). The X11 path has no
+reducer test. Only the Windows build was compiled and tested locally
+(2026-10-19); macOS and Linux rely on CI. No physical keyboard check yet.
+
 The short-tap threshold belongs to ordinary hold activation. Voice-delimited
 and explicit programmatic capture have different intentional-start rules.
 
@@ -142,6 +167,49 @@ drive the owner with a fake stream: `release_waits_for_its_tail_and_keeps_no_lat
 on the tail, so the stop tone, HUD Transcribing, and submission follow the release
 by up to 200 ms (300 ms on a stalled stream); their order is unchanged.
 
+### Streaming Finish
+
+```ts
+Windows, model advertises streaming, GPU device       // dictate.streaming
+  Load -> Probe a one-second silent stream (also prewarms the stream graph)
+       ├── Succeeds -> Stream captures
+       └── Fails, CPU device, or HEX_STREAMING=0 -> Whole-clip path only
+  Capture passes the hold threshold (Toggle: on press)
+    -> Open one live stream; feed the 16 kHz backlog, then every 160 ms
+       // same audio as the final clip, pre-roll included; never blocks capture
+  Release -> Collect the 200 ms tail -> Finish with the complete clip
+    -> Feed any unfed remainder -> Finalize -> Final text
+       ├── Stream failed, produced no text, or was fed > 250 ms past the clip
+       │   -> Transcribe the whole clip offline (source=fallback)
+       └── No final text within 1.5 s -> Abort the stream -> Whole clip
+  Short tap, Escape, chord discard, microphone failure -> Drop the stream
+  Nothing is shown or pasted until the final text exists
+```
+
+Source: [transcription_engine.rs](../../src/transcription_engine.rs) (one thread
+owns the model; streams, finishes, and offline runs share its FIFO because a live
+stream holds the model's compute lease), `probe_stream` and `with_stream` in
+[local_transcriber.rs](../../src/local_transcriber.rs), `with_stream` in
+[gguf_session.rs](../../src/gguf_session.rs), and `recorded_from` in
+[dictation.rs](../../src/dictation.rs). Parakeet buffers with its largest
+context menu (Unified English: 5.6 s left, 1.04 s chunk, 1.04 s right), its most
+accurate and least compute-intensive setting; `HEX_STREAM_CHUNK_MS` overrides
+the chunk for benchmarks. Each dictation logs `source=stream|offline|fallback`
+and `finish_ms`. Checks: `recorded_audio_is_a_prefix_of_the_finished_clip`
+(16, 44.1, and 48 kHz) and `source_labels_distinguish_fallbacks`. The hidden
+`model stream-bench <wav> [--speed N]` command replays a WAV in real time and
+compares both paths.
+
+**Observed October 19, 2026, RTX 5070 Ti, Vulkan, Unified English Q8, Windows
+TTS clips replayed at 4× (131 s also at 1×):** release-to-text 55/55/93 ms
+(10/27/131 s) streaming versus 82/185/873 ms whole-clip; GPU busy 3.1–3.6% of
+the dictation; process peak working set 214 MB and about 3% of one core during
+a real-time 131 s stream. Against the script, both paths transcribed the 10 s
+and 27 s clips perfectly; on 131 s the stream added one homophone error ("cache"
+→ "cash") to formatting differences both paths share. Smaller chunks (560 or
+160 ms) added more errors and up to 20% GPU without a faster release. Not
+measured: macOS (not wired), physical microphone corpora, or noisy rooms.
+
 ### Optional Voice Controls
 
 Optional spoken entry requires Commands enabled, its model ready, and recognition
@@ -163,7 +231,7 @@ Chunking bounds inference, not capture duration. No silence is removed.
 The shared `max_audio_chunk_samples` policy in
 [transcription_models.rs](../../src/transcription_models.rs) is used by
 [parakeet.rs](../../src/parakeet.rs) and
-[linux_transcriber.rs](../../src/linux_transcriber.rs). Cohere's pinned backend
+[local_transcriber.rs](../../src/local_transcriber.rs). Cohere's pinned backend
 reports a 400-second encoder capacity, while its reference processor uses a
 35-second transcription window. Treating the encoder capacity as a useful
 inference window caused [#73](https://github.com/anomalyco/hex/issues/73)'s lost

@@ -11,11 +11,13 @@ use crate::transcription_models::{
     download_with_progress, model_path, validate,
 };
 
-pub struct LinuxTranscriber {
+pub struct LocalTranscriber {
     session: OfflineGgufSession,
     options: RunOptions,
     device_label: String,
     max_audio_samples: Option<usize>,
+    #[cfg(target_os = "windows")]
+    stream: Option<transcribe_cpp::StreamOptions>,
 }
 
 pub fn default_model() -> &'static ModelDefinition {
@@ -23,7 +25,11 @@ pub fn default_model() -> &'static ModelDefinition {
 }
 
 pub fn install_default(canceled: &AtomicBool) -> Result<()> {
-    let model = default_model();
+    install(&TranscriptionSelection::default(), canceled)
+}
+
+pub fn install(selection: &TranscriptionSelection, canceled: &AtomicBool) -> Result<()> {
+    let model = validate(selection)?;
     let downloaded = AtomicU64::new(0);
     println!("Installing {} ({})...", model.name, model.size_label());
     let path = download_with_progress(model, canceled, &downloaded)?;
@@ -60,6 +66,18 @@ pub fn devices() -> Result<Vec<String>> {
 }
 
 pub fn transcribe_wav(path: &Path) -> Result<String> {
+    transcribe_wav_with_selection(path, &TranscriptionSelection::default())
+}
+
+pub fn transcribe_wav_with_selection(
+    path: &Path,
+    selection: &TranscriptionSelection,
+) -> Result<String> {
+    let samples = read_wav_for_parakeet(path)?;
+    LocalTranscriber::load(selection)?.transcribe(&samples)
+}
+
+pub fn read_wav_for_parakeet(path: &Path) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path)
         .wrap_err_with(|| format!("could not open {}", path.display()))?;
     let spec = reader.spec();
@@ -83,10 +101,10 @@ pub fn transcribe_wav(path: &Path) -> Result<String> {
         .collect::<Vec<_>>();
     let mut samples = crate::dictation::resample_for_parakeet(&mono, spec.sample_rate);
     crate::dictation::pad_for_parakeet(&mut samples);
-    LinuxTranscriber::load_default()?.transcribe(&samples)
+    Ok(samples)
 }
 
-impl LinuxTranscriber {
+impl LocalTranscriber {
     pub fn load_default() -> Result<Self> {
         Self::load(&TranscriptionSelection::default())
     }
@@ -123,12 +141,22 @@ impl LinuxTranscriber {
             selection,
             capabilities.supports_language_detect,
         )?;
+        // Recognition hints softly prime Whisper's decoder as its initial
+        // prompt; validate() already rejects hints on unsupported models.
+        let recognition_hints = selection.recognition_hints.trim();
+        let family =
+            (definition.supports_recognition_hints && !recognition_hints.is_empty()).then(|| {
+                transcribe_cpp::RunExtension::Whisper(transcribe_cpp::WhisperRunOptions {
+                    initial_prompt: Some(recognition_hints.to_string()),
+                    ..Default::default()
+                })
+            });
         let device_label = format!("{} ({})", device.description, device.kind);
         tracing::info!(
             backend = device.kind,
             device = device.description,
             variant,
-            "loaded Linux transcription model"
+            "loaded local transcription model"
         );
         let session = OfflineGgufSession::new(model)?;
         let mut transcriber = Self {
@@ -140,6 +168,7 @@ impl LinuxTranscriber {
                     TimestampKind::Segment
                 },
                 language,
+                family,
                 ..Default::default()
             },
             device_label,
@@ -147,14 +176,95 @@ impl LinuxTranscriber {
                 &architecture,
                 capabilities.max_audio_ms,
             ),
+            #[cfg(target_os = "windows")]
+            stream: None,
         };
         let started = Instant::now();
         transcriber.transcribe(&vec![0.0; 24_000])?;
         tracing::info!(
             prewarm_ms = started.elapsed().as_millis(),
-            "prewarmed Linux transcription model"
+            "prewarmed local transcription model"
         );
+        #[cfg(target_os = "windows")]
+        if capabilities.supports_streaming {
+            transcriber.stream = transcriber.probe_stream(&architecture);
+        }
         Ok(transcriber)
+    }
+
+    /// Streams only on a GPU: a CPU stream re-encodes each overlapping window
+    /// and would cost several times the offline compute. The probe also
+    /// prewarms the stream graph. Without an extension Parakeet buffers with
+    /// its largest left, chunk, and right context (Unified English: 5.6 s,
+    /// 1.04 s, 1.04 s), its most accurate and least compute-intensive setting.
+    /// `HEX_STREAMING=0` keeps the model offline; `HEX_STREAM_CHUNK_MS`
+    /// overrides the chunk and right context for benchmarks.
+    #[cfg(target_os = "windows")]
+    fn probe_stream(&mut self, architecture: &str) -> Option<transcribe_cpp::StreamOptions> {
+        use transcribe_cpp::DeviceType;
+        if std::env::var("HEX_STREAMING").is_ok_and(|value| value == "0") {
+            return None;
+        }
+        match self.session.device_type() {
+            Ok(DeviceType::Gpu | DeviceType::Igpu) => {}
+            _ => return None,
+        }
+        let chunk_ms = std::env::var("HEX_STREAM_CHUNK_MS")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok());
+        let options = transcribe_cpp::StreamOptions {
+            family: (architecture == "parakeet" && chunk_ms.is_some()).then_some(
+                transcribe_cpp::StreamExtension::ParakeetBuffered(
+                    transcribe_cpp::ParakeetBufferedStreamOptions {
+                        left_ms: None,
+                        chunk_ms,
+                        right_ms: chunk_ms,
+                    },
+                ),
+            ),
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let probe = self.with_stream(&options, &transcribe_cpp::CancelToken::new(), |stream| {
+            stream.feed(&vec![0.0; 16_000])?;
+            stream.finalize().map(|_| ())
+        });
+        match probe {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    chunk_ms,
+                    prewarm_ms = started.elapsed().as_millis(),
+                    "streaming transcription is available"
+                );
+                Some(options)
+            }
+            Ok(Err(error)) | Err(error) => {
+                tracing::warn!(%error, "model advertises streaming but could not stream");
+                None
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn stream_options(&self) -> Option<&transcribe_cpp::StreamOptions> {
+        self.stream.as_ref()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn with_stream<R>(
+        &mut self,
+        stream_options: &transcribe_cpp::StreamOptions,
+        cancel: &transcribe_cpp::CancelToken,
+        drive: impl FnOnce(&mut transcribe_cpp::Stream<'_>) -> R,
+    ) -> transcribe_cpp::Result<R> {
+        // Decode exactly as offline; a run-slot family extension (Whisper's
+        // prompt) does not apply to a stream.
+        let options = RunOptions {
+            family: None,
+            ..self.options.clone()
+        };
+        self.session
+            .with_stream(&options, stream_options, cancel, drive)
     }
 
     pub fn device_label(&self) -> &str {

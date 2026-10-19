@@ -1,0 +1,101 @@
+name: Check Windows
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: check-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  x64:
+    name: x64 (Vulkan)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # Portable CPU kernels: without this, ggml tunes to the runner's CPU.
+      TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+      - name: Install SPIRV-Headers for the Vulkan backend
+        shell: pwsh
+        run: |
+          vcpkg install spirv-headers:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install spirv-headers failed" }
+          $prefix = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -replace '\\','/'
+          $combined = if ($env:CMAKE_PREFIX_PATH) { "$prefix;$env:CMAKE_PREFIX_PATH" } else { $prefix }
+          Add-Content $env:GITHUB_ENV "CMAKE_PREFIX_PATH=$combined"
+      - name: Locate the GPUI shader compiler
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $fxc) { throw "fxc.exe was not found in the Windows SDK" }
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+      - run: cargo build --locked --release
+      - name: Check the executable needs no Visual C++ Redistributable
+        shell: pwsh
+        run: |
+          $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          $imports = & $dumpbin.FullName /dependents target\release\voice-control.exe
+          $redist = $imports | Select-String -Pattern 'VCRUNTIME|MSVCP|vcomp'
+          if ($redist) { throw "hex.exe imports Visual C++ runtime DLLs: $redist" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hex-windows-x86_64
+          path: target/release/voice-control.exe
+
+  arm64:
+    name: ARM64 (CPU)
+    runs-on: windows-11-arm
+    timeout-minutes: 90
+    env:
+      # ggml's ARM CPU backend refuses MSVC, so the native core builds with
+      # clang-cl through Ninja (the cmake crate takes the compiler from CC/CXX).
+      # clang-cl's /openmp needs an LLVM OpenMP runtime, and ggml's own
+      # threadpool is correct under LLVM codegen, so OpenMP stays off.
+      CC: clang-cl
+      CXX: clang-cl
+      CMAKE_C_COMPILER: clang-cl
+      CMAKE_CXX_COMPILER: clang-cl
+      CMAKE_C_COMPILER_TARGET: aarch64-pc-windows-msvc
+      CMAKE_CXX_COMPILER_TARGET: aarch64-pc-windows-msvc
+      CMAKE_GENERATOR: Ninja
+      CL: /EHsc
+      TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Locate the GPUI shader compiler
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $fxc) { throw "fxc.exe was not found in the Windows SDK" }
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - run: cargo test --release
+      - run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hex-windows-aarch64
+          path: target/release/voice-control.exe

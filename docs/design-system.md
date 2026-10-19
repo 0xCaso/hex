@@ -145,7 +145,7 @@ CONTROL_HEIGHT_SMALL 24      // small buttons, keycaps
 TAG_HEIGHT 18 · MENU_ITEM_HEIGHT 28 · NAV_ITEM_HEIGHT 32
 MENU_WIDTH 180 · MENU_OFFSET 4  // menu width; gap below its trigger
 PANEL_HEADER_HEIGHT 38 · SETTINGS_ROW_MIN_HEIGHT 56 · PANE_HEADER_HEIGHT 70
-SIDEBAR_WIDTH 220 · PANE_CONTENT_WIDTH 940
+SIDEBAR_WIDTH 220 · PANE_CONTENT_WIDTH 940 · SLIDER_TRACK_HEIGHT 4 · SLIDER_KNOB_SIZE 14
 PANE_LIST_WIDTH 320 · PANE_LIST_WIDTH_COMPACT 220 (Modes)
 DISCLOSURE_WIDTH 220 · SEARCH_FIELD_WIDTH 220 · MODE_FIELD_WIDTH 300
 ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
@@ -180,6 +180,7 @@ ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
 | Overflow of less common actions | `icon_button(ButtonKind::Secondary, Icon::Ellipsis)` opening a `dropdown_menu()` |
 | On/off | `toggle(position)`; never repeat "On"/"Off" beside it |
 | A few exclusive choices | `segmented_control` + `segmented_item`, or the sliding variants |
+| A continuous value (Windows volume, HUD Lab) | `slider_track(fraction)` inside a caller-owned hit area |
 | Status (never clickable) | `tag(Tone::{Neutral, Accent, Success, Danger}, label)` |
 | Live / recorded state | `status_dot(colour)` |
 | Shortcut | `hotkey_keycaps` |
@@ -226,7 +227,8 @@ Meeting capsules are pill-shaped. They use the shared buttons with
   `NavigationIcon` for the sidebar.
 - On macOS these are line-weight SF Symbols (no `.fill` variants) at medium
   weight, monochrome. On Linux they fall back to Heroicons (navigation) and
-  matching glyphs (inline).
+  matching glyphs (inline). Windows uses the Heroicons for navigation and the
+  matching Segoe Fluent Icons glyphs inline.
 - Colour icons with a text token: tertiary at rest, primary when selected or
   hovered.
 - A web page or other item without an app icon shows `Icon::Globe` inside the

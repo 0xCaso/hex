@@ -3,7 +3,7 @@
 ## Purpose
 
 Build HEX as a local, observable macOS voice appliance with explicit Linux
-X11 and wlroots-compatible Wayland beta contracts. Keep the engine native Rust
+X11, wlroots-compatible Wayland, and Windows (x64 and ARM64) beta contracts. Keep the engine native Rust
 and keep consequential behavior explicit. Protected commands and typed captures
 remain compiled Rust; ordinary literal commands live in the explicit TypeScript user config. User-facing
 runtime settings persist in Application Support.
@@ -58,22 +58,30 @@ substitute for source inspection or a second roadmap.
   disposable bounded command audio projection.
 - `recording_environment`: serialized RAII ownership of idle-sleep prevention,
   output muting, and supported media-player pause/resume behavior.
-- `dictation_processor`: context-selected corrections and deadline-bounded
-  OpenCode rewrite profiles with corrected-transcript fallback. The macOS app
-  discovers the `opencode2` beta executable, links missing installs to
-  `https://v2.opencode.ai/`, and uses
-  `opencode2 api get` to discover or start its managed service. Generation uses
-  CLI-managed discovery with the matching owner-only service registration and
-  authenticated loopback HTTP through the system curl; request bodies and
-  credentials use stdin, never argv or new temporary files.
+- `dictation_processor`: the one OpenCode client and ordered processing policy
+  for macOS and Windows: context-selected corrections, deadline-bounded
+  OpenCode rewrite profiles with corrected-transcript fallback, the ranked
+  model catalog, Voice Action generation, and the transformation stage. Both
+  apps discover the `opencode2` beta executable and link missing installs to
+  `https://v2.opencode.ai/`. On macOS, `opencode2 api get` discovers or starts
+  the managed service, and generation uses the matching owner-only service
+  registration and authenticated loopback HTTP through the system curl; request
+  bodies and credentials use stdin, never argv or new temporary files. Windows
+  sends the same requests through the `opencode2 api` CLI inside a job object.
 - `parakeet`: the strict-Metal `transcribe.cpp` adapter plus bounded inference,
   processing, ordered output, paste, last-result, and meeting-delta workers.
 - `apple_speech`: the Swift `SpeechAnalyzer` bridge with per-locale support
   checks, asset reservation, and batch transcription.
 - `transcription`: runtime selection and transactional warm-model activation.
 - `gguf_session`: the `transcribe.cpp` session owner shared by `parakeet` and
-  `linux_transcriber`; it recreates the native session around each run so
-  inference scratch stays bounded.
+  `local_transcriber`; it recreates the native session around each run (and
+  each live stream) so inference scratch stays bounded.
+- `local_transcriber`: the Linux and Windows GGUF loader, prewarm, whole-clip
+  transcription, and (Windows) the stream probe and stream entry point.
+- `transcription_engine`: the Windows thread that owns the loaded model and runs
+  every inference in order: live streams fed during capture, their finish, and
+  whole-clip runs. Callers get a `LiveStream` to feed and a `PendingTranscript`
+  whose wait enforces the stream deadline and falls back to the whole clip.
 - `transcription_preparation`: application-owned model preparation shared by
   Settings and the menu bar, with one worker, latest-choice pending admission,
   cancellation fences, and an installed-only path that never downloads a model.
@@ -97,17 +105,22 @@ substitute for source inspection or a second roadmap.
   authoritative microphone timeline.
 - `command_grammar`: typed command patterns, captures, overlap detection, and
   command catalog metadata.
-- `commands`: pure contextual resolution plus bounded asynchronous macOS action
-  execution.
+- `keys`: the platform-neutral key and modifier vocabulary of command actions.
+- `commands`: pure contextual resolution plus bounded asynchronous action
+  execution (`open` and CoreGraphics keystrokes on macOS; shell-opened URLs,
+  paths, and applications on Windows).
 - `personal_commands`: the Bun-hosted `@hex/commands` TypeScript workspace:
-  managed SDK provisioning, the watch-reloaded user command and transformation
-  host, bounded invocation dispatch, and status snapshots.
+  managed SDK provisioning (built `dist` on macOS, the embedded TypeScript
+  `src` on Windows), the watch-reloaded user command and transformation host,
+  bounded invocation dispatch, and status snapshots. macOS and Windows share
+  it; Windows hosts transformations only.
 - `text_replacements`: phrase-boundary-aware compilation of configured text
   replacements applied longest-match-first to transcripts.
 - `config`: compiled commands, preferred input devices, and dictation profiles.
-- `context`: native foreground application and window context capture plus
-  browser context. Browser host is the domain concept; Brave AppleScript is only
-  the first adapter.
+- `context`: the foreground context snapshot and selectors shared by commands
+  and modes, plus native macOS capture. Browser host is the domain concept;
+  Brave AppleScript is the first macOS adapter and `windows_context` reads any
+  browser through UI Automation.
 - `application_catalog`: cached installed-application discovery with normalized
   bundle identity and rendered icons for the UI.
 - `app_settings`: persisted settings and live runtime projection for commands,
@@ -120,8 +133,8 @@ substitute for source inspection or a second roadmap.
   installation, the release startup gate, and opt-in command-model setup.
 - `sparkle`: packaged-app-only Sparkle lifecycle and manual update checks.
 - `linux`, `linux_app`, `linux_dictation`, `linux_input`, `linux_paste`,
-  `linux_settings`, `linux_transcriber`: the Linux beta CLI, GPUI shell,
-  hotkey capture-transcribe-paste loop, persisted settings, and `transcribe.cpp`.
+  `linux_settings`: the Linux beta CLI, GPUI shell, hotkey
+  capture-transcribe-paste loop, and persisted settings.
 - `linux_session`: display-backend selection matching GPUI's nonempty
   `WAYLAND_DISPLAY` rule, independent of persisted preferences.
 - `linux_wayland_input`: read-only evdev input, explicit physical key mappings,
@@ -131,8 +144,30 @@ substitute for source inspection or a second roadmap.
 - `linux_desktop`: the service-owned GTK thread for the focus-free, click-through
   Wayland recording/processing HUD. Settings never owns its lifecycle; Linux has
   no tray icon.
-- `linux_updater`: signed direct-install updates, bounded downloads, atomic
-  version activation, and restart handoff for user-local Linux installs.
+- `self_update`: the signed-feed core the Linux and Windows updaters share:
+  ed25519 feed verification, per-target manifest validation, bounded HTTPS
+  downloads, and size and checksum verification.
+- `linux_updater`: signed direct-install updates, atomic version activation,
+  and restart handoff for user-local Linux installs.
+- `windows`, `windows_app`, `windows_dictation`, `windows_input`,
+  `windows_paste`, `windows_settings`, `windows_indicator`, `windows_updater`,
+  `windows_context`, `windows_audio_control`, `windows_login_item`: the
+  Windows beta CLI, GPUI shell and tray, WASAPI dictation loop, low-level
+  keyboard hook, clipboard paste, settings, HUD, signed self-update, UI
+  Automation context, audio ducking, and login item. Windows uses the shared
+  `design_tokens`, `desktop_ui`, `text_input`, `desktop_activity`,
+  `dictation_processor`, `personal_commands`, and `commands` modules.
+- `windows_ui`: Windows window chrome on the shared design system: the split
+  caption row (brand over the full-height sidebar, window buttons over the
+  content), Segoe Fluent Icons glyphs, anchored dropdowns, and window, tray,
+  and HUD-popup integration.
+- `windows_desktop_host`: the Windows Settings window's snapshot-and-action
+  contract and its pane capabilities.
+- `desktop_shell`, `desktop_i18n`, and the `desktop_*` panes (Activity,
+  History, HUD Lab, mode list/basics/processing/transformations, replacement
+  editor, model catalog, onboarding, Voice Action): the Windows panes from the
+  `windows-shell` port, built from `desktop_ui` components. Converge them with
+  the macOS panes under the shared-desktop-UI plan rather than adding a copy.
 - `history`: the owner-only bounded retained-dictation store: retention
   windows with hard entry and byte caps, atomic crash-safe persistence, and
   search. Text and bounded metadata only, never audio.
@@ -269,6 +304,17 @@ CoreAudio formats, AppleScript details, or event serialization.
   its backlog is bounded by duration, and pressure invalidates the generation,
   discards stale audio and updates, and resets Moonshine without touching the
   active recording.
+- The dictation shortcut has a persisted `shortcut_mode`: `hold` (default)
+  or `toggle`. Toggle reuses the lock state on every platform: each press acts
+  as the second tap of a double-tap, so release locks and the next shortcut
+  press finishes. Only Escape cancels, and a modifier pressed alone never ends a
+  key-chord capture. Double-tap settings apply to Hold only.
+- Windows streaming is speculative in the same way as incremental
+  transcription: the stream receives exactly the capture's 16 kHz audio, the
+  finish always carries the complete clip, and a failed, empty, overfed, or
+  late stream falls back to the whole clip. Nothing pastes before the final
+  text. One engine thread runs every inference because a live stream holds the
+  model's compute lease. Streams run only on GPU devices.
 - Incremental transcription is speculative: pieces cut at pauses are handed to
   the inference worker without blocking capture, at most one at a time, and never
   paste. The final job joins piece transcripts with the tail only when every kept
@@ -614,6 +660,16 @@ Linux host. Inject the Ed25519 private PEM as `HEX_LINUX_SIGNING_KEY`, run
 `scripts/release-linux.sh publish`. The script refuses a key that does not match
 the public key compiled into HEX, refuses a non-monotonic stable release, and
 publishes the signed feed last.
+
+Windows releases use the same key, bucket, and `downloads.hex.kitlangton.dev`
+origin. From Git Bash, run `scripts/release-windows.sh prepare` and `publish`
+once per architecture with `HEX_WINDOWS_ARCH=x86_64` (the default; Vulkan SDK
+required) and `HEX_WINDOWS_ARCH=aarch64` (clang-cl and Ninja; best on an ARM64
+host). Each architecture has its own feed: `windows-update.json` for x64 and
+`windows-aarch64-update.json` for ARM64. The script builds with
+`-DGGML_NATIVE=OFF` so the CPU kernels stay portable, and the static runtime in
+`.cargo/config.toml` keeps the Visual C++ Redistributable unnecessary.
+`check-windows.yml` asserts the x64 executable imports no Visual C++ runtime.
 
 Use `termctrl` to verify TUI changes at both wide and narrow dimensions. The
 dashboard keys are `1` for commands, `2` for the activity log, `3` for meetings,

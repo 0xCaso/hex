@@ -654,6 +654,8 @@ pub struct DictationHotkey {
     pressed_keys: HashSet<u16>,
     double_tap_enabled: bool,
     double_tap_only: bool,
+    /// Press to start, press again to finish: releasing locks the capture.
+    toggle: bool,
     binding: RuntimeHotkey,
     paste_actions_enabled: bool,
     ignore_before: Option<CaptureInstant>,
@@ -700,6 +702,7 @@ impl DictationHotkey {
             pressed_keys: HashSet::new(),
             double_tap_enabled,
             double_tap_only: false,
+            toggle: false,
             binding,
             paste_actions_enabled: true,
             ignore_before: None,
@@ -738,6 +741,11 @@ impl DictationHotkey {
         if !self.double_tap_only && self.state.is_pending_gesture() {
             self.state = State::IDLE;
         }
+    }
+
+    /// Takes effect from the next press; an active capture keeps its gesture.
+    pub fn set_toggle(&mut self, enabled: bool) {
+        self.toggle = enabled;
     }
 
     pub fn set_binding(&mut self, binding: RuntimeHotkey) {
@@ -972,7 +980,7 @@ impl DictationHotkey {
         });
 
         match self.state {
-            State::Idle { .. } if self.double_tap_only && trigger_pressed => {
+            State::Idle { .. } if self.double_tap_only && !self.toggle && trigger_pressed => {
                 self.state = State::FirstTapPressed;
                 None
             }
@@ -1032,6 +1040,10 @@ impl DictationHotkey {
                     previous_release,
                 };
                 Some(HotkeyAction::Start)
+            }
+            State::Recording { .. } if trigger_released && self.toggle => {
+                self.state = State::Locked;
+                None
             }
             State::Recording {
                 previous_release: Some(released),
@@ -2371,6 +2383,80 @@ mod tests {
             hotkey.process(event(true), now + Duration::from_secs(1)),
             Some(HotkeyAction::Finish)
         );
+    }
+
+    #[test]
+    fn toggle_mode_starts_on_a_press_and_finishes_on_the_next() {
+        let command = COMMAND_KEY_MASK | crate::app_settings::RIGHT_COMMAND_MASK;
+        let key_chord = RuntimeHotkey {
+            modifiers: crate::app_settings::HotkeyModifiers {
+                command: Some(crate::app_settings::ModifierSide::Right),
+                ..Default::default()
+            },
+            key_code: Some(49),
+        };
+        for (binding, flags, double_tap_only) in [
+            (option_binding(), OPTION_KEY_MASK, false),
+            (function_binding(), FUNCTION_KEY_MASK, false),
+            (key_chord, command, false),
+            (key_chord, command, true),
+        ] {
+            let now = capture_time();
+            let mut hotkey = DictationHotkey::with_binding(false, now, true, binding);
+            hotkey.set_double_tap_only(double_tap_only);
+            hotkey.set_toggle(true);
+            let event = |down: bool| {
+                binding
+                    .key_code
+                    .map_or(InputEvent::Flags(if down { flags } else { 0 }), |code| {
+                        InputEvent::Key { code, down, flags }
+                    })
+            };
+
+            assert_eq!(hotkey.process(event(true), now), Some(HotkeyAction::Start));
+            // Releasing keeps recording, however short the press was.
+            assert_eq!(
+                hotkey.process(event(false), now + Duration::from_millis(80)),
+                None
+            );
+            assert!(hotkey.is_recording());
+            assert_eq!(
+                hotkey.process(event(true), now + Duration::from_secs(3)),
+                Some(HotkeyAction::Finish)
+            );
+            assert_eq!(
+                hotkey.process(event(false), now + Duration::from_millis(3_080)),
+                None
+            );
+            assert!(!hotkey.is_recording());
+        }
+    }
+
+    #[test]
+    fn toggle_mode_escape_cancels_a_locked_capture() {
+        let now = capture_time();
+        let binding = shift_space_binding();
+        let mut hotkey = DictationHotkey::with_binding(false, now, true, binding);
+        hotkey.set_toggle(true);
+        let event = shift_space_event;
+
+        assert_eq!(hotkey.process(event(true), now), Some(HotkeyAction::Start));
+        assert_eq!(
+            hotkey.process(event(false), now + Duration::from_millis(60)),
+            None
+        );
+        assert_eq!(
+            hotkey.process(
+                InputEvent::Key {
+                    code: ESCAPE_KEY_CODE,
+                    down: true,
+                    flags: 0,
+                },
+                now + Duration::from_secs(1)
+            ),
+            Some(HotkeyAction::Cancel)
+        );
+        assert!(!hotkey.is_recording());
     }
 
     #[test]

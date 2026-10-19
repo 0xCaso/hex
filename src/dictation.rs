@@ -333,6 +333,17 @@ fn uppercase_initial(text: &str) -> String {
     output
 }
 
+/// How the dictation shortcut controls a capture.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutMode {
+    /// Hold the shortcut while speaking; release to finish.
+    #[default]
+    Hold,
+    /// Press once to start and again to finish. Escape still cancels.
+    Toggle,
+}
+
 pub struct DictationClip {
     samples: Vec<f32>,
     /// Ascending 16 kHz offsets of pieces handed to the transcription worker
@@ -898,6 +909,19 @@ impl DictationCapture {
         self.recording = None;
     }
 
+    /// 16 kHz audio recorded so far, from `start` in final-clip coordinates.
+    /// The resampler's tail is only flushed by finishing, so the clip may end
+    /// slightly later than what this has returned.
+    #[cfg(any(test, target_os = "windows"))]
+    pub fn recorded_from(&self, start: usize) -> &[f32] {
+        let Some(recording) = &self.recording else {
+            return &[];
+        };
+        let delay = recording.resampler.as_ref().map_or(0, Fft::output_delay);
+        let available = &recording.samples[delay.min(recording.samples.len())..];
+        &available[start.min(available.len())..]
+    }
+
     /// Cuts the current capture into pieces at pauses once it is intentional.
     pub fn segment_capture(&mut self, capture_generation: u64) {
         if let Some(recording) = &mut self.recording {
@@ -991,6 +1015,32 @@ mod tests {
                     .all(|(left, right)| (left - right).abs() < 1e-5),
                 "rate {rate}"
             );
+        }
+    }
+
+    #[test]
+    fn recorded_audio_is_a_prefix_of_the_finished_clip() {
+        for rate in [16_000, 44_100, 48_000] {
+            let mut capture = DictationCapture::new(rate);
+            let origin = CaptureInstant::from_nanos(1_000_000_000);
+            capture.start(origin);
+            let source: Vec<f32> = (0..rate as usize * 2)
+                .map(|index| (index as f32 * 0.021).sin() * 0.3)
+                .collect();
+            let mut streamed = Vec::new();
+            for (index, block) in source.chunks(480).enumerate() {
+                let through = origin + crate::audio::duration_for_frames((index + 1) * 480, rate);
+                capture.ingest(block, through);
+                let fresh = capture.recorded_from(streamed.len()).to_vec();
+                streamed.extend(fresh);
+            }
+            let Finish::Transcribe(clip) = capture.finish(origin + Duration::from_secs(5)) else {
+                panic!("a two-second hold transcribes");
+            };
+            let clip = clip.into_transcription_samples();
+            assert!(streamed.len() <= clip.len(), "rate {rate}");
+            assert!(clip.len() - streamed.len() < 1_024, "rate {rate}");
+            assert_eq!(&clip[..streamed.len()], &streamed[..], "rate {rate}");
         }
     }
 

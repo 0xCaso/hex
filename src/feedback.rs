@@ -29,7 +29,7 @@ static LOADER_STARTED: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static VOLUME: AtomicU32 = AtomicU32::new(0.5_f32.to_bits());
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
 }
@@ -185,9 +185,17 @@ pub fn preload() -> Result<()> {
                 #[cfg(target_os = "macos")]
                 Tone::Wake | Tone::Sleep | Tone::Error => continue,
             };
+            let opening = Instant::now();
+            let cold = output.sink.is_none();
             if let Err(error) = output.open_for_tone(Instant::now(), open) {
                 tracing::warn!(%error, "recording audio output unavailable; retrying");
             }
+            tracing::debug!(
+                ?tone,
+                cold,
+                open_ms = opening.elapsed().as_millis(),
+                "playing feedback tone"
+            );
             // Opening may have been slow; recheck the latest preference before
             // retaining the output or playing the queued sound.
             if !sounds_enabled() {
@@ -272,6 +280,39 @@ mod tests {
     impl<S> FeedbackOutput<S> {
         fn is_open(&self) -> bool {
             self.sink.is_some()
+        }
+    }
+
+    fn leading_silence_ms(bytes: &'static [u8]) -> u128 {
+        let sound = decode(bytes).unwrap();
+        let channels = usize::from(sound.channels().get());
+        let rate = sound.sample_rate().get() as usize;
+        let samples = sound.collect::<Vec<f32>>();
+        let first = samples
+            .iter()
+            .position(|sample| sample.abs() > 0.01)
+            .unwrap_or(samples.len());
+        (first / channels * 1_000 / rate) as u128
+    }
+
+    #[test]
+    fn feedback_tones_sound_immediately() {
+        for (name, bytes) in [
+            (
+                "start",
+                include_bytes!("../resources/audio/startRecording.mp3").as_slice(),
+            ),
+            (
+                "stop",
+                include_bytes!("../resources/audio/stopRecording.mp3").as_slice(),
+            ),
+        ] {
+            let silence = leading_silence_ms(bytes);
+            eprintln!("{name} tone leading silence: {silence} ms");
+            assert!(
+                silence < 40,
+                "{name} tone starts after {silence} ms of silence"
+            );
         }
     }
 

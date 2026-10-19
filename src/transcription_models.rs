@@ -682,7 +682,7 @@ fn remove_installed_at(path: &Path) -> Result<()> {
             }
         }
     }
-    File::open(directory)?.sync_all()?;
+    sync_directory(directory)?;
     Ok(())
 }
 
@@ -873,9 +873,9 @@ fn verify_and_promote_partial(
 ) -> Result<()> {
     ModelPreparationStage::Verifying.store(stage);
     verify_file_with_cancel(partial, model, canceled)?;
-    File::open(partial)?.sync_all()?;
+    sync_file(partial)?;
     fs::rename(partial, destination)?;
-    File::open(directory)?.sync_all()?;
+    sync_directory(directory)?;
     write_verification_receipt(destination, model)?;
     if let Some(bytes) = model.download_bytes() {
         downloaded_bytes.store(bytes, Ordering::Relaxed);
@@ -885,6 +885,76 @@ fn verify_and_promote_partial(
 
 fn verification_receipt_path(model_path: &Path) -> PathBuf {
     model_path.with_extension("gguf.verified.json")
+}
+
+/// Every model offered on desktop platforms.
+#[cfg(target_os = "windows")]
+pub fn available_models() -> Vec<&'static ModelDefinition> {
+    MODELS.iter().filter(|model| model.available()).collect()
+}
+
+/// The language a newly chosen model dictates in: the current preference
+/// when supported, otherwise automatic detection, otherwise the model's
+/// first supported language.
+#[cfg(target_os = "windows")]
+pub fn language_for_model(model: TranscriptionModelId, preferred: &str) -> Option<String> {
+    let definition = definition(model);
+    if definition.supports_language(preferred) {
+        return Some(preferred.to_string());
+    }
+    if definition.supports_language(AUTO_LANGUAGE) {
+        return Some(AUTO_LANGUAGE.to_string());
+    }
+    LANGUAGES
+        .iter()
+        .find(|(code, _)| definition.supports_language(code))
+        .map(|(code, _)| (*code).to_string())
+}
+
+/// The best starting selection for a dictation language: its first
+/// recommended runtime model. Unknown languages fall back to English.
+#[cfg(target_os = "windows")]
+pub fn recommended_selection(language: &str) -> TranscriptionSelection {
+    let language = LANGUAGES
+        .iter()
+        .find(|(code, _)| *code == language)
+        .map_or("en", |(code, _)| *code);
+    let choices = choices_for_runtime(language);
+    let model = choices
+        .iter()
+        .find(|choice| choice.recommendation == Recommendation::Recommended)
+        .or_else(|| choices.first())
+        .map_or(TranscriptionModelId::ParakeetUnifiedEnglish, |choice| {
+            choice.model.id
+        });
+    TranscriptionSelection {
+        model,
+        language: language.into(),
+        recognition_hints: String::new(),
+    }
+}
+
+/// Removes a downloaded model and its verification receipt. A model still
+/// held open by the runtime surfaces the sharing violation as the error.
+#[cfg(target_os = "windows")]
+pub fn uninstall(model: &ModelDefinition) -> Result<()> {
+    let path = model_path(model)?;
+    let _ = fs::remove_file(verification_receipt_path(&path));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).wrap_err_with(|| format!("could not remove {} from disk", model.name))
+        }
+    }
+}
+
+/// Replaces `destination` with `source`. On Windows `fs::rename` already
+/// uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`.
+#[cfg(target_os = "windows")]
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination)?;
+    Ok(())
 }
 
 pub(crate) fn modified_ns(metadata: &fs::Metadata) -> Option<u64> {
@@ -900,15 +970,30 @@ pub(crate) fn modified_ns(metadata: &fs::Metadata) -> Option<u64> {
 
 /// Publish `value` as JSON at `path` so a crash leaves either the previous
 /// file or the complete new one, never a partial write.
+/// Flushes a file's data to disk. Windows only flushes through a writable handle.
+fn sync_file(path: &Path) -> std::io::Result<()> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()
+}
+
+/// Persists a rename or removal in `directory`. Windows cannot open a
+/// directory as a file, and NTFS journals the entry change itself.
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    File::open(directory)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = directory;
+    Ok(())
+}
+
 pub(crate) fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| color_eyre::eyre::eyre!("{} has no parent", path.display()))?;
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, serde_json::to_vec(value)?)?;
-    File::open(&temporary)?.sync_all()?;
+    sync_file(&temporary)?;
     fs::rename(temporary, path)?;
-    File::open(parent)?.sync_all()?;
+    sync_directory(parent)?;
     Ok(())
 }
 
@@ -917,7 +1002,8 @@ pub(crate) fn write_json_atomically(path: &Path, value: &impl Serialize) -> Resu
 pub(crate) fn sha256_hex(path: &Path, canceled: Option<&AtomicBool>) -> Result<String> {
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Heap-allocated: a 1 MB array overflows Windows' 1 MB main-thread stack.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         if let Some(canceled) = canceled {
             check_canceled(canceled)?;
@@ -1240,6 +1326,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows uses uninstall; download locks are mandatory there"
+    )]
     fn removing_a_model_deletes_its_artifacts_unless_a_download_is_active() {
         let directory = std::env::temp_dir().join(format!(
             "hex-remove-model-{}-{}",

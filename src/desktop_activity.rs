@@ -21,11 +21,11 @@ impl DesktopActivity {
 
     pub(crate) fn state_label(&self) -> Option<&'static str> {
         self.state.map(|state| match state {
-            VoiceState::Listening => "Listening",
+            VoiceState::Listening => "Enabled",
             VoiceState::Sleeping => "Sleeping",
-            VoiceState::Dictating => "Dictating",
+            VoiceState::Dictating => "Recording",
             VoiceState::Transcribing => "Transcribing",
-            VoiceState::Stopping => "Stopping",
+            VoiceState::Stopping => "Disabling…",
         })
     }
 
