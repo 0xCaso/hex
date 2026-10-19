@@ -137,6 +137,14 @@ fn prepare_gguf_samples(samples: &mut Vec<f32>, model: Option<TranscriptionModel
 }
 
 impl WarmTranscriber {
+    /// A warm transcriber already serving `model`, for opt-in harnesses.
+    #[cfg(test)]
+    pub(crate) fn serving(model: Transcriber) -> Self {
+        Self {
+            active: Some(model),
+        }
+    }
+
     pub fn load() -> Result<Self> {
         Ok(Self {
             active: Some(Transcriber::load()?),

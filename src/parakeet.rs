@@ -1714,6 +1714,126 @@ mod tests {
         }
     }
 
+    /// Replays recordings into the production engine as capture would (160 ms
+    /// blocks, the last 200 ms held back as the release tail) and compares
+    /// the stream's release latency and text with whole-clip transcription.
+    #[test]
+    #[ignore = "requires HEX_STREAM_MODEL (Unified English GGUF) and HEX_STREAM_WAVS (comma-separated)"]
+    fn metal_stream_tracks_offline_transcription() {
+        use crate::transcription::{Transcriber, WarmTranscriber};
+        use crate::transcription_engine::{Offline, Source, TranscriptionEngine};
+
+        let selection = TranscriptionSelection::default();
+        let mut model = Parakeet::load_from(
+            &PathBuf::from(std::env::var("HEX_STREAM_MODEL").unwrap()),
+            false,
+            Some(&selection),
+        )
+        .unwrap();
+        model.stream = model
+            .session
+            .probe_stream(&model.stream_run_options(), "parakeet");
+        assert!(model.stream.is_some(), "Metal must stream");
+        let engine = TranscriptionEngine::start(WarmTranscriber::serving(Transcriber::Gguf(
+            Box::new(model),
+        )))
+        .unwrap();
+        let speed = std::env::var("HEX_STREAM_SPEED")
+            .ok()
+            .and_then(|speed| speed.parse::<f64>().ok())
+            .unwrap_or(4.0);
+        let offline = || -> Offline {
+            let selection = selection.clone();
+            Box::new(move |model, samples| {
+                model
+                    .activate(&selection)
+                    .and_then(|model| model.transcribe(samples))
+                    .map_err(|error| error.to_string())
+            })
+        };
+        let words = |text: &str| {
+            text.split_whitespace()
+                .map(|word| {
+                    word.chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .flat_map(char::to_lowercase)
+                        .collect::<String>()
+                })
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>()
+        };
+        for path in std::env::var("HEX_STREAM_WAVS").unwrap().split(',') {
+            let mut reader = WavReader::open(path).unwrap();
+            let rate = reader.spec().sample_rate;
+            let channels = usize::from(reader.spec().channels);
+            let raw = match reader.spec().sample_format {
+                hound::SampleFormat::Float => reader
+                    .samples::<f32>()
+                    .map(Result::unwrap)
+                    .collect::<Vec<_>>(),
+                hound::SampleFormat::Int => reader
+                    .samples::<i16>()
+                    .map(|sample| f32::from(sample.unwrap()) / 32_768.0)
+                    .collect(),
+            };
+            let mono = raw
+                .chunks(channels)
+                .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+                .collect::<Vec<_>>();
+            let samples = resample_for_parakeet(&mono, rate);
+            // A warm app has already run inputs of this size.
+            let run = |samples: Vec<f32>| {
+                engine
+                    .finish_with(None, samples, offline())
+                    .unwrap()
+                    .wait()
+                    .unwrap()
+            };
+            run(samples.clone());
+            let whole = run(samples.clone());
+
+            let mut stream = engine.begin().expect("the model streams");
+            let held = samples.len().saturating_sub(3_200);
+            let feeding = Instant::now();
+            for (index, block) in samples[..held].chunks(2_560).enumerate() {
+                let due = std::time::Duration::from_secs_f64(index as f64 * 0.16 / speed);
+                thread::sleep(due.saturating_sub(feeding.elapsed()));
+                stream.feed(block);
+            }
+            thread::sleep(std::time::Duration::from_secs_f64(0.2 / speed));
+            let streamed = engine
+                .finish_with(Some(stream), samples.clone(), offline())
+                .unwrap()
+                .wait()
+                .unwrap();
+
+            let (reference, hypothesis) = (words(&whole.text), words(&streamed.text));
+            let mut previous = (0..=hypothesis.len()).collect::<Vec<_>>();
+            for (row, expected) in reference.iter().enumerate() {
+                let mut current = vec![row + 1; hypothesis.len() + 1];
+                for (column, actual) in hypothesis.iter().enumerate() {
+                    current[column + 1] = (previous[column + 1] + 1)
+                        .min(current[column] + 1)
+                        .min(previous[column] + usize::from(expected != actual));
+                }
+                previous = current;
+            }
+            let differences = previous[hypothesis.len()];
+            println!(
+                "{path}: audio_ms={} offline_ms={} release_ms={} ({}) word_differences={differences}/{}",
+                samples.len() / 16,
+                whole.finish_ms,
+                streamed.finish_ms,
+                streamed.source.label(),
+                reference.len()
+            );
+            println!("  offline {}", whole.text);
+            println!("  stream  {}", streamed.text);
+            assert_eq!(streamed.source, Source::Stream);
+            assert!(differences * 20 <= reference.len().max(20));
+        }
+    }
+
     #[test]
     fn repeated_cancellation_walks_back_through_pending_jobs() {
         let jobs = [0, 1, 2]
