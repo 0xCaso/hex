@@ -8,9 +8,10 @@ inference; `vulkan-icd-loader` alone is not a driver. Install a driver for your 
 or a software Vulkan driver. See the Wayland requirements below before enabling
 native input.
 
-The beta does not support voice commands, application or browser context, or
-meetings. This is not universal Wayland support: GNOME and KDE are not covered
-by the current clipboard, virtual-keyboard, and overlay protocol contract.
+Linux opens the same window as macOS and Windows: Settings, Modes, Voice Action,
+and History. Voice commands, website mode rules, and meetings are macOS-only.
+This is not universal Wayland support: GNOME and KDE are not covered by the
+current clipboard, virtual-keyboard, and overlay protocol contract.
 
 For Nix/NixOS, use the [Nix guide](nix.md). Nix owns updates to that installation;
 HEX's signed updater owns only the direct-install layout below.
@@ -18,9 +19,16 @@ HEX's signed updater owns only the direct-install layout below.
 ## Background Service And Settings
 
 The dictation runtime is a **per-user systemd service**, `hex.service`, not a
-system-wide/root daemon. It owns the microphone, hotkeys, model workers, sounds,
-paste, and settings. Settings is a separate client: closing it does not stop
-dictation or model preparation. There is no Linux tray icon.
+system-wide/root daemon. It owns the microphone, hotkeys, model downloads and
+workers, sounds, paste, and History recording. Settings is a separate client:
+it saves `settings.json` and asks the service to reload it, asks the service to
+record shortcuts and prepare models, and reads History from the same file.
+Closing Settings stops neither dictation nor a model download. There is no
+Linux tray icon.
+
+Settings live in `settings.json` in HEX's data directory, the same file macOS
+and Windows use. On first launch, an existing `linux-settings.json` is
+migrated once and kept as `linux-settings.json.migrated`.
 
 ```sh
 hex start                       # start the service and listen; no window
@@ -121,9 +129,27 @@ binary instead.
 
 Hold **Alt-Space**, speak, then release. Double-tap the shortcut to keep
 recording, press the same chord again to finish, or press Escape to cancel the
-active recording. Settings shows listener state, Start/Stop, and operational
-errors. Changing the shortcut, double-tap, or terminal-paste setting temporarily
-stops listening and restores the previous running state after the edit.
+active recording. **Double-tap only** waits for two complete taps before
+recording, and **Toggle** mode starts and stops with single presses.
+**Ctrl-Alt-V** pastes the last dictation again. Settings shows listener state,
+Start/Stop, and operational errors. Changing a shortcut or a setting the
+listener reads at start temporarily stops listening and restores the previous
+running state after the edit.
+
+Modes apply corrections, OpenCode rewriting, and transformations per
+application. On X11, HEX reads the frontmost application from the active
+window's process name (`code`, `firefox`); the application picker lists
+`.desktop` entries with their icons. Wayland doesn't report the focused window,
+so the Global mode applies there. Completed dictations are kept in History.
+
+Voice Action, once enabled, records an instruction while you hold
+**Ctrl-Alt-I**, pairs it with the primary selection (the text you selected), asks
+OpenCode, and pastes the reply.
+
+**Microphone mode** can release the microphone between dictations; it then opens
+on the shortcut press without pre-roll. **While dictating** can mute the default
+output through `wpctl` (PipeWire) or `pactl` (PulseAudio), or pause playing
+MPRIS media players over D-Bus; HEX restores only what it changed.
 Cancelling shortcut capture preserves the old binding unless the new binding
 has already been saved; listening resumes only if it was previously running.
 
@@ -146,10 +172,11 @@ the listener and preview the start sound unless set to Off. `hex dictate` uses
 the same saved volume. Playback uses the default audio output through a bounded
 background worker; unavailable audio output does not prevent dictation.
 
-Closing Settings leaves the service running on both X11 and Wayland. On Wayland,
-the service-owned recording/processing pill uses layer-shell without taking
-focus or intercepting clicks, even with Settings closed. X11 still has no HUD;
-recording sounds and `hex status` remain available.
+Closing Settings leaves the service running on both X11 and Wayland. The
+service-owned recording/processing pill never takes focus or intercepts clicks,
+even with Settings closed: a layer-shell surface on Wayland, an override-redirect
+popup on X11. **Recording indicator** places it at the top or bottom of the
+screen, or turns it off.
 
 Insertion uses the clipboard and **Ctrl-V** for new installations. Enable
 **Terminal paste shortcut** in Settings for targets that require **Ctrl-Shift-V**.

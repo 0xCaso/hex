@@ -55,7 +55,7 @@ mkdir -m 700 "$HOME" "$XDG_RUNTIME_DIR" "$HEX_APPLICATION_SUPPORT_DIR"
 mkdir "$HEX_APPLICATION_SUPPORT_DIR/models"
 # This GTK target uses Ctrl-V. Omitting the preference from an existing settings
 # file deliberately selects the legacy terminal Ctrl-Shift-V behavior.
-printf '{"sound_effect_volume":0,"paste_with_shift":false}\n' > "$HEX_APPLICATION_SUPPORT_DIR/linux-settings.json"
+printf '{"sound_effects":false,"paste_with_shift":false,"migrations":["streaming-english-model"]}\n' > "$HEX_APPLICATION_SUPPORT_DIR/settings.json"
 ln -s "$model" "$HEX_APPLICATION_SUPPORT_DIR/models/$(basename "$model")"
 printf 'pcm.!default { type pulse server "%s" }\n' "$PULSE_SERVER" > "$HOME/.asoundrc"
 pulseaudio -n --daemonize=no --use-pid-file=no --exit-idle-time=-1 \

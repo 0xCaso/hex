@@ -30,8 +30,8 @@ override shipped behavior.
 
 - [`plans/swift-app-handoff.md`](plans/swift-app-handoff.md): a manual download
   handoff from Swift, without data import or automatic replacement.
-- [`plans/shared-desktop-ui.md`](plans/shared-desktop-ui.md): converge the macOS
-  and Linux GPUI applications on one capability-driven product shell.
+- [`plans/shared-desktop-ui.md`](plans/shared-desktop-ui.md): implemented; how
+  macOS, Windows, and Linux share one window and one settings file.
 - [`plans/typescript-sdk.md`](plans/typescript-sdk.md): published SDK status,
   remaining signed-helper packaging, and first-consumer validation.
 - [`plans/linux.md`](plans/linux.md): Linux X11/Wayland validation and later capability
