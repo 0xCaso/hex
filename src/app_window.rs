@@ -9,7 +9,7 @@ use gpui::{
     KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     PathPromptOptions, Pixels, Point, Render, SharedString, Subscription, Timer, TitlebarOptions,
     Window, WindowBounds, WindowHandle, WindowOptions, actions, deferred, div, img, prelude::*, px,
-    rgb, rgba, size,
+    rgb, size,
 };
 
 use crate::app_settings::{
@@ -71,6 +71,8 @@ const HOTKEY_SIDE_SELECTOR_WIDTH: f32 =
     HOTKEY_SIDE_WIDTHS[0] + HOTKEY_SIDE_WIDTHS[1] + HOTKEY_SIDE_WIDTHS[2] + 6.0;
 const OPENCODE_INSTALL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// The setup screen flips each row as macOS grants it.
+const TOUR_PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_millis(400);
 const MAX_OPENCODE_ERROR_BYTES: usize = 4 * 1024;
 const ACTIVITY_LIMIT: usize = 100;
 const OPENCODE_BETA_DOCS_URL: &str = "https://v2.opencode.ai/";
@@ -82,6 +84,7 @@ const OPENCODE_BETA_DOCS_URL: &str = "https://v2.opencode.ai/";
 #[cfg_attr(target_os = "windows", path = "app_window/windows.rs")]
 #[cfg_attr(target_os = "linux", path = "app_window/linux.rs")]
 mod platform;
+mod tour;
 
 #[cfg(not(target_os = "macos"))]
 pub use platform::open;
@@ -122,6 +125,9 @@ struct Capabilities {
     software_updates: bool,
     /// Paste with Ctrl-Shift-V for terminals.
     terminal_paste: bool,
+    /// The window sees dictation events, so onboarding can end with a
+    /// practice dictation into its own field.
+    practice_dictation: bool,
 }
 
 /// The microphone menu is deferred above the settings panel and occludes
@@ -239,12 +245,122 @@ pub enum PreviewModelState {
     Error,
 }
 
+/// A deterministic onboarding state for previews and screenshots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum OnboardingPreview {
+    Welcome,
+    HowItWorks,
+    Setup,
+    SetupProgress,
+    SetupReady,
+    TryIt,
+    TryItListening,
+    TryItShort,
+    TryItSilent,
+    TryItLanded,
+    TryItReopen,
+    Done,
+}
+
+impl OnboardingPreview {
+    fn status(self) -> SetupStatus {
+        let ready = SetupStatus {
+            microphone: PermissionState::Ready,
+            input_monitoring: PermissionState::Ready,
+            accessibility: PermissionState::Ready,
+            transcription_model: true,
+        };
+        match self {
+            Self::Welcome | Self::HowItWorks | Self::Setup => SetupStatus {
+                microphone: PermissionState::NeedsRequest,
+                input_monitoring: PermissionState::NeedsSettings,
+                accessibility: PermissionState::NeedsSettings,
+                transcription_model: false,
+            },
+            Self::SetupProgress => SetupStatus {
+                accessibility: PermissionState::NeedsSettings,
+                transcription_model: false,
+                ..ready
+            },
+            _ => ready,
+        }
+    }
+
+    fn flow(self, permissions: bool, practice: bool) -> crate::onboarding::Flow {
+        use crate::onboarding::{Flow, Input, ModelProgress, Observation, SetupItem, Step};
+        let fresh = Self::Setup.status();
+        let start = match self {
+            Self::Welcome => Step::Welcome,
+            Self::HowItWorks => Step::HowItWorks,
+            _ => Step::Setup,
+        };
+        let initial = if self == Self::SetupProgress {
+            self.status()
+        } else {
+            fresh
+        };
+        // Later steps walk through setup, as a first run does, so the page
+        // dots match what a person sees.
+        let mut flow = Flow::new(start, initial, permissions, practice);
+        let status = self.status();
+        if self == Self::SetupProgress {
+            flow.on(Input::Grant(SetupItem::Accessibility));
+            flow.on(Input::Status(
+                status,
+                ModelProgress {
+                    downloading: Some(0.42),
+                    ..ModelProgress::default()
+                },
+            ));
+        } else if start == Step::Setup && self != Self::Setup {
+            flow.on(Input::Status(
+                status,
+                ModelProgress {
+                    installed: true,
+                    ..ModelProgress::default()
+                },
+            ));
+            if self != Self::SetupReady {
+                flow.on(Input::Continue);
+            }
+            if self == Self::Done {
+                flow.on(Input::Skip);
+            }
+        }
+        let observations: &[Observation] = match self {
+            Self::TryItListening => &[Observation::Started],
+            Self::TryItShort => &[Observation::Started, Observation::Discarded],
+            Self::TryItSilent => &[
+                Observation::Started,
+                Observation::Transcribing,
+                Observation::Discarded,
+            ],
+            Self::TryItLanded => &[
+                Observation::Started,
+                Observation::Transcribing,
+                Observation::Pasted,
+            ],
+            _ => &[],
+        };
+        for observation in observations {
+            flow.on(Input::Dictation(*observation));
+        }
+        if self == Self::TryItReopen {
+            flow.on(Input::ListenerFailed {
+                relaunch_allowed: false,
+            });
+        }
+        flow
+    }
+}
+
 #[derive(Clone)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct AppWindowPreview {
     pub pane: DeveloperPane,
     pub transcription_picker: Option<(String, PreviewModelState)>,
-    pub onboarding: bool,
+    pub onboarding: Option<OnboardingPreview>,
     pub confirm_model_deletion: bool,
     pub collapse_mode_processing: bool,
     pub open_transformation_picker: bool,
@@ -780,7 +896,15 @@ pub struct AppWindow {
     activity: DesktopActivity,
     platform: platform::Platform,
     setup_status: SetupStatus,
+    /// The first-run tour is showing.
     setup_visible: bool,
+    tour: crate::onboarding::Flow,
+    tour_forward: bool,
+    tour_relaunch_failed: bool,
+    tour_quit_requested: bool,
+    practice_input: Entity<TextInput>,
+    practice_since: Option<u64>,
+    practice_seen: usize,
     onboarding_completed: bool,
     permission_refresh_at: Instant,
     settings: AppSettings,
@@ -871,10 +995,18 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |window, cx| {
+            let mut interval = Duration::from_millis(500);
             loop {
-                Timer::after(Duration::from_millis(500)).await;
+                Timer::after(interval).await;
                 if window
                     .update(cx, |window, cx| {
+                        // The tour reacts to grants and practice dictations
+                        // as they happen.
+                        interval = if window.setup_visible && !window.preview {
+                            Duration::from_millis(100)
+                        } else {
+                            Duration::from_millis(500)
+                        };
                         let model_catalog_changed = window.poll_model_catalog();
                         window.retry_model_catalog();
                         let application_catalog_changed = window.poll_application_catalog();
@@ -885,7 +1017,13 @@ impl AppWindow {
                         let personal_workspace_changed = window.poll_personal_workspace();
                         let history_changed = window.poll_history(cx);
                         let platform_changed = window.poll_platform(cx);
-                        if model_catalog_changed
+                        let tour_changed = window.poll_tour();
+                        if window.tour_quit_requested {
+                            cx.quit();
+                            return;
+                        }
+                        if tour_changed
+                            || model_catalog_changed
                             || application_catalog_changed
                             || transcription_changed
                             || setup_changed
@@ -1073,13 +1211,9 @@ impl AppWindow {
                 .then(|| preview_choices(language)[0].model.id)
         });
         let selected_model = validate(&settings.transcription).ok();
-        let setup_status = if preview.as_ref().is_some_and(|preview| preview.onboarding) {
-            SetupStatus {
-                microphone: PermissionState::NeedsRequest,
-                input_monitoring: PermissionState::NeedsRequest,
-                accessibility: PermissionState::NeedsRequest,
-                transcription_model: false,
-            }
+        let onboarding_preview = preview.as_ref().and_then(|preview| preview.onboarding);
+        let setup_status = if let Some(onboarding) = onboarding_preview {
+            onboarding.status()
         } else if preview
             .as_ref()
             .is_some_and(|preview| preview.permissions_missing)
@@ -1108,8 +1242,33 @@ impl AppWindow {
             ))
         };
         let onboarding_completed = preview_mode || crate::onboarding::completion_recorded();
-        let setup_visible = preview.as_ref().is_some_and(|preview| preview.onboarding)
+        let resume = (!preview_mode)
+            .then(crate::onboarding::take_resume)
+            .flatten();
+        let setup_visible = onboarding_preview.is_some()
+            || resume.is_some()
             || !onboarding_completed && !setup_status.ready();
+        let practice = platform::CAPABILITIES.practice_dictation;
+        let tour = match onboarding_preview {
+            Some(onboarding) => onboarding.flow(platform::CAPABILITIES.permissions, practice),
+            None => crate::onboarding::Flow::new(
+                resume.unwrap_or(crate::onboarding::Step::Welcome),
+                setup_status,
+                platform::CAPABILITIES.permissions,
+                practice,
+            ),
+        };
+        let practice_input = cx.new(|cx| {
+            TextInput::multiline(
+                cx,
+                tr("Your words will appear here"),
+                if onboarding_preview == Some(OnboardingPreview::TryItLanded) {
+                    tr("Hex turns what I say into text, right where I'm typing.")
+                } else {
+                    ""
+                },
+            )
+        });
         let microphone_devices = if preview_mode {
             vec!["Built-in Microphone".into()]
         } else {
@@ -1148,6 +1307,13 @@ impl AppWindow {
             platform,
             setup_status,
             setup_visible,
+            tour,
+            tour_forward: true,
+            tour_relaunch_failed: false,
+            tour_quit_requested: false,
+            practice_input,
+            practice_since: None,
+            practice_seen: 0,
             onboarding_completed,
             permission_refresh_at: Instant::now() + PERMISSION_REFRESH_INTERVAL,
             microphone_devices,
@@ -1525,7 +1691,12 @@ impl AppWindow {
         {
             return false;
         }
-        self.permission_refresh_at = Instant::now() + PERMISSION_REFRESH_INTERVAL;
+        self.permission_refresh_at = Instant::now()
+            + if self.setup_visible {
+                TOUR_PERMISSION_REFRESH_INTERVAL
+            } else {
+                PERMISSION_REFRESH_INTERVAL
+            };
         let mut changed = false;
         let transcription_model = validate(&self.settings.transcription).is_ok_and(|model| {
             crate::transcription_models::is_installed(model, &self.settings.transcription.language)
@@ -1543,10 +1714,6 @@ impl AppWindow {
                 self.onboarding_completed = true;
             }
             self.platform_setup_ready();
-            if self.setup_visible {
-                self.setup_visible = false;
-                changed = true;
-            }
         }
         self.platform_poll_setup() || changed
     }
@@ -3581,124 +3748,6 @@ impl AppWindow {
             }
         }
         cx.notify();
-    }
-
-    fn render_setup(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let status = self.setup_status;
-        let permission_items = self.platform_setup_permissions(cx);
-        let permission_count = permission_items.len();
-        let permission_rows = permission_items
-            .into_iter()
-            .enumerate()
-            .map(|(index, (title, description, control))| {
-                settings_row(title, description, control)
-                    .when(index + 1 == permission_count, |row| row.border_b_0())
-            })
-            .collect::<Vec<_>>();
-        let models_ready = status.transcription_model;
-        let model_notice =
-            dictation_model_notice(status, self.transcription_status.model.is_some());
-        let models = if models_ready {
-            tag(Tone::Success, tr("Ready")).into_any_element()
-        } else {
-            button(ButtonKind::Primary, tr("Choose model"))
-                .id("setup-models")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.transcription_picker_language =
-                        Some(this.settings.transcription.language.clone());
-                    this.clear_transcription_error();
-                    cx.notify();
-                }))
-                .into_any_element()
-        };
-
-        div()
-            .id("setup-backdrop")
-            .occlude()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(SCRIM))
-            .child(
-                div()
-                    .id("setup")
-                    .w(px(640.0))
-                    .p_6()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .rounded(RADIUS_MODAL)
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .bg(rgb(CANVAS))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_headline().child(tr("Set up Hex")))
-                            .child(
-                                div()
-                                    .text_footnote()
-                                    .text_color(rgb(TEXT_TERTIARY))
-                                    .child(if platform::CAPABILITIES.permissions {
-                                        tr("Grant permissions and choose a local model to start dictating.")
-                                    } else {
-                                        tr("Choose a local model to start dictating.")
-                                    }),
-                            ),
-                    )
-                    .when(!permission_rows.is_empty(), |setup| {
-                        setup.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(section_label(tr("Permissions needed")).px_4())
-                                .child(panel().children(permission_rows)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(section_label(tr("Local models")).px_4())
-                            .child(
-                                panel().child(
-                                    settings_row(
-                                        if let Some((title, _)) = model_notice {
-                                            title
-                                        } else {
-                                            tr("Local dictation model")
-                                        },
-                                        if let Some((_, description)) = model_notice {
-                                            description
-                                        } else if platform::CAPABILITIES.permissions {
-                                            tr("The selected model transcribes speech entirely on this Mac.")
-                                        } else {
-                                            tr("The selected model transcribes speech entirely on this computer.")
-                                        },
-                                        models,
-                                    )
-                                    .border_b_0(),
-                                ),
-                            ),
-                    )
-                    .when(crate::DEVELOPER_FEATURES_ENABLED && platform::CAPABILITIES.meetings, |setup| {
-                        setup.child(
-                            div()
-                                .text_footnote()
-                                .text_color(rgb(TEXT_TERTIARY))
-                                .child(tr("Meeting recording requests Screen & System Audio Recording separately when you use it.")),
-                        )
-                    }),
-            )
-            .into_any_element()
     }
 
     fn render_voice_action(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -5858,7 +5907,7 @@ impl Render for AppWindow {
             .transcription_picker_language
             .clone()
             .map(|language| self.render_transcription_picker(&language, cx));
-        let setup = self.setup_visible.then(|| self.render_setup(cx));
+        let setup = self.setup_visible.then(|| self.render_tour(window, cx));
         let mode_context_menu = (self.pane == Pane::Modes)
             .then(|| self.render_mode_context_menu(cx))
             .flatten();
@@ -6800,7 +6849,7 @@ mod tests {
         AppWindowPreview {
             pane,
             transcription_picker: None,
-            onboarding: false,
+            onboarding: None,
             confirm_model_deletion: false,
             collapse_mode_processing: false,
             open_transformation_picker: false,

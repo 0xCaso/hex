@@ -412,6 +412,9 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
                 Some(recognition_control_receiver),
             ) {
                 tracing::error!(%error, "desktop recognition stopped");
+                if format!("{error:#}").contains("event tap") {
+                    crate::onboarding::note_listener_failure();
+                }
                 failure_indicator.send(crate::dictation_indicator::DictationIndicatorEvent::Failed);
             }
         })

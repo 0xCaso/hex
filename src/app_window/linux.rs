@@ -27,6 +27,7 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     interface_language: true,
     software_updates: true,
     terminal_paste: true,
+    practice_dictation: false,
 };
 
 /// On X11 the window records the chord from its key events and the service
@@ -245,11 +246,10 @@ impl AppWindow {
         None
     }
 
-    pub(super) fn platform_setup_permissions(
-        &mut self,
-        _: &mut Context<Self>,
-    ) -> Vec<(&'static str, &'static str, AnyElement)> {
-        Vec::new()
+    pub(super) fn platform_tour_permission(&mut self, _: crate::onboarding::Effect) {}
+
+    pub(super) fn platform_relaunch(&mut self) -> bool {
+        false
     }
 
     pub(super) fn platform_awaits_setup(&self) -> bool {
