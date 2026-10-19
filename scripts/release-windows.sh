@@ -126,7 +126,7 @@ build() {
   TRANSCRIBE_CMAKE_ARGS="$cmake_args" \
     cargo build --locked --release --target "$triple" --manifest-path "$root/Cargo.toml"
   built="$target_dir/$triple/release/voice-control.exe"
-  sha256=$(sha256sum "$built" | awk '{ print $1 }')
+  sha256=$(sha256sum < "$built" | awk '{ print $1 }')
   artifact="HEX-$version-$sha256-$suffix"
   artifact_path="$dist/$artifact"
   cp "$built" "$artifact_path"

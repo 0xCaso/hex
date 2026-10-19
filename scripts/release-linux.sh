@@ -82,7 +82,7 @@ build() {
   TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF${TRANSCRIBE_CMAKE_ARGS:+ $TRANSCRIBE_CMAKE_ARGS}" \
     cargo build --locked --release --manifest-path "$root/Cargo.toml"
   built="$target_dir/release/voice-control"
-  sha256=$(sha256sum "$built" | awk '{ print $1 }')
+  sha256=$(sha256sum < "$built" | awk '{ print $1 }')
   artifact="HEX-$version-$sha256-x86_64-linux"
   artifact_path="$dist/$artifact"
   install -m755 "$built" "$artifact_path"
