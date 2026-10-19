@@ -118,3 +118,12 @@ windows-future = "0.3.2"
 # on Windows-on-ARM are not a dependable target yet.
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
 transcribe-cpp = { version = "=0.2.4", features = ["vulkan"] }
+
+# GPUI 0.2.2 (and Zed main) unwraps the Wayland XKB state on modifier and key
+# events, which a compositor can send before any XkbV1 keymap: a seat whose
+# only keyboard is a keymap-less virtual one, as right after a wtype paste on
+# wlroots compositors. vendor/gpui is 0.2.2 without its examples, with the
+# three unwraps in src/platform/linux/wayland/client.rs turned into early
+# returns (marked HEX PATCH). Drop this once GPUI handles a missing keymap.
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }

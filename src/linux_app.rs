@@ -273,9 +273,14 @@ fn open_settings(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result<(
         window
             .update(cx, |_, window, cx| {
                 window.set_window_title("Hex");
+                // Quit without letting GPUI close the window here: on Wayland
+                // it destroys the Vulkan surface at once, and a configure the
+                // compositor queued behind the close (as sway does when it
+                // retiles) then resizes the destroyed surface and segfaults.
+                // Quitting stops the event loop after this dispatch instead.
                 window.on_window_should_close(cx, |_, cx| {
                     cx.quit();
-                    true
+                    false
                 });
                 window.activate_window();
             })
