@@ -205,6 +205,16 @@ fn capture_macos() -> Result<ContextSnapshot> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn frontmost_bundle_identifier() -> Option<String> {
+    autoreleasepool(|_| {
+        NSWorkspace::sharedWorkspace()
+            .frontmostApplication()?
+            .bundleIdentifier()
+            .map(|identifier| identifier.to_string())
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn capture_brave_url() -> Result<Option<Url>> {
     const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
     let mut child = Command::new("/usr/bin/osascript")
