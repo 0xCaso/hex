@@ -1030,10 +1030,6 @@ pub fn shortcut_toggle() -> bool {
     SHORTCUT_TOGGLE.load(Ordering::Relaxed)
 }
 
-pub fn incremental_transcription() -> bool {
-    INCREMENTAL_TRANSCRIPTION.load(Ordering::Relaxed)
-}
-
 /// Whether meeting detection and recording may run: always in developer
 /// builds, otherwise only after the user opts in.
 pub fn meetings_enabled() -> bool {

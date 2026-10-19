@@ -14,7 +14,7 @@ use transcribe_cpp::{
 };
 
 use crate::context::ContextSnapshot;
-use crate::dictation::{CaptureSegment, DictationClip, DictationProtocol, pad_for_parakeet};
+use crate::dictation::{DictationClip, DictationProtocol, pad_for_parakeet};
 use crate::dictation_processor::ProcessingObservation;
 use crate::gguf_session::OfflineGgufSession;
 use crate::history::{History, HistoryDraft, HistoryKind};
@@ -22,6 +22,7 @@ use crate::meeting::{self, TranscriptEntry, TranscriptPublication};
 use crate::paste::{PasteMode, Paster};
 use crate::suppression::InputActivity;
 use crate::transcription::WarmTranscriber;
+use crate::transcription_engine::{PendingTranscript, TranscriptionEngine};
 use crate::transcription_models::{
     TranscriptionModelId, TranscriptionSelection, model_path, validate,
 };
@@ -32,13 +33,12 @@ pub struct Parakeet {
     name: String,
     selection: Option<TranscriptionSelection>,
     max_audio_samples: Option<usize>,
+    stream: Option<transcribe_cpp::StreamOptions>,
 }
 
 static TRANSCRIBE_LOGGING: Once = Once::new();
 const TRANSCRIPTION_SAMPLES_PER_MS: usize = 16;
 const MAX_PENDING_OUTPUTS: usize = 16;
-/// Final jobs and reloads keep two slots; the third holds at most one piece.
-const INFERENCE_QUEUE_CAPACITY: usize = 3;
 
 pub enum WorkerEvent {
     ModelFailed(String),
@@ -94,489 +94,12 @@ struct InferenceJob {
     job_id: DictationJobId,
     control: Arc<JobControl>,
     submitted_at: Instant,
-    clip: DictationClip,
+    transcript: PendingTranscript,
+    audio_ms: u64,
+    prepare_ms: u128,
     target: TranscriptionTarget,
     protocol: Option<Arc<DictationProtocol>>,
     context: ContextSnapshot,
-    selection: TranscriptionSelection,
-}
-
-enum InferenceCommand {
-    Reload(TranscriptionSelection),
-    Transcribe(Box<InferenceJob>),
-    Segment(SpeculativeSegment),
-    /// Sent after queued work because segment sinks keep the channel open.
-    Shutdown,
-}
-
-struct SpeculativeSegment {
-    segment: CaptureSegment,
-    _flight: SegmentFlight,
-}
-
-/// Marks the single admitted piece; dropping it, processed or not, admits the next.
-struct SegmentFlight(Arc<AtomicBool>);
-
-impl Drop for SegmentFlight {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
-/// Non-blocking handoff of completed capture pieces to the inference worker.
-#[derive(Clone)]
-pub struct SegmentSink {
-    jobs: SyncSender<InferenceCommand>,
-    in_flight: Arc<AtomicBool>,
-}
-
-impl SegmentSink {
-    /// Admits a piece only while no other piece is queued or transcribing.
-    pub fn offer(&self, segment: CaptureSegment) -> bool {
-        if self.in_flight.swap(true, Ordering::AcqRel) {
-            return false;
-        }
-        let flight = SegmentFlight(self.in_flight.clone());
-        self.jobs
-            .try_send(InferenceCommand::Segment(SpeculativeSegment {
-                segment,
-                _flight: flight,
-            }))
-            .is_ok()
-    }
-}
-
-#[cfg(test)]
-impl SegmentSink {
-    pub fn for_test() -> (Self, impl Fn() -> Option<CaptureSegment>) {
-        let (jobs, receiver) = mpsc::sync_channel(INFERENCE_QUEUE_CAPACITY);
-        let sink = Self {
-            jobs,
-            in_flight: Arc::new(AtomicBool::new(false)),
-        };
-        let receive = move || match receiver.try_recv() {
-            Ok(InferenceCommand::Segment(piece)) => Some(piece.segment),
-            _ => None,
-        };
-        (sink, receive)
-    }
-}
-
-/// Piece transcripts for the newest segmented capture.
-#[derive(Default)]
-struct SpeculativeTranscript {
-    capture_generation: Option<u64>,
-    selection: Option<TranscriptionSelection>,
-    pieces: Vec<String>,
-    broken: Option<&'static str>,
-}
-
-/// A final piece shorter than the segmenter's own minimum piece gives Parakeet
-/// too little context: a lone word after a pause comes back empty or misheard,
-/// so it is transcribed together with the piece before it.
-const SHORT_TAIL_SAMPLES: usize =
-    crate::pause_segmenter::MINIMUM_PIECE.as_millis() as usize * TRANSCRIPTION_SAMPLES_PER_MS;
-
-#[derive(Clone)]
-enum IncrementalPlan {
-    Unsegmented,
-    Join {
-        prefix: Vec<String>,
-        tail_start: usize,
-        merged_short_tail: bool,
-    },
-    Fallback(&'static str),
-}
-
-impl SpeculativeTranscript {
-    /// Transcribes `piece` while holding its flight guard so no second piece
-    /// can be admitted until inference and bookkeeping finish.
-    fn transcribe_piece(
-        &mut self,
-        mut piece: SpeculativeSegment,
-        selection: TranscriptionSelection,
-        transcribe: impl FnOnce(Vec<f32>) -> Result<String, String>,
-    ) {
-        let result = transcribe(std::mem::take(&mut piece.segment.samples));
-        self.record(&piece.segment, selection, result);
-    }
-
-    fn record(
-        &mut self,
-        segment: &CaptureSegment,
-        selection: TranscriptionSelection,
-        result: Result<String, String>,
-    ) {
-        if self.capture_generation != Some(segment.capture_generation) {
-            *self = Self {
-                capture_generation: Some(segment.capture_generation),
-                selection: Some(selection.clone()),
-                ..Self::default()
-            };
-        }
-        if self.broken.is_some() {
-            return;
-        }
-        self.broken = if segment.index != self.pieces.len() {
-            Some("piece-out-of-order")
-        } else if self.selection.as_ref() != Some(&selection) {
-            Some("model-changed")
-        } else {
-            match result {
-                Ok(text) => {
-                    self.pieces.push(text);
-                    None
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "incremental piece transcription failed");
-                    Some("piece-failed")
-                }
-            }
-        };
-    }
-
-    fn take_plan(
-        &mut self,
-        clip: &DictationClip,
-        selection: &TranscriptionSelection,
-        voice_capture: bool,
-    ) -> IncrementalPlan {
-        let state = if self.capture_generation == clip.capture_generation() {
-            std::mem::take(self)
-        } else {
-            Self::default()
-        };
-        let Some(&tail_start) = clip.cuts().last() else {
-            return IncrementalPlan::Unsegmented;
-        };
-        let reason = if voice_capture {
-            "voice-capture"
-        } else if let Some(reason) = state.broken {
-            reason
-        } else if state.pieces.len() < clip.cuts().len() {
-            "missing-pieces"
-        } else if state.selection.as_ref() != Some(selection) {
-            "model-changed"
-        } else {
-            let mut prefix = state.pieces;
-            prefix.truncate(clip.cuts().len());
-            let tail = clip.samples_from(tail_start);
-            let merged_short_tail =
-                tail.len() < SHORT_TAIL_SAMPLES && !crate::dictation::is_near_silent_samples(tail);
-            let tail_start = if merged_short_tail {
-                prefix.pop();
-                clip.cuts().iter().rev().nth(1).copied().unwrap_or(0)
-            } else {
-                tail_start
-            };
-            return IncrementalPlan::Join {
-                prefix,
-                tail_start,
-                merged_short_tail,
-            };
-        };
-        IncrementalPlan::Fallback(reason)
-    }
-}
-
-/// Transcribes only the tail when every earlier piece already has a result
-/// (a short tail together with the last piece); otherwise transcribes the
-/// whole clip exactly as without segmentation.
-fn transcribe_clip(
-    mut samples: Vec<f32>,
-    plan: IncrementalPlan,
-    protocol: Option<&DictationProtocol>,
-    transcribe: impl FnOnce(Vec<f32>, Option<&DictationProtocol>) -> Result<String>,
-) -> Result<String> {
-    match plan {
-        IncrementalPlan::Join {
-            prefix,
-            tail_start,
-            merged_short_tail,
-        } => {
-            samples.drain(..tail_start);
-            let tail_ms = samples.len() / TRANSCRIPTION_SAMPLES_PER_MS;
-            let text = if crate::dictation::is_near_silent_samples(&samples) {
-                String::new()
-            } else {
-                transcribe(samples, None)?
-            };
-            tracing::info!(
-                pieces = prefix.len(),
-                tail_ms,
-                merged_short_tail,
-                "joined incremental transcription"
-            );
-            Ok(join_segments(
-                prefix.iter().map(String::as_str).chain([text.as_str()]),
-            ))
-        }
-        IncrementalPlan::Fallback(reason) => {
-            tracing::info!(
-                reason,
-                "incremental transcription fell back to the full clip"
-            );
-            transcribe(samples, protocol)
-        }
-        IncrementalPlan::Unsegmented => transcribe(samples, protocol),
-    }
-}
-
-/// Joins piece transcripts. A cut follows a pause, so trust each piece's
-/// sentence start unless the previous piece ended mid-clause.
-fn join_segments<'a>(pieces: impl IntoIterator<Item = &'a str>) -> String {
-    let mut joined = String::new();
-    for piece in pieces
-        .into_iter()
-        .map(str::trim)
-        .filter(|piece| !piece.is_empty())
-    {
-        let Some(previous) = joined.chars().next_back() else {
-            joined.push_str(piece);
-            continue;
-        };
-        let mut characters = piece.chars();
-        let first = characters.next().expect("piece is nonempty");
-        let first_word = piece.split_whitespace().next().unwrap_or_default();
-        let keeps_case = (first == 'I'
-            && !first_word.chars().nth(1).is_some_and(char::is_alphabetic))
-            || (first_word.chars().filter(|c| c.is_alphabetic()).count() > 1
-                && first_word
-                    .chars()
-                    .filter(|c| c.is_alphabetic())
-                    .all(char::is_uppercase));
-        let reopened_period = previous == '.'
-            && (first.is_lowercase() || continues_after_period(&joined, first_word));
-        if reopened_period {
-            joined.pop();
-        }
-        let sentence_closed = !reopened_period
-            && matches!(
-                previous,
-                '.' | '?' | '!' | '\u{2026}' | '"' | '\u{201d}' | ')'
-            );
-        let mid_clause = reopened_period
-            || matches!(previous, ',' | ';' | ':' | '-' | '\u{2013}' | '\u{2014}')
-            || (!sentence_closed && continues_mid_clause(&joined, first_word));
-        let spaceless = is_spaceless_script(previous) || is_spaceless_script(first);
-        if !mid_clause && !spaceless && first.is_uppercase() && !sentence_closed {
-            joined.push('.');
-        }
-        if !spaceless {
-            joined.push(' ');
-        }
-        if mid_clause && !keeps_case {
-            joined.extend(first.to_lowercase());
-            joined.push_str(characters.as_str());
-        } else {
-            joined.push_str(piece);
-        }
-    }
-    joined
-}
-
-fn clean_clause_word(word: &str) -> String {
-    word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '\u{2019}')
-        .to_ascii_lowercase()
-        .replace('\u{2019}', "'")
-}
-
-/// True when an isolated piece's trailing period sits on an article, `"of"`,
-/// `"you know"`, or a repeated hesitation word that cannot end a sentence.
-fn continues_after_period(previous: &str, next_first_word: &str) -> bool {
-    let mut words = previous
-        .split_whitespace()
-        .rev()
-        .map(clean_clause_word)
-        .filter(|word| !word.is_empty());
-    let Some(last) = words.next() else {
-        return false;
-    };
-    let prev = words.next();
-    let next = clean_clause_word(next_first_word);
-    if !next.is_empty() && last == next {
-        return true;
-    }
-    if last == "know" && prev.as_deref() == Some("you") {
-        return true;
-    }
-    matches!(last.as_str(), "a" | "an" | "the" | "of")
-}
-
-/// True when an unpunctuated piece ended on a function word, hesitation filler,
-/// or repeated word that cannot close a sentence before the next piece.
-fn continues_mid_clause(previous: &str, next_first_word: &str) -> bool {
-    if continues_after_period(previous, next_first_word) {
-        return true;
-    }
-    let Some(last) = previous
-        .split_whitespace()
-        .rev()
-        .map(clean_clause_word)
-        .find(|word| !word.is_empty())
-    else {
-        return false;
-    };
-    matches!(
-        last.as_str(),
-        "a" | "an"
-            | "the"
-            | "this"
-            | "that"
-            | "these"
-            | "those"
-            | "my"
-            | "your"
-            | "our"
-            | "their"
-            | "its"
-            | "his"
-            | "her"
-            | "some"
-            | "any"
-            | "no"
-            | "every"
-            | "each"
-            | "either"
-            | "neither"
-            | "another"
-            | "other"
-            | "different"
-            | "of"
-            | "to"
-            | "in"
-            | "on"
-            | "at"
-            | "by"
-            | "for"
-            | "with"
-            | "from"
-            | "into"
-            | "onto"
-            | "upon"
-            | "within"
-            | "without"
-            | "between"
-            | "among"
-            | "through"
-            | "during"
-            | "before"
-            | "after"
-            | "above"
-            | "below"
-            | "under"
-            | "over"
-            | "about"
-            | "against"
-            | "across"
-            | "along"
-            | "around"
-            | "behind"
-            | "beyond"
-            | "near"
-            | "toward"
-            | "towards"
-            | "via"
-            | "per"
-            | "like"
-            | "and"
-            | "or"
-            | "but"
-            | "nor"
-            | "yet"
-            | "so"
-            | "because"
-            | "since"
-            | "unless"
-            | "until"
-            | "while"
-            | "whereas"
-            | "although"
-            | "though"
-            | "if"
-            | "whether"
-            | "when"
-            | "whenever"
-            | "where"
-            | "wherever"
-            | "how"
-            | "why"
-            | "who"
-            | "whom"
-            | "whose"
-            | "which"
-            | "what"
-            | "i"
-            | "you"
-            | "he"
-            | "she"
-            | "we"
-            | "they"
-            | "is"
-            | "am"
-            | "are"
-            | "was"
-            | "were"
-            | "be"
-            | "been"
-            | "being"
-            | "have"
-            | "has"
-            | "had"
-            | "having"
-            | "do"
-            | "does"
-            | "did"
-            | "will"
-            | "would"
-            | "shall"
-            | "should"
-            | "can"
-            | "could"
-            | "may"
-            | "might"
-            | "must"
-            | "don't"
-            | "doesn't"
-            | "didn't"
-            | "won't"
-            | "wouldn't"
-            | "shouldn't"
-            | "can't"
-            | "couldn't"
-            | "isn't"
-            | "aren't"
-            | "wasn't"
-            | "weren't"
-            | "haven't"
-            | "hasn't"
-            | "hadn't"
-            | "not"
-            | "just"
-            | "also"
-            | "even"
-            | "only"
-            | "still"
-            | "already"
-            | "very"
-            | "quite"
-            | "rather"
-            | "pretty"
-            | "really"
-    )
-}
-
-/// Scripts written without spaces between words or sentences.
-fn is_spaceless_script(character: char) -> bool {
-    matches!(
-        character,
-        '\u{3000}'..='\u{30ff}'   // CJK punctuation, Hiragana, Katakana
-            | '\u{3400}'..='\u{4dbf}'
-            | '\u{4e00}'..='\u{9fff}'
-            | '\u{f900}'..='\u{faff}'
-            | '\u{ff00}'..='\u{ffef}' // full-width forms
-            | '\u{0e00}'..='\u{0e7f}' // Thai
-    )
 }
 
 struct ProcessorJob {
@@ -691,9 +214,11 @@ impl OrderedOutputs {
 }
 
 pub struct DictationWorker {
-    inference_jobs: Option<SyncSender<InferenceCommand>>,
+    engine: Option<Arc<TranscriptionEngine>>,
+    inference_jobs: Option<SyncSender<InferenceJob>>,
     output_jobs: Option<SyncSender<OutputJob>>,
     events: Receiver<WorkerEvent>,
+    event_sender: mpsc::Sender<WorkerEvent>,
     state: Arc<Mutex<WorkerState>>,
     inference_worker: Option<thread::JoinHandle<()>>,
     processor_workers: Vec<thread::JoinHandle<()>>,
@@ -730,8 +255,9 @@ impl DictationWorker {
         history: Option<History>,
     ) -> Self {
         const PROCESSOR_WORKERS: usize = 2;
+        // Admission caps accepted jobs, so a submitted job always has a slot.
         let (inference_jobs, inference_receiver) =
-            mpsc::sync_channel::<InferenceCommand>(INFERENCE_QUEUE_CAPACITY);
+            mpsc::sync_channel::<InferenceJob>(MAX_PENDING_OUTPUTS);
         let (processor_jobs, processor_receiver) = mpsc::sync_channel::<ProcessorJob>(4);
         let (output_jobs, output_receiver) = mpsc::sync_channel::<OutputJob>(8);
         let (event_sender, events) = mpsc::channel();
@@ -740,6 +266,29 @@ impl DictationWorker {
             jobs: BTreeMap::new(),
             pending_pastes: 0,
         }));
+
+        let engine = match TranscriptionEngine::start(WarmTranscriber::default()) {
+            Ok(engine) => {
+                let events = event_sender.clone();
+                let _ = engine.run(move |model| {
+                    prioritize_inference_thread();
+                    match WarmTranscriber::load() {
+                        Ok(loaded) => {
+                            tracing::info!("transcription model loaded");
+                            *model = loaded;
+                        }
+                        Err(error) => {
+                            let _ = events.send(WorkerEvent::ModelFailed(error.to_string()));
+                        }
+                    }
+                });
+                Some(Arc::new(engine))
+            }
+            Err(error) => {
+                let _ = event_sender.send(WorkerEvent::ModelFailed(error.to_string()));
+                None
+            }
+        };
 
         let output_worker = thread::spawn({
             let state = state.clone();
@@ -762,15 +311,16 @@ impl DictationWorker {
 
         let inference_worker = thread::spawn({
             let output = output_jobs.clone();
-            move || {
-                run_inference_worker(inference_receiver, &processor_jobs, &output, &event_sender)
-            }
+            let events = event_sender.clone();
+            move || run_inference_worker(inference_receiver, &processor_jobs, &output, &events)
         });
 
         Self {
+            engine,
             inference_jobs: Some(inference_jobs),
             output_jobs: Some(output_jobs),
             events,
+            event_sender,
             state,
             inference_worker: Some(inference_worker),
             processor_workers,
@@ -778,45 +328,73 @@ impl DictationWorker {
         }
     }
 
+    /// Hands the clip to the engine at once, so its live stream finishes
+    /// before any later capture begins one; the job then waits in order.
     pub fn transcribe(
         &self,
-        clip: DictationClip,
+        mut clip: DictationClip,
         target: TranscriptionTarget,
         protocol: Option<Arc<DictationProtocol>>,
         context: ContextSnapshot,
     ) -> Result<DictationJobId, &'static str> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let job_id = DictationJobId(state.next_output_sequence()?);
+        let (Some(engine), Some(jobs)) = (&self.engine, &self.inference_jobs) else {
+            return Err("dictation worker is unavailable");
+        };
         let control = Arc::new(JobControl::default());
         let (_, selection) = crate::app_settings::transcription_selection();
-        self.inference_jobs
-            .as_ref()
-            .ok_or("dictation worker is unavailable")?
-            .try_send(InferenceCommand::Transcribe(Box::new(InferenceJob {
-                job_id,
-                control: control.clone(),
-                submitted_at: Instant::now(),
-                clip,
-                target,
-                protocol,
-                context,
-                selection,
-            })))
-            .map(|()| {
-                state.next_sequence += 1;
-                state.jobs.insert(job_id, control);
-                job_id
+        let submitted_at = Instant::now();
+        let audio_ms = clip.duration_ms();
+        // A voice-delimited clip is retranscribed without its control phrase,
+        // which a stream cannot do.
+        let stream = clip.take_stream().filter(|_| protocol.is_none());
+        let samples = clip.into_transcription_samples();
+        crate::dictation_diagnostics::persist(&samples);
+        let prepare_ms = submitted_at.elapsed().as_millis();
+        let offline = {
+            let control = control.clone();
+            let protocol = protocol.clone();
+            Box::new(move |model: &mut WarmTranscriber, samples: Vec<f32>| {
+                if control.is_cancelled() {
+                    return Err("dictation was cancelled".to_string());
+                }
+                let _busy = DictationInference::begin();
+                let transcriber = model
+                    .activate(&selection)
+                    .map_err(|error| error.to_string())?;
+                match protocol.as_deref() {
+                    Some(protocol) => transcriber.transcribe_voice(samples, protocol),
+                    None => transcriber.transcribe(samples),
+                }
+                .map_err(|error| error.to_string())
             })
-            .map_err(queue_error)
+        };
+        let transcript = engine
+            .finish_with(stream, samples, offline)
+            .map_err(|_| "dictation worker is unavailable")?;
+        jobs.try_send(InferenceJob {
+            job_id,
+            control: control.clone(),
+            submitted_at,
+            transcript,
+            audio_ms,
+            prepare_ms,
+            target,
+            protocol,
+            context,
+        })
+        .map(|()| {
+            state.next_sequence += 1;
+            state.jobs.insert(job_id, control);
+            job_id
+        })
+        .map_err(queue_error)
     }
 
-    /// Admission for pieces cut at pauses during capture. Each sink admits
-    /// one piece at a time, so the capture owner should hold the only one.
-    pub fn segment_sink(&self) -> Option<SegmentSink> {
-        Some(SegmentSink {
-            jobs: self.inference_jobs.clone()?,
-            in_flight: Arc::new(AtomicBool::new(false)),
-        })
+    /// The engine that streams hotkey captures while they are recorded.
+    pub fn engine(&self) -> Option<Arc<TranscriptionEngine>> {
+        self.engine.clone()
     }
 
     pub fn prepare_paste(&self) {
@@ -831,12 +409,19 @@ impl DictationWorker {
         let _ = output_jobs.try_send(OutputJob::PreparePaste);
     }
 
+    /// Switches the warm model after the work already handed to the engine.
     pub fn reload(&self, selection: TranscriptionSelection) -> Result<(), &'static str> {
-        self.inference_jobs
+        let events = self.event_sender.clone();
+        self.engine
             .as_ref()
             .ok_or("dictation worker is unavailable")?
-            .try_send(InferenceCommand::Reload(selection))
-            .map_err(queue_error)
+            .run(move |model| {
+                let _busy = DictationInference::begin();
+                if let Err(error) = model.activate(&selection) {
+                    let _ = events.send(WorkerEvent::ModelFailed(error.to_string()));
+                }
+            })
+            .map_err(|_| "dictation worker is unavailable")
     }
 
     pub fn paste_last(&self) -> Result<(), &'static str> {
@@ -890,9 +475,8 @@ impl DictationWorker {
     }
 
     fn shutdown(&mut self) {
-        if let Some(jobs) = self.inference_jobs.take() {
-            let _ = jobs.send(InferenceCommand::Shutdown);
-        }
+        // Accepted jobs still finish: the inference worker drains its queue.
+        self.inference_jobs.take();
         join_worker(self.inference_worker.take(), "dictation inference");
         for worker in self.processor_workers.drain(..) {
             join_worker(Some(worker), "dictation processing");
@@ -1042,87 +626,36 @@ fn process_job_text(
     }
 }
 
+/// Waits for each accepted job's transcript in submission order, then hands
+/// it to processing. The engine thread runs the inference itself.
 fn run_inference_worker(
-    commands: Receiver<InferenceCommand>,
+    jobs: Receiver<InferenceJob>,
     processor_jobs: &SyncSender<ProcessorJob>,
     output: &SyncSender<OutputJob>,
     events: &mpsc::Sender<WorkerEvent>,
 ) {
-    prioritize_inference_thread();
-    let mut transcriber = match WarmTranscriber::load() {
-        Ok(transcriber) => {
-            tracing::info!("transcription model loaded");
-            transcriber
-        }
-        Err(error) => {
-            let _ = events.send(WorkerEvent::ModelFailed(error.to_string()));
-            WarmTranscriber::default()
-        }
-    };
-    let mut speculative = SpeculativeTranscript::default();
-    while let Ok(command) = commands.recv() {
-        let _busy = DictationInference::begin();
-        let job = match command {
-            InferenceCommand::Reload(selection) => {
-                if let Err(error) = transcriber.activate(&selection) {
-                    let _ = events.send(WorkerEvent::ModelFailed(error.to_string()));
-                }
-                continue;
-            }
-            InferenceCommand::Segment(piece) => {
-                // Pieces never load a model; a switch makes the final job fall back.
-                let (_, selection) = crate::app_settings::transcription_selection();
-                let active = transcriber.active_for(&selection);
-                speculative.transcribe_piece(piece, selection, |samples| match active {
-                    Some(transcriber) => transcriber
-                        .transcribe(samples)
-                        .map_err(|error| error.to_string()),
-                    None => Err("the selected model is not active".into()),
-                });
-                continue;
-            }
-            InferenceCommand::Transcribe(job) => *job,
-            InferenceCommand::Shutdown => break,
-        };
+    while let Ok(job) = jobs.recv() {
         if job.control.is_cancelled() {
             let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
             continue;
         }
+        let _busy = DictationInference::begin();
         let _ = events.send(WorkerEvent::Stage {
             job_id: job.job_id,
             stage: DictationJobStage::Transcribing,
         });
-        let transcriber = match transcriber.activate(&job.selection) {
-            Ok(transcriber) => transcriber,
-            Err(error) => {
-                let _ = output.send(OutputJob::Completed {
-                    job_id: job.job_id,
-                    control: job.control,
-                    target: job.target,
-                    result: Box::new(Err(error.to_string())),
-                });
-                continue;
-            }
-        };
         let total_started = job.submitted_at;
         let queue_ms = total_started.elapsed().as_millis();
-        let audio_ms = job.clip.duration_ms();
-        let prepare_started = Instant::now();
-        let plan = speculative.take_plan(&job.clip, &job.selection, job.protocol.is_some());
-        let clip_samples = job.clip.into_transcription_samples();
-        crate::dictation_diagnostics::persist(&clip_samples);
-        let prepare_ms = prepare_started.elapsed().as_millis();
         let inference_started = Instant::now();
-        let result = transcribe_clip(
-            clip_samples,
-            plan,
-            job.protocol.as_deref(),
-            |samples, protocol| match protocol {
-                Some(protocol) => transcriber.transcribe_voice(samples, protocol),
-                None => transcriber.transcribe(samples),
-            },
-        )
-        .map(|text| {
+        let audio_ms = job.audio_ms;
+        let result = job.transcript.wait().map(|transcribed| {
+            tracing::info!(
+                source = transcribed.source.label(),
+                finish_ms = transcribed.finish_ms,
+                audio_ms,
+                "transcribed dictation"
+            );
+            let text = transcribed.text;
             let corrected = if matches!(job.target, TranscriptionTarget::Service) {
                 text.clone()
             } else {
@@ -1134,13 +667,12 @@ fn run_inference_worker(
                 "prepared local transcript"
             );
             corrected
-        })
-        .map_err(|error| error.to_string());
+        });
         let timings = JobTimings {
             total_started,
             queue_ms,
             audio_ms,
-            prepare_ms,
+            prepare_ms: job.prepare_ms,
             inference_ms: inference_started.elapsed().as_millis(),
         };
         if job.control.is_cancelled() {
@@ -1487,7 +1019,41 @@ impl Parakeet {
             prewarm_ms = prewarm_started.elapsed().as_millis(),
             "prewarmed transcription model"
         );
+        let stream_run = parakeet.stream_run_options();
+        let architecture = match definition.runtime {
+            crate::transcription_models::ModelRuntime::Gguf(artifact) => artifact.architecture,
+            crate::transcription_models::ModelRuntime::AppleSpeech => "",
+        };
+        parakeet.stream = parakeet.session.probe_stream(&stream_run, architecture);
         Ok(parakeet)
+    }
+
+    /// Streams decode like offline runs, without Whisper's prompt extension
+    /// and at segment timestamps: only the text of a stream is used.
+    fn stream_run_options(&self) -> RunOptions {
+        RunOptions {
+            family: None,
+            timestamps: match self.options.timestamps {
+                TimestampKind::Word | TimestampKind::Token => TimestampKind::Segment,
+                timestamps => timestamps,
+            },
+            ..self.options.clone()
+        }
+    }
+
+    pub(crate) fn stream_options(&self) -> Option<&transcribe_cpp::StreamOptions> {
+        self.stream.as_ref()
+    }
+
+    pub(crate) fn with_stream<R>(
+        &mut self,
+        stream_options: &transcribe_cpp::StreamOptions,
+        cancel: &transcribe_cpp::CancelToken,
+        drive: impl FnOnce(&mut transcribe_cpp::Stream<'_>) -> R,
+    ) -> transcribe_cpp::Result<R> {
+        let options = self.stream_run_options();
+        self.session
+            .with_stream(&options, stream_options, cancel, drive)
     }
 
     pub(crate) fn load_for_benchmark(model_path: &std::path::Path) -> Result<Self> {
@@ -1594,6 +1160,7 @@ impl Parakeet {
                 &architecture,
                 capabilities.max_audio_ms,
             ),
+            stream: None,
         })
     }
 
@@ -1913,11 +1480,13 @@ mod tests {
     #[test]
     fn ordered_waiting_outputs_remain_bounded_after_channel_drain() {
         let (output_sender, output_receiver) = mpsc::sync_channel(1);
-        let (_, events) = mpsc::channel();
+        let (event_sender, events) = mpsc::channel();
         let worker = DictationWorker {
+            engine: None,
             inference_jobs: None,
             output_jobs: Some(output_sender),
             events,
+            event_sender,
             state: Arc::new(Mutex::new(WorkerState {
                 next_sequence: 1,
                 jobs: BTreeMap::from([(DictationJobId(0), Arc::new(JobControl::default()))]),
@@ -2143,519 +1712,6 @@ mod tests {
                 std::fs::remove_file(path).unwrap();
             }
         }
-    }
-
-    #[test]
-    fn join_segments_continues_clauses_and_closes_sentences() {
-        let join = |pieces: &[&str]| join_segments(pieces.iter().copied());
-        assert_eq!(
-            join(&["Hello there,", "And then we left."]),
-            "Hello there, and then we left."
-        );
-        assert_eq!(join(&["A list:", "Apples"]), "A list: apples");
-        assert_eq!(
-            join(&["First part,", "I think so."]),
-            "First part, I think so."
-        );
-        assert_eq!(
-            join(&["First part,", "I, for one, agree."]),
-            "First part, I, for one, agree."
-        );
-        assert_eq!(
-            join(&["First part,", "In fact, yes."]),
-            "First part, in fact, yes."
-        );
-        assert_eq!(
-            join(&[" First part -", "I'm sure."]),
-            "First part - I'm sure."
-        );
-        assert_eq!(join(&["We need;", "NASA data"]), "We need; NASA data");
-        assert_eq!(
-            join(&["No punctuation", "Next sentence."]),
-            "No punctuation. Next sentence."
-        );
-        assert_eq!(
-            join(&[
-                "Let me see if it works, or maybe we should just pull a bunch of",
-                "Nice app designs."
-            ]),
-            "Let me see if it works, or maybe we should just pull a bunch of nice app designs."
-        );
-        assert_eq!(
-            join(&["You can twist the", "The 3D knob."]),
-            "You can twist the the 3D knob."
-        );
-        assert_eq!(
-            join(&["Give me a little summary of", "Of its findings"]),
-            "Give me a little summary of of its findings"
-        );
-        assert_eq!(
-            join(&["Give me a little summary of.", "Of its findings."]),
-            "Give me a little summary of of its findings."
-        );
-        assert_eq!(
-            join(&[
-                "Just show me whatever controls you want to use you know",
-                "Whatever"
-            ]),
-            "Just show me whatever controls you want to use you know whatever"
-        );
-        assert_eq!(
-            join(&[
-                "Just show me whatever controls you want to use you know.",
-                "Whatever works."
-            ]),
-            "Just show me whatever controls you want to use you know whatever works."
-        );
-        assert_eq!(
-            join(&[
-                "It's probably best not to.",
-                "force the database to deduplicate."
-            ]),
-            "It's probably best not to force the database to deduplicate."
-        );
-        assert_eq!(
-            join(&["We need to", "Come up with a pattern."]),
-            "We need to come up with a pattern."
-        );
-        assert_eq!(
-            join(&["Wait for", "I think ten seconds."]),
-            "Wait for I think ten seconds."
-        );
-        assert_eq!(
-            join(&["Switch to", "NASA telemetry."]),
-            "Switch to NASA telemetry."
-        );
-        assert_eq!(join(&["Question?", "Yes."]), "Question? Yes.");
-        assert_eq!(join(&["still going", "and more"]), "still going and more");
-        assert_eq!(join(&["  ", " Only. ", ""]), "Only.");
-        assert_eq!(join(&["你好。", "我们走吧。"]), "你好。我们走吧。");
-        assert_eq!(join(&["你好。", "Apple"]), "你好。Apple");
-        assert_eq!(join(&[]), "");
-    }
-
-    fn piece(capture_generation: u64, index: usize) -> CaptureSegment {
-        CaptureSegment {
-            capture_generation,
-            index,
-            samples: Vec::new(),
-        }
-    }
-
-    /// Ten seconds of audio cut at three and six seconds.
-    fn segmented_clip(capture_generation: u64) -> DictationClip {
-        DictationClip::for_test(
-            (0..160_000).map(|sample| sample as f32).collect(),
-            vec![48_000, 96_000],
-            Some(capture_generation),
-        )
-    }
-
-    fn plan_reason(plan: &IncrementalPlan) -> &'static str {
-        match plan {
-            IncrementalPlan::Unsegmented => "unsegmented",
-            IncrementalPlan::Join { .. } => "join",
-            IncrementalPlan::Fallback(reason) => reason,
-        }
-    }
-
-    #[test]
-    fn final_job_transcribes_only_the_tail_after_complete_pieces() {
-        let selection = TranscriptionSelection::default();
-        let mut speculative = SpeculativeTranscript::default();
-        speculative.record(&piece(5, 0), selection.clone(), Ok("First piece.".into()));
-        speculative.record(&piece(5, 1), selection.clone(), Ok("Second piece,".into()));
-        let clip = segmented_clip(5);
-        let plan = speculative.take_plan(&clip, &selection, false);
-        assert_eq!(plan_reason(&plan), "join");
-        let text = transcribe_clip(
-            clip.into_transcription_samples(),
-            plan,
-            None,
-            |samples, protocol| {
-                assert!(protocol.is_none());
-                assert_eq!(samples.len(), 64_000);
-                assert_eq!(samples[0], 96_000.0);
-                Ok("Tail words.".into())
-            },
-        )
-        .unwrap();
-        assert_eq!(text, "First piece. Second piece, tail words.");
-
-        // A near-silent tail after the final pause cut skips inference rather
-        // than feeding room tone to the model, and short as it is, it does not
-        // re-transcribe the piece before it.
-        let mut speculative = SpeculativeTranscript::default();
-        speculative.record(
-            &piece(6, 0),
-            selection.clone(),
-            Ok("Spoken before pause.".into()),
-        );
-        let mut samples = vec![0.2; 48_000];
-        samples.extend(vec![0.0; 16_000]);
-        let silent_tail_clip = DictationClip::for_test(samples, vec![48_000], Some(6));
-        let plan = speculative.take_plan(&silent_tail_clip, &selection, false);
-        let text = transcribe_clip(
-            silent_tail_clip.into_transcription_samples(),
-            plan,
-            None,
-            |_, _| panic!("near-silent incremental tail must not run model inference"),
-        )
-        .unwrap();
-        assert_eq!(text, "Spoken before pause.");
-    }
-
-    #[test]
-    fn a_short_final_piece_is_transcribed_with_the_piece_before_it() {
-        let selection = TranscriptionSelection::default();
-        let audio = || (0..160_000).map(|sample| sample as f32).collect::<Vec<_>>();
-        // Cuts at 3 s and 8.5 s leave a 1.5 s tail holding one word.
-        let mut speculative = SpeculativeTranscript::default();
-        speculative.record(&piece(7, 0), selection.clone(), Ok("First piece.".into()));
-        speculative.record(&piece(7, 1), selection.clone(), Ok("An amazing.".into()));
-        let clip = DictationClip::for_test(audio(), vec![48_000, 136_000], Some(7));
-        let plan = speculative.take_plan(&clip, &selection, false);
-        let IncrementalPlan::Join {
-            prefix,
-            tail_start,
-            merged_short_tail,
-        } = plan.clone()
-        else {
-            panic!("complete pieces must join");
-        };
-        assert_eq!(prefix, ["First piece."]);
-        assert_eq!(tail_start, 48_000);
-        assert!(merged_short_tail);
-        let text = transcribe_clip(
-            clip.into_transcription_samples(),
-            plan,
-            None,
-            |samples, _| {
-                assert_eq!(samples.len(), 112_000);
-                assert_eq!(samples[0], 48_000.0);
-                Ok("An amazing world.".into())
-            },
-        )
-        .unwrap();
-        assert_eq!(text, "First piece. An amazing world.");
-
-        // With a single cut, the short tail joins the whole first piece.
-        let mut speculative = SpeculativeTranscript::default();
-        speculative.record(&piece(8, 0), selection.clone(), Ok("An amazing.".into()));
-        let clip = DictationClip::for_test(audio(), vec![140_000], Some(8));
-        let IncrementalPlan::Join {
-            prefix,
-            tail_start,
-            merged_short_tail,
-        } = speculative.take_plan(&clip, &selection, false)
-        else {
-            panic!("complete pieces must join");
-        };
-        assert!(prefix.is_empty());
-        assert_eq!(tail_start, 0);
-        assert!(merged_short_tail);
-
-        // A tail as long as the segmenter's minimum piece stays separate.
-        let mut speculative = SpeculativeTranscript::default();
-        speculative.record(&piece(9, 0), selection.clone(), Ok("First piece.".into()));
-        let clip = DictationClip::for_test(audio(), vec![160_000 - SHORT_TAIL_SAMPLES], Some(9));
-        let IncrementalPlan::Join {
-            prefix,
-            merged_short_tail,
-            ..
-        } = speculative.take_plan(&clip, &selection, false)
-        else {
-            panic!("complete pieces must join");
-        };
-        assert_eq!(prefix, ["First piece."]);
-        assert!(!merged_short_tail);
-    }
-
-    #[test]
-    fn incomplete_stale_or_mismatched_pieces_fall_back_to_the_full_clip() {
-        let selection = TranscriptionSelection::default();
-        let changed = TranscriptionSelection {
-            recognition_hints: "Changed".into(),
-            ..TranscriptionSelection::default()
-        };
-        let protocol = DictationProtocol::default();
-        type Record<'a> = &'a dyn Fn(&mut SpeculativeTranscript);
-        let cases: [(&str, Record, &TranscriptionSelection, bool); 6] = [
-            (
-                "missing-pieces",
-                &|speculative| {
-                    speculative.record(&piece(5, 0), selection.clone(), Ok("One.".into()))
-                },
-                &selection,
-                false,
-            ),
-            (
-                "missing-pieces",
-                &|speculative| {
-                    speculative.record(&piece(4, 0), selection.clone(), Ok("One.".into()));
-                    speculative.record(&piece(4, 1), selection.clone(), Ok("Two.".into()));
-                },
-                &selection,
-                false,
-            ),
-            (
-                "model-changed",
-                &|speculative| {
-                    speculative.record(&piece(5, 0), selection.clone(), Ok("One.".into()));
-                    speculative.record(&piece(5, 1), selection.clone(), Ok("Two.".into()));
-                },
-                &changed,
-                false,
-            ),
-            (
-                "model-changed",
-                &|speculative| {
-                    speculative.record(&piece(5, 0), selection.clone(), Ok("One.".into()));
-                    speculative.record(&piece(5, 1), changed.clone(), Ok("Two.".into()));
-                },
-                &selection,
-                false,
-            ),
-            (
-                "piece-failed",
-                &|speculative| {
-                    speculative.record(&piece(5, 0), selection.clone(), Err("failed".into()));
-                    speculative.record(&piece(5, 1), selection.clone(), Ok("Two.".into()));
-                },
-                &selection,
-                false,
-            ),
-            (
-                "voice-capture",
-                &|speculative| {
-                    speculative.record(&piece(5, 0), selection.clone(), Ok("One.".into()));
-                    speculative.record(&piece(5, 1), selection.clone(), Ok("Two.".into()));
-                },
-                &selection,
-                true,
-            ),
-        ];
-        for (expected, record, job_selection, voice) in cases {
-            let mut speculative = SpeculativeTranscript::default();
-            record(&mut speculative);
-            let clip = segmented_clip(5);
-            let plan = speculative.take_plan(&clip, job_selection, voice);
-            assert_eq!(plan_reason(&plan), expected);
-            let text = transcribe_clip(
-                clip.into_transcription_samples(),
-                plan,
-                voice.then_some(&protocol),
-                |samples, received| {
-                    assert_eq!(samples.len(), 160_000);
-                    assert_eq!(received.is_some(), voice);
-                    Ok("Full clip.".into())
-                },
-            )
-            .unwrap();
-            assert_eq!(text, "Full clip.");
-        }
-    }
-
-    #[test]
-    fn pieces_beyond_a_delayed_release_are_ignored_and_state_is_consumed_once() {
-        let selection = TranscriptionSelection::default();
-        let mut speculative = SpeculativeTranscript::default();
-        for (index, text) in ["One.", "Two.", "After release."].into_iter().enumerate() {
-            speculative.record(&piece(5, index), selection.clone(), Ok(text.into()));
-        }
-        let clip = segmented_clip(5);
-        let IncrementalPlan::Join {
-            prefix,
-            tail_start,
-            merged_short_tail,
-        } = speculative.take_plan(&clip, &selection, false)
-        else {
-            panic!("complete pieces must join");
-        };
-        assert_eq!(prefix, ["One.", "Two."]);
-        assert_eq!(tail_start, 96_000);
-        assert!(!merged_short_tail, "a four-second tail stays separate");
-        assert_eq!(
-            plan_reason(&speculative.take_plan(&clip, &selection, false)),
-            "missing-pieces"
-        );
-    }
-
-    #[test]
-    fn a_new_capture_discards_pieces_from_a_cancelled_capture() {
-        let selection = TranscriptionSelection::default();
-        let mut speculative = SpeculativeTranscript::default();
-        // Capture 1 was cancelled: it never submits a final job.
-        speculative.record(
-            &piece(1, 0),
-            selection.clone(),
-            Ok("Cancelled words.".into()),
-        );
-        speculative.record(&piece(2, 0), selection.clone(), Ok("Kept.".into()));
-        speculative.record(&piece(2, 1), selection.clone(), Ok("Also kept.".into()));
-        assert_eq!(
-            plan_reason(&speculative.take_plan(&segmented_clip(1), &selection, false)),
-            "missing-pieces"
-        );
-        let IncrementalPlan::Join { prefix, .. } =
-            speculative.take_plan(&segmented_clip(2), &selection, false)
-        else {
-            panic!("the newest capture keeps its pieces");
-        };
-        assert_eq!(prefix, ["Kept.", "Also kept."]);
-
-        let unsegmented = DictationClip::for_test(vec![0.0; 16_000], Vec::new(), None);
-        assert_eq!(
-            plan_reason(&speculative.take_plan(&unsegmented, &selection, false)),
-            "unsegmented"
-        );
-    }
-
-    #[test]
-    fn piece_admission_never_takes_a_final_job_slot() {
-        let (inference_jobs, inference_receiver) =
-            mpsc::sync_channel::<InferenceCommand>(INFERENCE_QUEUE_CAPACITY);
-        let (_, events) = mpsc::channel();
-        let worker = DictationWorker {
-            inference_jobs: Some(inference_jobs),
-            output_jobs: None,
-            events,
-            state: Arc::new(Mutex::new(WorkerState {
-                next_sequence: 0,
-                jobs: BTreeMap::new(),
-                pending_pastes: 0,
-            })),
-            inference_worker: None,
-            processor_workers: Vec::new(),
-            output_worker: None,
-        };
-        let sink = worker.segment_sink().unwrap();
-        assert!(sink.offer(piece(1, 0)));
-        assert!(!sink.offer(piece(1, 1)), "only one piece may be in flight");
-        let submit = || {
-            worker.transcribe(
-                DictationClip::for_test(vec![0.0; 16_000], Vec::new(), None),
-                TranscriptionTarget::Paste,
-                None,
-                ContextSnapshot::default(),
-            )
-        };
-        assert!(submit().is_ok());
-        assert!(submit().is_ok());
-
-        // A running piece keeps the sink busy until transcription finishes,
-        // and a full queue refuses the next piece without leaving the sink stuck.
-        let Ok(InferenceCommand::Segment(running)) = inference_receiver.try_recv() else {
-            panic!("expected queued piece");
-        };
-        let mut speculative = SpeculativeTranscript::default();
-        speculative.transcribe_piece(running, TranscriptionSelection::default(), |_| {
-            assert!(
-                !sink.offer(piece(1, 1)),
-                "a running piece must not admit another piece before inference finishes"
-            );
-            Ok("First.".into())
-        });
-        assert!(submit().is_ok());
-        assert!(!sink.offer(piece(1, 1)));
-        assert!(matches!(
-            inference_receiver.try_recv(),
-            Ok(InferenceCommand::Transcribe(_))
-        ));
-        assert!(sink.offer(piece(1, 1)));
-        drop(inference_receiver);
-        drop(worker);
-    }
-
-    #[test]
-    #[ignore = "requires HEX_INCREMENTAL_MODEL (Unified English GGUF) and HEX_SEGMENTER_WAV"]
-    fn incremental_join_tracks_offline_transcription() {
-        use crate::audio::CaptureInstant;
-        use crate::dictation::{DictationCapture, Finish};
-
-        let mut model = Parakeet::load_for_benchmark(&PathBuf::from(
-            std::env::var("HEX_INCREMENTAL_MODEL").unwrap(),
-        ))
-        .unwrap();
-        let audio = WavReader::open(std::env::var("HEX_SEGMENTER_WAV").unwrap())
-            .unwrap()
-            .samples::<f32>()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let mut run = |mut samples: Vec<f32>, _: Option<&DictationProtocol>| {
-            // Mirror Transcriber's Unified English preparation.
-            pad_for_parakeet(&mut samples);
-            samples.resize(samples.len() + 3_200, 0.0);
-            model.transcribe(&samples)
-        };
-
-        let start = CaptureInstant::from_nanos(60_000_000_000);
-        let mut capture = DictationCapture::new(16_000);
-        capture.start(start);
-        capture.segment_capture(1);
-        assert!(capture.become_intentional(start + crate::dictation::MINIMUM_HOLD_DURATION));
-        let selection = TranscriptionSelection::default();
-        let mut speculative = SpeculativeTranscript::default();
-        let mut through = start;
-        let mut piece_ms = Vec::new();
-        for chunk in audio.chunks(160) {
-            through = through + std::time::Duration::from_millis(10);
-            capture.ingest(chunk, through);
-            let mut offered = None;
-            capture.offer_segment(|segment| {
-                offered = Some(segment);
-                true
-            });
-            if let Some(mut segment) = offered {
-                let started = Instant::now();
-                let text = run(std::mem::take(&mut segment.samples), None);
-                piece_ms.push(started.elapsed().as_millis());
-                speculative.record(&segment, selection.clone(), text.map_err(|e| e.to_string()));
-            }
-        }
-        let Finish::Transcribe(clip) = capture.finish(through) else {
-            panic!("expected transcription");
-        };
-        let plan = speculative.take_plan(&clip, &selection, false);
-        let samples = clip.into_transcription_samples();
-        let started = Instant::now();
-        let joined = transcribe_clip(samples.clone(), plan, None, &mut run).unwrap();
-        let release_ms = started.elapsed().as_millis();
-        let started = Instant::now();
-        let offline = run(samples, None).unwrap();
-        let offline_ms = started.elapsed().as_millis();
-
-        let words = |text: &str| {
-            text.split_whitespace()
-                .map(|word| {
-                    word.chars()
-                        .filter(|c| c.is_alphanumeric() || *c == '\'')
-                        .collect::<String>()
-                        .to_lowercase()
-                })
-                .filter(|word| !word.is_empty())
-                .collect::<Vec<_>>()
-        };
-        let (reference, hypothesis) = (words(&offline), words(&joined));
-        let mut previous = (0..=hypothesis.len()).collect::<Vec<_>>();
-        for (row, expected) in reference.iter().enumerate() {
-            let mut current = vec![row + 1; hypothesis.len() + 1];
-            for (column, actual) in hypothesis.iter().enumerate() {
-                current[column + 1] = (previous[column + 1] + 1)
-                    .min(current[column] + 1)
-                    .min(previous[column] + usize::from(expected != actual));
-            }
-            previous = current;
-        }
-        println!(
-            "pieces={} piece_ms={piece_ms:?} release_ms={release_ms} offline_ms={offline_ms} word_diff={}/{}",
-            piece_ms.len(),
-            previous[hypothesis.len()],
-            reference.len()
-        );
-        println!("JOINED {joined}");
-        println!("OFFLINE {offline}");
-        assert!(previous[hypothesis.len()] * 20 <= reference.len().max(20));
     }
 
     #[test]

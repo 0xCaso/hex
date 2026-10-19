@@ -140,6 +140,7 @@ mod text_replacements;
 mod transcription;
 #[cfg(target_os = "macos")]
 mod transcription_benchmark;
+mod transcription_engine;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod transcription_models;
 #[cfg(target_os = "macos")]
@@ -184,8 +185,6 @@ mod desktop_shell;
 mod desktop_voice_action_pane;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod self_update;
-#[cfg(target_os = "windows")]
-mod transcription_engine;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]

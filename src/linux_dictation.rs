@@ -9,19 +9,28 @@ use color_eyre::Result;
 use color_eyre::eyre::eyre;
 
 use crate::audio::{AudioInput, AudioInputEvent, CaptureInstant};
-use crate::dictation::{DictationCapture, Finish};
+use crate::dictation::{DictationCapture, Finish, POST_RELEASE_TAIL};
 use crate::events::{DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms};
 use crate::feedback::{self, Tone};
 use crate::linux_desktop::LinuxIndicator;
 use crate::linux_input::{HotkeyEvent, HotkeyStatus, LinuxHotkeyMonitor};
 use crate::linux_paste::LinuxPaster;
 use crate::local_transcriber::LocalTranscriber;
+use crate::transcription_engine::{PendingTranscript, TranscriptionEngine};
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
+/// How long past the tail a release waits for audio that never arrives.
+const TAIL_STALL_GRACE: Duration = Duration::from_millis(100);
 
 struct Job {
-    samples: Vec<f32>,
+    transcript: PendingTranscript,
     audio_ms: u64,
+}
+
+/// A release whose capture is still collecting its post-release tail.
+struct Finishing {
+    ended_at: CaptureInstant,
+    deadline: Instant,
 }
 
 struct OutputWorker {
@@ -50,6 +59,8 @@ pub fn run(
 ) -> Result<()> {
     let transcriber =
         transcriber.map_or_else(|| LocalTranscriber::load(&settings.transcription), Ok)?;
+    // The engine outlives the output worker, which waits on its transcripts.
+    let engine = TranscriptionEngine::start(transcriber)?;
     // Drop audio/hotkeys and close the job queue before joining slow output on
     // every exit, including failures during startup or recording.
     let mut output = OutputWorker {
@@ -61,10 +72,11 @@ pub fn run(
         None => AudioInput::open(&[])?,
     };
     let hotkey_label = settings.dictation_hotkey.label();
+    let toggle = settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
     let hotkey = LinuxHotkeyMonitor::start(
         settings.dictation_hotkey,
         settings.double_tap_lock,
-        settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle,
+        toggle,
         hotkey_status,
     )?;
     let wayland_modifiers = hotkey.wayland_modifiers();
@@ -73,7 +85,6 @@ pub fn run(
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
     output.worker = Some(thread::spawn(move || {
-        let mut transcriber = transcriber;
         let mut paster = LinuxPaster::new(
             worker_stop.clone(),
             settings.paste_with_shift,
@@ -85,8 +96,14 @@ pub fn run(
             }
             let started = Instant::now();
             let result = (|| -> Result<String> {
-                let text = transcriber.transcribe(&job.samples)?;
-                let text = text.trim().to_string();
+                let transcribed = job.transcript.wait().map_err(|error| eyre!(error))?;
+                tracing::info!(
+                    source = transcribed.source.label(),
+                    finish_ms = transcribed.finish_ms,
+                    audio_ms = job.audio_ms,
+                    "transcribed Linux dictation"
+                );
+                let text = transcribed.text;
                 if text.is_empty() {
                     return Err(eyre!("transcription was empty"));
                 }
@@ -111,6 +128,7 @@ pub fn run(
     let mut events = EventLog::create(event_path)?;
     let mut capture = DictationCapture::new(input.sample_rate);
     let mut captured_through = CaptureInstant::ZERO;
+    let mut finishing: Option<Finishing> = None;
     let mut pending = 0_usize;
     events.emit(&VoiceEvent::SessionStarted {
         timestamp_ms: now_ms(),
@@ -125,26 +143,40 @@ pub fn run(
         if let Ok(error) = hotkey.errors.try_recv() {
             return Err(eyre!("Linux hotkey monitor stopped: {error}"));
         }
-        while let Ok(action) = hotkey.events.try_recv() {
+        // A release keeps recording through its tail; shortcut events wait,
+        // so a press inside the tail starts after this clip is submitted.
+        if let Some(release) = &finishing
+            && (captured_through >= release.ended_at + POST_RELEASE_TAIL
+                || Instant::now() >= release.deadline)
+        {
+            let ended_at = release.ended_at;
+            finishing = None;
+            submit_capture(
+                &mut capture,
+                ended_at,
+                &engine,
+                &jobs,
+                &mut events,
+                &mut pending,
+            )?;
+            emit_state(
+                &mut events,
+                active_state(capture.is_recording(), pending),
+                &input.device_name,
+            )?;
+        }
+        while finishing.is_none()
+            && let Ok(action) = hotkey.events.try_recv()
+        {
             match action {
                 HotkeyEvent::Start if !capture.is_recording() => {
                     start_capture(&mut capture, captured_through, feedback::play);
+                    stream_when_due(&mut capture, &engine, toggle);
                     events.dictation(DictationPhase::Started, "")?;
                     emit_state(&mut events, VoiceState::Dictating, &input.device_name)?;
                 }
                 HotkeyEvent::Finish if capture.is_recording() => {
-                    submit_capture(
-                        &mut capture,
-                        captured_through,
-                        &jobs,
-                        &mut events,
-                        &mut pending,
-                    )?;
-                    emit_state(
-                        &mut events,
-                        active_state(capture.is_recording(), pending),
-                        &input.device_name,
-                    )?;
+                    finishing = Some(begin_finishing(&capture, captured_through));
                 }
                 HotkeyEvent::Cancel if capture.is_recording() => {
                     capture.cancel();
@@ -196,8 +228,13 @@ pub fn run(
         };
         capture.ingest(&chunk, captured_through);
         capture.become_intentional(captured_through);
+        stream_when_due(&mut capture, &engine, toggle);
     }
 
+    if capture.is_recording() {
+        capture.cancel();
+        events.dictation(DictationPhase::Cancelled, "")?;
+    }
     indicator.update(false, pending);
     emit_state(&mut events, VoiceState::Stopping, &input.device_name)?;
     output.stop.store(true, Ordering::Release);
@@ -233,23 +270,45 @@ fn start_capture(
     play(Tone::DictationStart);
 }
 
+/// Streams once the hold counts, so short taps and chords never reach the
+/// model; a Toggle press is deliberate and streams at once.
+fn stream_when_due(capture: &mut DictationCapture, engine: &TranscriptionEngine, toggle: bool) {
+    if capture.is_recording() && (toggle || capture.is_intentional()) {
+        capture.begin_stream(engine);
+    }
+}
+
+fn begin_finishing(capture: &DictationCapture, ended_at: CaptureInstant) -> Finishing {
+    let now = Instant::now();
+    Finishing {
+        ended_at,
+        // A short tap is discarded on its release alone and needs no tail.
+        deadline: if capture.would_transcribe(ended_at) {
+            now + POST_RELEASE_TAIL + TAIL_STALL_GRACE
+        } else {
+            now
+        },
+    }
+}
+
 fn submit_capture(
     capture: &mut DictationCapture,
     ended_at: CaptureInstant,
+    engine: &TranscriptionEngine,
     jobs: &SyncSender<Job>,
     events: &mut EventLog,
     pending: &mut usize,
 ) -> Result<()> {
-    match capture.finish(ended_at) {
+    match capture.finish_with_tail(ended_at, POST_RELEASE_TAIL) {
         Finish::Discard => events.dictation(DictationPhase::Discarded, "")?,
         Finish::Transcribe(clip) if clip.is_near_silent() => {
             events.dictation(DictationPhase::Discarded, "")?
         }
-        Finish::Transcribe(clip) => {
+        Finish::Transcribe(mut clip) => {
             feedback::play(Tone::DictationStop);
             let audio_ms = clip.duration_ms();
             let job = Job {
-                samples: clip.into_parakeet_samples(),
+                transcript: engine.finish(clip.take_stream(), clip.into_transcription_samples())?,
                 audio_ms,
             };
             match jobs.try_send(job) {
@@ -290,11 +349,52 @@ fn emit_state(events: &mut EventLog, state: VoiceState, device: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transcription_engine::Command;
+
+    fn capture_time() -> CaptureInstant {
+        CaptureInstant::from_nanos(60_000_000_000)
+    }
+
+    fn event_log() -> (EventLog, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "hex-linux-dictation-{}-{}.ndjson",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        (EventLog::create(&path).unwrap(), path)
+    }
+
+    /// Records `seconds` of speech-level audio in 100 ms chunks, streaming
+    /// as the live loop would.
+    fn record(
+        capture: &mut DictationCapture,
+        engine: &TranscriptionEngine,
+        toggle: bool,
+        seconds: u64,
+    ) -> CaptureInstant {
+        let start = capture_time();
+        start_capture(capture, start, |_| {});
+        stream_when_due(capture, engine, toggle);
+        let mut through = start;
+        for _ in 0..seconds * 10 {
+            through = through + Duration::from_millis(100);
+            let tone = (0..1_600)
+                .map(|index| 0.1 * (index as f32 * 0.05).sin())
+                .collect::<Vec<_>>();
+            capture.ingest(&tone, through);
+            capture.become_intentional(through);
+            stream_when_due(capture, engine, toggle);
+        }
+        through
+    }
 
     #[test]
     fn start_sound_precedes_audio_and_does_not_change_short_tap_discard() {
         let mut capture = DictationCapture::new(16_000);
-        let started_at = CaptureInstant::from_nanos(60_000_000_000);
+        let started_at = capture_time();
         let mut sounds = Vec::new();
 
         start_capture(&mut capture, started_at, |tone| sounds.push(tone));
@@ -305,6 +405,151 @@ mod tests {
             capture.finish(started_at + Duration::from_millis(100)),
             Finish::Discard
         ));
+    }
+
+    #[test]
+    fn hold_streams_after_the_threshold_and_toggle_streams_from_the_press() {
+        for toggle in [false, true] {
+            let (engine, commands) = TranscriptionEngine::for_test();
+            let mut capture = DictationCapture::new(16_000);
+            let start = capture_time();
+            start_capture(&mut capture, start, |_| {});
+            stream_when_due(&mut capture, &engine, toggle);
+            assert_eq!(capture.is_streaming(), toggle);
+            capture.ingest(&[0.1; 1_600], start + Duration::from_millis(100));
+            capture.become_intentional(start + Duration::from_millis(100));
+            stream_when_due(&mut capture, &engine, toggle);
+            assert_eq!(capture.is_streaming(), toggle, "toggle={toggle}");
+            capture.ingest(&[0.1; 3_200], start + MINIMUM_HOLD);
+            capture.become_intentional(start + MINIMUM_HOLD);
+            stream_when_due(&mut capture, &engine, toggle);
+            assert!(capture.is_streaming());
+            let begun = commands
+                .try_iter()
+                .filter(|command| matches!(command, Command::Begin { .. }))
+                .count();
+            assert_eq!(begun, 1);
+        }
+    }
+
+    const MINIMUM_HOLD: Duration = crate::dictation::MINIMUM_HOLD_DURATION;
+
+    #[test]
+    fn a_release_finishes_its_stream_with_the_complete_clip() {
+        let (engine, commands) = TranscriptionEngine::for_test();
+        let (mut events, path) = event_log();
+        let (jobs, queued) = mpsc::sync_channel(2);
+        let mut capture = DictationCapture::new(16_000);
+        let released = record(&mut capture, &engine, false, 2);
+        let mut pending = 0;
+        // The release waits for its tail before it is submitted.
+        let finishing = begin_finishing(&capture, released.checked_sub(POST_RELEASE_TAIL).unwrap());
+        assert!(finishing.deadline > Instant::now());
+        submit_capture(
+            &mut capture,
+            finishing.ended_at,
+            &engine,
+            &jobs,
+            &mut events,
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(pending, 1);
+        let job = queued.try_recv().unwrap();
+        assert_eq!(job.audio_ms, 2_000);
+        let received = commands.try_iter().collect::<Vec<_>>();
+        let fed: usize = received
+            .iter()
+            .map(|command| match command {
+                Command::Feed { samples, .. } => samples.len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(matches!(
+            received.first(),
+            Some(Command::Begin { stream: 1 })
+        ));
+        assert!(matches!(
+            received.last(),
+            Some(Command::Finish { stream: Some(1), clip, .. }) if clip.len() == 32_000
+        ));
+        assert!(fed > 16_000 && fed <= 32_000);
+        assert!(
+            !received
+                .iter()
+                .any(|command| matches!(command, Command::Cancel { .. }))
+        );
+        drop(events);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn escape_and_short_taps_cancel_the_stream_and_submit_nothing() {
+        let (engine, commands) = TranscriptionEngine::for_test();
+        let (mut events, path) = event_log();
+        let (jobs, queued) = mpsc::sync_channel(2);
+        let mut pending = 0;
+
+        let mut cancelled = DictationCapture::new(16_000);
+        record(&mut cancelled, &engine, true, 1);
+        cancelled.cancel();
+
+        let mut short = DictationCapture::new(16_000);
+        let start = capture_time();
+        start_capture(&mut short, start, |_| {});
+        stream_when_due(&mut short, &engine, true);
+        short.ingest(&[0.1; 1_600], start + Duration::from_millis(100));
+        let finishing = begin_finishing(&short, start + Duration::from_millis(100));
+        assert!(
+            finishing.deadline <= Instant::now(),
+            "a short tap needs no tail"
+        );
+        submit_capture(
+            &mut short,
+            finishing.ended_at,
+            &engine,
+            &jobs,
+            &mut events,
+            &mut pending,
+        )
+        .unwrap();
+
+        assert_eq!(pending, 0);
+        assert!(queued.try_recv().is_err());
+        let received = commands.try_iter().collect::<Vec<_>>();
+        let count = |matches: fn(&Command) -> bool| received.iter().filter(|c| matches(c)).count();
+        assert_eq!(count(|c| matches!(c, Command::Begin { .. })), 2);
+        assert_eq!(count(|c| matches!(c, Command::Cancel { .. })), 2);
+        assert_eq!(count(|c| matches!(c, Command::Finish { .. })), 0);
+        drop(events);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_model_that_cannot_stream_transcribes_the_whole_clip_after_release() {
+        let (engine, commands) = TranscriptionEngine::for_test_without_streaming();
+        let (mut events, path) = event_log();
+        let (jobs, queued) = mpsc::sync_channel(2);
+        let mut capture = DictationCapture::new(16_000);
+        let released = record(&mut capture, &engine, true, 2);
+        assert!(!capture.is_streaming());
+        let mut pending = 0;
+        submit_capture(
+            &mut capture,
+            released.checked_sub(POST_RELEASE_TAIL).unwrap(),
+            &engine,
+            &jobs,
+            &mut events,
+            &mut pending,
+        )
+        .unwrap();
+        assert!(queued.try_recv().is_ok());
+        assert!(matches!(
+            commands.try_iter().collect::<Vec<_>>().as_slice(),
+            [Command::Finish { stream: None, clip, .. }] if clip.len() == 32_000
+        ));
+        drop(events);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -11,16 +11,13 @@ use crate::audio::{CaptureInstant, RecoveringAudioInput, RecoveringAudioInputEve
 use crate::dictation::{DictationCapture, Finish, POST_RELEASE_TAIL};
 use crate::events::{DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms};
 use crate::local_transcriber::LocalTranscriber;
-use crate::transcription_engine::{LiveStream, PendingTranscript, TranscriptionEngine};
+use crate::transcription_engine::{PendingTranscript, TranscriptionEngine};
 use crate::transcription_models::TranscriptionSelection;
 use crate::windows_input::{HotkeyAction, WindowsHotkeyMonitor};
 use crate::windows_paste::WindowsPaster;
 use crate::windows_settings::WindowsHotkey;
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(5);
-/// Live audio is handed to the stream in blocks of this many 16 kHz samples
-/// (160 ms), well under the model's chunk, to keep per-feed overhead low.
-const STREAM_FEED_SAMPLES: usize = 2_560;
 /// How long past the tail a release waits for audio that never arrives.
 const TAIL_STALL_GRACE: Duration = Duration::from_millis(100);
 
@@ -185,8 +182,7 @@ pub fn run_with_transcriber(
         shortcut_mode,
     )?;
     let audio_suppressor = crate::windows_audio_control::AudioSuppressor::start(while_dictating);
-    let mut engine = TranscriptionEngine::start(transcriber)?;
-    let mut live: Option<LiveStream> = None;
+    let engine = TranscriptionEngine::start(transcriber)?;
     let mut finishing: Option<Finishing> = None;
     let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
     let (result_sender, results) = mpsc::channel();
@@ -257,7 +253,6 @@ pub fn run_with_transcriber(
                 &mut capture,
                 ended_at,
                 &engine,
-                live.take(),
                 &jobs,
                 &mut events,
                 &mut pending,
@@ -436,7 +431,6 @@ pub fn run_with_transcriber(
                     recording_voice = false;
                     recording_feedback_started = false;
                     capture.cancel();
-                    live = None;
                     if let Some(indicator) = &indicator {
                         indicator.send(crate::windows_indicator::WindowsIndicatorEvent::Cancelled);
                     }
@@ -479,7 +473,6 @@ pub fn run_with_transcriber(
                     }
                     recording_feedback_started = false;
                     capture.cancel();
-                    live = None;
                     recording = false;
                     if let Some(indicator) = &indicator {
                         indicator.send(crate::windows_indicator::WindowsIndicatorEvent::Cancelled);
@@ -614,14 +607,8 @@ pub fn run_with_transcriber(
                     }
                     // Short taps and shortcut chords never reach the model;
                     // the stream starts with the backlog once the hold counts.
-                    if recording_feedback_started && live.is_none() {
-                        live = engine.begin();
-                    }
-                }
-                if let Some(stream) = &mut live {
-                    let fresh = capture.recorded_from(stream.fed());
-                    if fresh.len() >= STREAM_FEED_SAMPLES {
-                        stream.feed(fresh);
+                    if recording_feedback_started {
+                        capture.begin_stream(&engine);
                     }
                 }
             }
@@ -640,7 +627,6 @@ pub fn run_with_transcriber(
                     recording = false;
                     recording_voice = false;
                     capture.cancel();
-                    live = None;
                     events.dictation(DictationPhase::Cancelled, "")?;
                     if let Some(indicator) = &indicator {
                         indicator.send(crate::windows_indicator::WindowsIndicatorEvent::Cancelled);
@@ -700,10 +686,8 @@ pub fn run_with_transcriber(
             crate::feedback::play(crate::feedback::Tone::Cancel);
         }
         capture.cancel();
-        live = None;
         events.dictation(DictationPhase::Cancelled, "")?;
     }
-    drop(live);
     emit_state(&mut events, VoiceState::Stopping, &device_label)?;
     drop(hotkey);
     drop(input);
@@ -1035,7 +1019,6 @@ fn submit_capture(
     capture: &mut DictationCapture,
     ended_at: CaptureInstant,
     engine: &TranscriptionEngine,
-    live: Option<LiveStream>,
     jobs: &SyncSender<OutputJob>,
     events: &mut EventLog,
     pending: &mut usize,
@@ -1047,10 +1030,10 @@ fn submit_capture(
         Finish::Transcribe(clip) if clip.is_near_silent() => {
             events.dictation(DictationPhase::Discarded, "")?
         }
-        Finish::Transcribe(clip) => {
+        Finish::Transcribe(mut clip) => {
             let audio_ms = clip.duration_ms();
             let job = Job {
-                transcript: engine.finish(live, clip.into_transcription_samples())?,
+                transcript: engine.finish(clip.take_stream(), clip.into_transcription_samples())?,
                 audio_ms,
             };
             let job = if voice_action {

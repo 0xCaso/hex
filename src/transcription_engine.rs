@@ -7,6 +7,8 @@
 //! that cannot stream always takes the offline path. Commands are handled in
 //! order on one thread, because a live stream holds the model's compute lease.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -14,7 +16,15 @@ use std::time::{Duration, Instant};
 use color_eyre::eyre::{Result, eyre};
 use transcribe_cpp::CancelToken;
 
-use crate::local_transcriber::LocalTranscriber;
+/// The model the engine owns: macOS keeps its warm, switchable transcriber
+/// (GGUF or Apple Speech); Linux and Windows load one GGUF model.
+#[cfg(target_os = "macos")]
+pub(crate) type Model = crate::transcription::WarmTranscriber;
+#[cfg(not(target_os = "macos"))]
+pub(crate) type Model = crate::local_transcriber::LocalTranscriber;
+
+/// Transcribes a complete 16 kHz clip offline on the engine thread.
+pub(crate) type Offline = Box<dyn FnOnce(&mut Model, Vec<f32>) -> Result<String, String> + Send>;
 
 /// A healthy finish decodes at most a couple of seconds of buffered audio.
 /// Past this the stream is aborted and the clip is transcribed offline.
@@ -23,7 +33,7 @@ const STREAM_FINISH_DEADLINE: Duration = Duration::from_millis(1_500);
 /// stream may still keep. Beyond it, the offline clip is authoritative.
 const MAX_OVERFED_SAMPLES: usize = 16_000 / 4;
 
-enum Command {
+pub(crate) enum Command {
     Begin {
         stream: u64,
     },
@@ -37,8 +47,13 @@ enum Command {
     Finish {
         stream: Option<u64>,
         clip: Vec<f32>,
+        offline: Offline,
         reply: Sender<Result<Transcribed, String>>,
     },
+    /// Work that needs the model itself, such as loading or switching it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Run(Box<dyn FnOnce(&mut Model) + Send>),
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -68,10 +83,11 @@ impl Source {
 }
 
 pub struct TranscriptionEngine {
-    commands: Option<Sender<Command>>,
+    commands: Sender<Command>,
     cancel: CancelToken,
-    streams: bool,
-    next_stream: u64,
+    /// Whether the loaded model can stream on its device.
+    streams: Arc<AtomicBool>,
+    next_stream: AtomicU64,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -139,57 +155,99 @@ impl PendingTranscript {
 }
 
 impl TranscriptionEngine {
-    pub fn start(transcriber: LocalTranscriber) -> Result<Self> {
+    pub fn start(model: Model) -> Result<Self> {
         let cancel = CancelToken::new();
-        let streams = transcriber.stream_options().is_some();
+        let streams = Arc::new(AtomicBool::new(model.stream_options().is_some()));
         let (commands, receiver) = mpsc::channel();
-        let worker_cancel = cancel.clone();
+        let worker = Worker {
+            model,
+            cancel: cancel.clone(),
+            streams: streams.clone(),
+        };
         let thread = thread::Builder::new()
             .name("transcription-engine".into())
-            .spawn(move || Worker::new(transcriber, worker_cancel).run(receiver))?;
+            .spawn(move || worker.run(receiver))?;
         Ok(Self {
-            commands: Some(commands),
+            commands,
             cancel,
             streams,
-            next_stream: 0,
+            next_stream: AtomicU64::new(0),
             thread: Some(thread),
         })
     }
 
+    /// An engine without a worker whose model always streams; tests read the
+    /// commands it would have handled.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> (Self, Receiver<Command>) {
+        let (commands, receiver) = mpsc::channel();
+        let engine = Self {
+            commands,
+            cancel: CancelToken::new(),
+            streams: Arc::new(AtomicBool::new(true)),
+            next_stream: AtomicU64::new(0),
+            thread: None,
+        };
+        (engine, receiver)
+    }
+
+    /// Like [`Self::for_test`] for a model that cannot stream.
+    #[cfg(test)]
+    pub(crate) fn for_test_without_streaming() -> (Self, Receiver<Command>) {
+        let (engine, receiver) = Self::for_test();
+        engine.streams.store(false, Ordering::Release);
+        (engine, receiver)
+    }
+
     /// Opens a live stream when the loaded model can stream on this device.
-    pub fn begin(&mut self) -> Option<LiveStream> {
-        if !self.streams {
+    pub fn begin(&self) -> Option<LiveStream> {
+        if !self.streams.load(Ordering::Acquire) {
             return None;
         }
-        let commands = self.commands.as_ref()?.clone();
-        self.next_stream += 1;
-        let id = self.next_stream;
-        commands.send(Command::Begin { stream: id }).ok()?;
+        let id = self.next_stream.fetch_add(1, Ordering::Relaxed) + 1;
+        self.commands.send(Command::Begin { stream: id }).ok()?;
         Some(LiveStream {
             id,
             fed: 0,
             finished: false,
-            commands,
+            commands: self.commands.clone(),
         })
     }
 
     /// Finishes a capture with its complete 16 kHz clip. Without a stream,
     /// or when the stream is unusable, the clip is transcribed offline.
+    #[cfg(not(target_os = "macos"))]
     pub fn finish(&self, stream: Option<LiveStream>, clip: Vec<f32>) -> Result<PendingTranscript> {
-        let commands = self
-            .commands
-            .as_ref()
-            .ok_or_else(|| eyre!("transcription engine stopped"))?;
+        self.finish_with(
+            stream,
+            clip,
+            Box::new(|model, mut clip| {
+                crate::dictation::pad_for_parakeet(&mut clip);
+                model
+                    .transcribe(&clip)
+                    .map_err(|error| format!("{error:#}"))
+            }),
+        )
+    }
+
+    /// Like `finish`, with the caller's offline transcription of the clip.
+    pub fn finish_with(
+        &self,
+        stream: Option<LiveStream>,
+        clip: Vec<f32>,
+        offline: Offline,
+    ) -> Result<PendingTranscript> {
         let (reply, receiver) = mpsc::channel();
         let streamed = stream.is_some();
         let stream = stream.map(|mut stream| {
             stream.finished = true;
             stream.id
         });
-        commands
+        self.commands
             .send(Command::Finish {
                 stream,
                 clip,
+                offline,
                 reply,
             })
             .map_err(|_| eyre!("transcription engine stopped"))?;
@@ -199,12 +257,22 @@ impl TranscriptionEngine {
             streamed,
         })
     }
+
+    /// Runs `work` with the model, after every command already sent. A live
+    /// stream is closed first; its finish then takes the offline path.
+    #[cfg(target_os = "macos")]
+    pub fn run(&self, work: impl FnOnce(&mut Model) + Send + 'static) -> Result<()> {
+        self.commands
+            .send(Command::Run(Box::new(work)))
+            .map_err(|_| eyre!("transcription engine stopped"))
+    }
 }
 
 impl Drop for TranscriptionEngine {
     fn drop(&mut self) {
         self.cancel.cancel();
-        self.commands.take();
+        // A live stream's sender may outlive the engine; stop explicitly.
+        let _ = self.commands.send(Command::Shutdown);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -212,8 +280,9 @@ impl Drop for TranscriptionEngine {
 }
 
 struct Worker {
-    transcriber: LocalTranscriber,
+    model: Model,
     cancel: CancelToken,
+    streams: Arc<AtomicBool>,
 }
 
 /// How a live stream ended inside the worker.
@@ -222,6 +291,7 @@ enum StreamEnd {
     Finished {
         result: Result<String, String>,
         clip: Vec<f32>,
+        offline: Offline,
         reply: Sender<Result<Transcribed, String>>,
         started: Instant,
     },
@@ -232,13 +302,6 @@ enum StreamEnd {
 }
 
 impl Worker {
-    fn new(transcriber: LocalTranscriber, cancel: CancelToken) -> Self {
-        Self {
-            transcriber,
-            cancel,
-        }
-    }
-
     fn run(mut self, commands: Receiver<Command>) {
         let mut next = None;
         loop {
@@ -252,6 +315,7 @@ impl Worker {
                 Command::Finish {
                     stream,
                     clip,
+                    offline,
                     reply,
                 } => {
                     let started = Instant::now();
@@ -261,8 +325,15 @@ impl Worker {
                         Some(_) => Source::Fallback("the live stream was not available".into()),
                         None => Source::Offline,
                     };
-                    self.offline(clip, source, started, reply);
+                    self.offline(clip, offline, source, started, reply);
                 }
+                Command::Run(work) => {
+                    self.cancel.reset();
+                    work(&mut self.model);
+                    self.streams
+                        .store(self.model.stream_options().is_some(), Ordering::Release);
+                }
+                Command::Shutdown => return,
                 // Stale input for a stream that already ended.
                 Command::Feed { .. } | Command::Cancel { .. } => {}
             }
@@ -272,60 +343,61 @@ impl Worker {
     /// Drives one live stream until it finishes, is cancelled, or another
     /// command interrupts it. Returns a command still to be handled.
     fn stream(&mut self, id: u64, commands: &Receiver<Command>) -> Option<Command> {
-        let options = self.transcriber.stream_options().cloned()?;
+        let options = self.model.stream_options().cloned()?;
         self.cancel.reset();
         let begun = Instant::now();
         let mut feed_ms = 0_u128;
         let mut feeds = 0_u32;
-        let ended = self
-            .transcriber
-            .with_stream(&options, &self.cancel, |stream| {
-                let mut failure: Option<String> = None;
-                let mut fed = 0_usize;
-                loop {
-                    let Ok(command) = commands.recv() else {
-                        return StreamEnd::Disconnected;
-                    };
-                    match command {
-                        Command::Feed { stream: s, samples } if s == id => {
-                            fed += samples.len();
-                            if failure.is_none() {
-                                let started = Instant::now();
-                                if let Err(error) = stream.feed(&samples) {
-                                    failure = Some(format!("stream feed failed: {error}"));
-                                }
-                                feed_ms += started.elapsed().as_millis();
-                                feeds += 1;
-                            }
-                        }
-                        Command::Feed { .. } => {}
-                        Command::Cancel { stream: s } if s == id => return StreamEnd::Cancelled,
-                        Command::Cancel { .. } => {}
-                        Command::Finish {
-                            stream: Some(s),
-                            clip,
-                            reply,
-                        } if s == id => {
+        let ended = self.model.with_stream(&options, &self.cancel, |stream| {
+            let mut failure: Option<String> = None;
+            let mut fed = 0_usize;
+            loop {
+                let Ok(command) = commands.recv() else {
+                    return StreamEnd::Disconnected;
+                };
+                match command {
+                    Command::Feed { stream: s, samples } if s == id => {
+                        fed += samples.len();
+                        if failure.is_none() {
                             let started = Instant::now();
-                            let result = match failure {
-                                Some(failure) => Err(failure),
-                                None => finish_stream(stream, &clip, fed),
-                            };
-                            return StreamEnd::Finished {
-                                result,
-                                clip,
-                                reply,
-                                started,
-                            };
+                            if let Err(error) = stream.feed(&samples) {
+                                failure = Some(format!("stream feed failed: {error}"));
+                            }
+                            feed_ms += started.elapsed().as_millis();
+                            feeds += 1;
                         }
-                        other => return StreamEnd::Interrupted(other),
                     }
+                    Command::Feed { .. } => {}
+                    Command::Cancel { stream: s } if s == id => return StreamEnd::Cancelled,
+                    Command::Cancel { .. } => {}
+                    Command::Finish {
+                        stream: Some(s),
+                        clip,
+                        offline,
+                        reply,
+                    } if s == id => {
+                        let started = Instant::now();
+                        let result = match failure {
+                            Some(failure) => Err(failure),
+                            None => finish_stream(stream, &clip, fed),
+                        };
+                        return StreamEnd::Finished {
+                            result,
+                            clip,
+                            offline,
+                            reply,
+                            started,
+                        };
+                    }
+                    other => return StreamEnd::Interrupted(other),
                 }
-            });
+            }
+        });
         match ended {
             Ok(StreamEnd::Finished {
                 result,
                 clip,
+                offline,
                 reply,
                 started,
             }) => {
@@ -347,7 +419,7 @@ impl Worker {
                     }
                     Err(reason) => {
                         tracing::warn!(%reason, "live stream unusable; transcribing the full clip");
-                        self.offline(clip, Source::Fallback(reason), started, reply);
+                        self.offline(clip, offline, Source::Fallback(reason), started, reply);
                     }
                 }
                 None
@@ -364,22 +436,20 @@ impl Worker {
     fn offline(
         &mut self,
         clip: Vec<f32>,
+        offline: Offline,
         source: Source,
         started: Instant,
         reply: Sender<Result<Transcribed, String>>,
     ) {
         self.cancel.reset();
-        let mut samples = clip;
-        crate::dictation::pad_for_parakeet(&mut samples);
-        let result = self
-            .transcriber
-            .transcribe(&samples)
-            .map(|text| Transcribed {
-                text: text.trim().to_string(),
-                source,
-                finish_ms: started.elapsed().as_millis() as u64,
-            })
-            .map_err(|error| format!("{error:#}"));
+        let result = offline(&mut self.model, clip).map(|text| Transcribed {
+            text: text.trim().to_string(),
+            source,
+            finish_ms: started.elapsed().as_millis() as u64,
+        });
+        // An offline run may switch the model (macOS activates a selection).
+        self.streams
+            .store(self.model.stream_options().is_some(), Ordering::Release);
         let _ = reply.send(result);
     }
 }
@@ -422,5 +492,122 @@ mod tests {
         assert_eq!(Source::Stream.label(), "stream");
         assert_eq!(Source::Offline.label(), "offline");
         assert_eq!(Source::Fallback("x".into()).label(), "fallback");
+    }
+
+    #[test]
+    fn streams_send_their_audio_in_order_and_cancel_when_dropped() {
+        let (engine, commands) = TranscriptionEngine::for_test();
+        let mut stream = engine.begin().expect("the test engine streams");
+        stream.feed(&[0.1; 3]);
+        stream.feed(&[]);
+        stream.feed(&[0.2; 2]);
+        assert_eq!(stream.fed(), 5);
+        drop(stream);
+        let finished = engine.begin().expect("the test engine streams");
+        let pending = engine
+            .finish_with(
+                Some(finished),
+                vec![0.0; 7],
+                Box::new(|_, _| Ok(String::new())),
+            )
+            .unwrap();
+        assert!(pending.streamed);
+        let received = commands.try_iter().collect::<Vec<_>>();
+        assert!(matches!(
+            received.as_slice(),
+            [
+                Command::Begin { stream: 1 },
+                Command::Feed { stream: 1, samples: first },
+                Command::Feed { stream: 1, samples: second },
+                Command::Cancel { stream: 1 },
+                Command::Begin { stream: 2 },
+                Command::Finish { stream: Some(2), clip, .. },
+            ] if first.len() == 3 && second.len() == 2 && clip.len() == 7
+        ));
+    }
+
+    /// A real engine thread over macOS's warm transcriber with no model
+    /// loaded: it cannot stream, so every finish runs the offline closure.
+    #[cfg(target_os = "macos")]
+    mod worker {
+        use super::*;
+
+        fn offline_text(text: &'static str) -> Offline {
+            Box::new(move |_, clip| Ok(format!("  {text} {} ", clip.len())))
+        }
+
+        #[test]
+        fn a_finish_without_a_stream_transcribes_the_clip_offline() {
+            let engine = TranscriptionEngine::start(Model::default()).unwrap();
+            assert!(engine.begin().is_none());
+            let transcribed = engine
+                .finish_with(None, vec![0.0; 5], offline_text("whole"))
+                .unwrap()
+                .wait()
+                .unwrap();
+            assert_eq!(transcribed.text, "whole 5");
+            assert_eq!(transcribed.source, Source::Offline);
+        }
+
+        #[test]
+        fn an_unusable_stream_falls_back_to_the_complete_clip() {
+            let engine = TranscriptionEngine::start(Model::default()).unwrap();
+            // Claim streaming so a stream opens that the model cannot serve.
+            engine.streams.store(true, Ordering::Release);
+            let mut stream = engine.begin().expect("streaming was claimed");
+            stream.feed(&[0.0; 3]);
+            let transcribed = engine
+                .finish_with(Some(stream), vec![0.0; 9], offline_text("fallback"))
+                .unwrap()
+                .wait()
+                .unwrap();
+            assert_eq!(transcribed.text, "fallback 9");
+            assert!(matches!(transcribed.source, Source::Fallback(_)));
+            assert!(!engine.streams.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn work_runs_in_order_and_failures_reach_the_caller() {
+            let engine = TranscriptionEngine::start(Model::default()).unwrap();
+            let (order, ran) = mpsc::channel();
+            let first = order.clone();
+            engine.run(move |_| first.send("run").unwrap()).unwrap();
+            let failed = engine
+                .finish_with(
+                    None,
+                    Vec::new(),
+                    Box::new(move |_, _| {
+                        order.send("finish").unwrap();
+                        Err("dictation was cancelled".into())
+                    }),
+                )
+                .unwrap();
+            assert_eq!(failed.wait().unwrap_err(), "dictation was cancelled");
+            assert_eq!(ran.try_iter().collect::<Vec<_>>(), ["run", "finish"]);
+        }
+
+        #[test]
+        fn dropping_the_engine_stops_despite_an_open_stream() {
+            let engine = TranscriptionEngine::start(Model::default()).unwrap();
+            engine.streams.store(true, Ordering::Release);
+            let stream = engine.begin().expect("streaming was claimed");
+            drop(engine);
+            drop(stream);
+        }
+    }
+
+    #[test]
+    fn an_engine_whose_model_cannot_stream_opens_no_stream() {
+        let (engine, commands) = TranscriptionEngine::for_test();
+        engine.streams.store(false, Ordering::Release);
+        assert!(engine.begin().is_none());
+        let pending = engine
+            .finish_with(None, vec![0.0; 7], Box::new(|_, _| Ok(String::new())))
+            .unwrap();
+        assert!(!pending.streamed);
+        assert!(matches!(
+            commands.try_iter().collect::<Vec<_>>().as_slice(),
+            [Command::Finish { stream: None, .. }]
+        ));
     }
 }
