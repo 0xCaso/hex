@@ -364,7 +364,7 @@ impl Stroke {
         self.t1 = self.t1.saturating_sub(ms);
         if lost > 0 {
             let mut kept = Vec::with_capacity(self.pts.len());
-            for chunk in self.pts.chunks_exact(3) {
+            for chunk in self.pts.as_chunks::<3>().0 {
                 let dt = i64::from(chunk[2]) - lost;
                 if dt >= 0 {
                     kept.extend_from_slice(&[chunk[0], chunk[1], dt as i32]);
@@ -378,7 +378,9 @@ impl Stroke {
     /// Returns normalized `(x, y)` points in `0.0..=1.0`.
     pub fn normalized_points(&self) -> Vec<[f32; 2]> {
         self.pts
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| [c[0] as f32 / SCALE as f32, c[1] as f32 / SCALE as f32])
             .collect()
     }
@@ -386,7 +388,9 @@ impl Stroke {
     /// Returns `(x, y, absolute_t_ms)` points.
     pub fn timed_points(&self) -> Vec<(f32, f32, u64)> {
         self.pts
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| {
                 (
                     c[0] as f32 / SCALE as f32,

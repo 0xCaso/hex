@@ -5,7 +5,37 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use crate::model::{InteractionEvent, Keyframe, KeyframeReason, ScrawlBundle, parse_clock_ms};
+use crate::model::{
+    InteractionEvent, Keyframe, KeyframeReason, RgbaFrame, ScrawlBundle, parse_clock_ms,
+};
+
+/// Box-filtered copy at most `max_w` wide.
+pub fn downscale(frame: &RgbaFrame, max_w: u32) -> RgbaFrame {
+    let f = frame.width.div_ceil(max_w.max(1)).max(1);
+    if f == 1 {
+        return frame.clone();
+    }
+    let (w, h) = (frame.width / f, frame.height / f);
+    let mut rgba = vec![0_u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0_u32; 4];
+            for dy in 0..f {
+                let row = ((y * f + dy) * frame.width + x * f) as usize * 4;
+                for px in frame.rgba[row..row + f as usize * 4].as_chunks::<4>().0 {
+                    for (a, v) in acc.iter_mut().zip(px) {
+                        *a += u32::from(*v);
+                    }
+                }
+            }
+            let i = ((y * w + x) * 4) as usize;
+            for c in 0..4 {
+                rgba[i + c] = (acc[c] / (f * f)) as u8;
+            }
+        }
+    }
+    RgbaFrame::new(frame.t_ms, w, h, rgba)
+}
 
 pub struct ZoomSheet {
     pub path: PathBuf,
@@ -181,6 +211,7 @@ fn crop_at(bundle: &ScrawlBundle, t: u64) -> Option<crate::autocrop::Rect> {
 }
 
 /// `cropped`: in an auto-cropped bundle, crop each cell like the nearest keyframe.
+/// `decode_frames(video_path, times_ms, video_offset_ms, max_edge)` supplies the decoded video frames.
 pub fn zoom(
     dir: &Path,
     bundle: &ScrawlBundle,
@@ -188,27 +219,14 @@ pub fn zoom(
     span_ms: u64,
     count: usize,
     cropped: bool,
+    mut decode_frames: impl FnMut(&Path, &[u64], u64, u32) -> Result<Vec<RgbaFrame>>,
 ) -> Result<ZoomSheet> {
-    let pending = dir.join(crate::handoff::MEDIA_PENDING);
-    // A bundle copied from another Mac gets its video a few seconds after the rest; wait for it.
-    let waited = std::time::Instant::now();
-    while pending.exists() && waited.elapsed() < std::time::Duration::from_secs(120) {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
     let video = bundle
         .video
         .as_ref()
         .map(|v| dir.join(v))
         .filter(|p| p.is_file())
-        .with_context(|| {
-            if pending.exists() {
-                "The bundle's video is still copying from the other Mac; try again in a minute"
-                    .to_owned()
-            } else {
-                crate::retention::missing_media_reason(dir)
-                    .unwrap_or_else(|| "The bundle has no video to zoom into".to_owned())
-            }
-        })?;
+        .with_context(|| "The bundle has no video to zoom into".to_owned())?;
     let at_ms = resolve_moment(bundle, at)?;
     ensure!(
         at_ms <= bundle.duration_ms,
@@ -227,18 +245,18 @@ pub fn zoom(
         // screens doesn't sit in memory.
         let mut out = Vec::with_capacity(times.len());
         for (chunk, rects) in times.chunks(6).zip(crops.chunks(6)) {
-            let decoded = crate::movie_frames_at(&video, chunk, bundle.video_offset_ms, 0)?;
+            let decoded = decode_frames(&video, chunk, bundle.video_offset_ms, 0)?;
             for (frame, rect) in decoded.into_iter().zip(rects) {
                 let frame = match rect {
                     Some(r) => crate::autocrop::crop_frame(&frame, *r),
                     None => frame,
                 };
-                out.push(crate::autocrop_lab::downscale(&frame, 1280));
+                out.push(downscale(&frame, 1280));
             }
         }
         out
     } else {
-        crate::movie_frames_at(&video, &times, bundle.video_offset_ms, 900)?
+        decode_frames(&video, &times, bundle.video_offset_ms, 900)?
     };
     ensure!(!frames.is_empty(), "No frames could be decoded");
     let mut cells = Vec::with_capacity(frames.len());

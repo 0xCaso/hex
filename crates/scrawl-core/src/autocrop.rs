@@ -230,11 +230,6 @@ impl Settings {
             Some(other) => Some(serde_json::from_value(other.clone()).unwrap_or_default()),
         }
     }
-
-    pub fn configured() -> Option<Self> {
-        let config = crate::handoff::load_config_from(&crate::handoff::default_config_path());
-        Self::from_config(config.autocrop.as_ref())
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2227,6 +2222,285 @@ mod tests {
             );
             assert!(cropped.is_none());
             assert_eq!(frames[0].1.width, 1728);
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Truth {
+        scenario: String,
+        #[serde(default)]
+        description: String,
+        screen: [f32; 2],
+        whole: [f32; 4],
+        spans: Vec<TruthSpan>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TruthSpan {
+        t0: u64,
+        t1: u64,
+        subject: String,
+        ideal: [f32; 4],
+        #[serde(default)]
+        targets: Vec<[f32; 4]>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Case {
+        name: String,
+        truth: Truth,
+        px_per_pt: f32,
+        keyframes: Vec<CaseKeyframe>,
+        input: Input,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CaseKeyframe {
+        index: usize,
+        t: u64,
+        must: Vec<Rect>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct KeyframeScore {
+        index: usize,
+        covered: bool,
+        score: f32,
+        rect: Rect,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct CaseScore {
+        name: String,
+        score: f32,
+        keyframes: Vec<KeyframeScore>,
+    }
+
+    fn norm_rect(b: [f32; 4], screen: [f32; 2]) -> Rect {
+        [
+            b[0] / screen[0],
+            b[1] / screen[1],
+            (b[0] + b[2]) / screen[0],
+            (b[1] + b[3]) / screen[1],
+        ]
+    }
+
+    fn resolution(r: Rect, screen: [f32; 2], px_per_pt: f32) -> f32 {
+        let (w, h) = (
+            (r[2] - r[0]) * screen[0] * px_per_pt,
+            (r[3] - r[1]) * screen[1] * px_per_pt,
+        );
+        let cell = if h > w { 440.0 } else { 640.0 };
+        let scale = (cell / w).min(960.0 / h);
+        let shown = scale.min(1.0) * px_per_pt;
+        let upscale = (scale - 1.0).max(0.0);
+        ((shown / 0.8).min(1.0) - 0.5 * upscale).clamp(0.0, 1.0)
+    }
+
+    fn score_case(case: &Case, crops: &[Crop]) -> CaseScore {
+        let screen = case.truth.screen;
+        let mut scores = Vec::new();
+        let mut subjects = Vec::new();
+        for (kf, crop) in case.keyframes.iter().zip(crops) {
+            let span = case
+                .truth
+                .spans
+                .iter()
+                .find(|s| s.t0 <= kf.t && kf.t < s.t1)
+                .or_else(|| case.truth.spans.last());
+            let Some(span) = span else { continue };
+            let ideal = norm_rect(span.ideal, screen);
+            let targets: Vec<Rect> = span.targets.iter().map(|t| norm_rect(*t, screen)).collect();
+            let r = crop.rect;
+            let tol = [2.0 / screen[0], 2.0 / screen[1]];
+            let inside = |m: &Rect| {
+                m[0] >= r[0] - tol[0]
+                    && m[1] >= r[1] - tol[1]
+                    && m[2] <= r[2] + tol[0]
+                    && m[3] <= r[3] + tol[1]
+            };
+            let covered = kf.must.iter().chain(&targets).all(inside);
+            let context = if targets.is_empty() {
+                1.0
+            } else {
+                targets
+                    .iter()
+                    .map(|t| {
+                        let m = (0.2 * ((t[2] - t[0]) * screen[0]).max((t[3] - t[1]) * screen[1]))
+                            .max(24.0);
+                        let grown = intersect(
+                            [
+                                t[0] - m / screen[0],
+                                t[1] - m / screen[1],
+                                t[2] + m / screen[0],
+                                t[3] + m / screen[1],
+                            ],
+                            FULL,
+                        );
+                        area(intersect(grown, r)) / area(grown).max(1e-9)
+                    })
+                    .sum::<f32>()
+                    / targets.len() as f32
+            };
+            let iou_val = iou(r, ideal);
+            let precision = area(intersect(r, ideal)) / area(r).max(1e-9);
+            let res = resolution(r, screen, case.px_per_pt);
+            let score = if covered {
+                0.45 * iou_val + 0.2 * context + 0.15 * res + 0.2 * precision
+            } else {
+                0.0
+            };
+            subjects.push(span.subject.clone());
+            scores.push(KeyframeScore {
+                index: kf.index,
+                covered,
+                score,
+                rect: r,
+            });
+        }
+        let pairs: Vec<f32> = (1..scores.len())
+            .filter(|&i| subjects[i] == subjects[i - 1])
+            .map(|i| iou(scores[i].rect, scores[i - 1].rect))
+            .collect();
+        let stability = if pairs.is_empty() {
+            1.0
+        } else {
+            pairs.iter().sum::<f32>() / pairs.len() as f32
+        };
+        let n = scores.len().max(1) as f32;
+        let mean_val = scores.iter().map(|s| s.score).sum::<f32>() / n;
+        CaseScore {
+            name: case.name.clone(),
+            score: 0.85 * mean_val + 0.15 * stability,
+            keyframes: scores,
+        }
+    }
+
+    fn corpus() -> Vec<Case> {
+        serde_json::from_str(include_str!("autocrop-corpus.json")).unwrap()
+    }
+
+    fn find_case<'a>(cases: &'a [Case], name: &str) -> &'a Case {
+        cases.iter().find(|c| c.name == name).unwrap()
+    }
+
+    #[test]
+    fn default_crops_keep_every_keyframes_activity_and_beat_the_full_frame() {
+        let cases = corpus();
+        assert!(cases.len() >= 12);
+        let settings = Settings::default();
+        let scores: Vec<CaseScore> = cases
+            .iter()
+            .map(|c| score_case(c, &compute(&c.input, &settings)))
+            .collect();
+        let uncropped: Vec<CaseScore> = cases
+            .iter()
+            .map(|c| {
+                let full_crops: Vec<Crop> = c
+                    .keyframes
+                    .iter()
+                    .map(|_| Crop {
+                        rect: FULL,
+                        kind: CropKind::Full,
+                        reason: "uncropped".into(),
+                        apps: Vec::new(),
+                        core: None,
+                        need: None,
+                        within: None,
+                        slice: [0, 0],
+                        shares: Vec::new(),
+                        snapped: Vec::new(),
+                        outliers: Vec::new(),
+                        used: Vec::new(),
+                        merged: 0,
+                        grown: false,
+                    })
+                    .collect();
+                score_case(c, &full_crops)
+            })
+            .collect();
+        for (s, u) in scores.iter().zip(&uncropped) {
+            for k in &s.keyframes {
+                assert!(
+                    k.covered,
+                    "{} #{} cuts off its activity: {:?}",
+                    s.name, k.index, k.rect
+                );
+            }
+            assert!(
+                s.score > u.score,
+                "{}: {:.3} vs uncropped {:.3}",
+                s.name,
+                s.score,
+                u.score
+            );
+        }
+        let m = scores.iter().map(|s| s.score).sum::<f32>() / scores.len() as f32;
+        assert!(m >= 0.85, "corpus mean {m:.3}");
+    }
+
+    #[test]
+    fn crops_snap_to_the_window_in_use() {
+        let cases = corpus();
+        for name in [
+            "side-by-side",
+            "overlapping-front",
+            "two-windows",
+            "three-window-hop",
+        ] {
+            let c = find_case(&cases, name);
+            let crops = compute(&c.input, &Settings::default());
+            for (kf, crop) in c.keyframes.iter().zip(&crops) {
+                let span = c
+                    .truth
+                    .spans
+                    .iter()
+                    .find(|s| s.t0 <= kf.t && kf.t < s.t1)
+                    .unwrap();
+                let iou_val = iou(crop.rect, norm_rect(span.ideal, c.truth.screen));
+                assert!(
+                    iou_val > 0.9,
+                    "{name} #{}: {} ({iou_val:.2})",
+                    kf.index,
+                    crop.reason
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wandering_cursor_does_not_grow_the_crop() {
+        let cases = corpus();
+        let c = find_case(&cases, "stray-cursor");
+        for crop in compute(&c.input, &Settings::default()) {
+            assert!(crop.rect[3] < 0.85 && crop.rect[2] < 0.7, "{:?}", crop.rect);
+            assert!(!crop.outliers.is_empty() || crop.kind == CropKind::Window);
+        }
+    }
+
+    #[test]
+    fn a_menu_opened_from_the_menu_bar_is_in_the_crop() {
+        let cases = corpus();
+        let c = find_case(&cases, "menu-bar");
+        let crops = compute(&c.input, &Settings::default());
+        let r = crops[0].rect;
+        assert!(r[1] <= 0.001, "{r:?}");
+        assert!(crops[0].apps == ["Finder"], "{:?}", crops[0].apps);
+    }
+
+    #[test]
+    fn inside_a_huge_window_the_crop_zooms_in_on_the_activity() {
+        let cases = corpus();
+        for name in ["maximized-terminal", "tiny-badge", "fullscreen-app"] {
+            let c = find_case(&cases, name);
+            for crop in compute(&c.input, &Settings::default()) {
+                assert_eq!(crop.kind, CropKind::Focus, "{name}: {}", crop.reason);
+                assert!(area(crop.rect) < 0.5, "{name}: {:?}", crop.rect);
+            }
         }
     }
 }

@@ -216,150 +216,37 @@ pub fn owned_window_at(
         .is_some_and(|w| w.pid == own_pid)
 }
 
-/// Reads the on-screen window list (front to back) from the window server.
-#[cfg(target_os = "macos")]
-pub fn raw_windows() -> Vec<RawWindow> {
-    use core_foundation::base::{CFType, TCFType};
-    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
-    use core_foundation::number::CFNumber;
-    use core_foundation::string::CFString;
-    use core_graphics::window::{
-        copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-        kCGWindowListOptionOnScreenOnly,
-    };
-
-    let Some(list) = copy_window_info(
-        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-        kCGNullWindowID,
-    ) else {
-        return Vec::new();
-    };
-    let key = CFString::from_static_string;
-    let (k_number, k_pid, k_owner, k_name, k_layer, k_alpha, k_bounds) = (
-        key("kCGWindowNumber"),
-        key("kCGWindowOwnerPID"),
-        key("kCGWindowOwnerName"),
-        key("kCGWindowName"),
-        key("kCGWindowLayer"),
-        key("kCGWindowAlpha"),
-        key("kCGWindowBounds"),
-    );
-    let (k_x, k_y, k_w, k_h) = (key("X"), key("Y"), key("Width"), key("Height"));
-    let number = |dict: &CFDictionary<CFString, CFType>, k: &CFString| -> Option<f64> {
-        dict.find(k)?.downcast::<CFNumber>()?.to_f64()
-    };
-    let string = |dict: &CFDictionary<CFString, CFType>, k: &CFString| -> String {
-        dict.find(k)
-            .and_then(|v| v.downcast::<CFString>())
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-    };
-    let mut out = Vec::new();
-    for item in list.iter() {
-        let ptr = *item as CFDictionaryRef;
-        if ptr.is_null() {
-            continue;
-        }
-        let dict: CFDictionary<CFString, CFType> =
-            unsafe { CFDictionary::wrap_under_get_rule(ptr) };
-        let Some(bounds) = dict
-            .find(&k_bounds)
-            .and_then(|v| v.downcast::<CFDictionary>())
-        else {
-            continue;
-        };
-        let bounds: CFDictionary<CFString, CFType> =
-            unsafe { CFDictionary::wrap_under_get_rule(bounds.as_concrete_TypeRef()) };
-        out.push(RawWindow {
-            id: number(&dict, &k_number).unwrap_or(0.0) as u32,
-            pid: number(&dict, &k_pid).unwrap_or(0.0) as i32,
-            owner: string(&dict, &k_owner),
-            title: string(&dict, &k_name),
-            bounds: [
-                number(&bounds, &k_x).unwrap_or(0.0),
-                number(&bounds, &k_y).unwrap_or(0.0),
-                number(&bounds, &k_w).unwrap_or(0.0),
-                number(&bounds, &k_h).unwrap_or(0.0),
-            ],
-            layer: number(&dict, &k_layer).unwrap_or(0.0) as i32,
-            alpha: number(&dict, &k_alpha).unwrap_or(1.0),
-        });
-    }
-    out
-}
-
-fn app_meta_of(pid: i32) -> AppMeta {
-    use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
-    match NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
-        Some(app) => AppMeta {
-            bundle_id: app.bundleIdentifier().map(|b| b.to_string()),
-            regular: app.activationPolicy() == NSApplicationActivationPolicy::Regular,
-        },
-        None => AppMeta {
-            bundle_id: None,
-            regular: false,
-        },
+/// Platform adapter for sampling on-screen windows, focus, app metadata, and cursor coordinates.
+pub trait WindowProbe: Send + 'static {
+    /// Returns the current on-screen window list (front to back) in global points.
+    fn raw_windows(&mut self) -> Vec<RawWindow>;
+    /// Returns the process ID of the current frontmost non-self application.
+    fn frontmost_external_pid(&mut self) -> Option<i32>;
+    /// Returns bundle metadata for a process ID.
+    fn app_meta(&mut self, pid: i32) -> AppMeta;
+    /// Returns the current global cursor position `[x, y]` in points.
+    fn cursor_screen(&mut self) -> Option<[f32; 2]>;
+    /// Process ID of our own host app (excluded from window snapshots).
+    fn own_pid(&self) -> i32 {
+        std::process::id() as i32
     }
 }
 
-/// The strip the Dock reserves on the display at `frame` (global top-left points), from the
-/// difference between the screen's frame and visible frame. `None` when the Dock hides or off
-/// the main thread (`NSScreen` is main-thread only).
-pub fn dock_rect(frame: TargetFrame) -> Option<[f64; 4]> {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSScreen;
-    let mtm = MainThreadMarker::new()?;
-    let screens = NSScreen::screens(mtm);
-    // AppKit's origin is the primary display's bottom-left corner, y up.
-    let primary_h = screens.firstObject()?.frame().size.height;
-    let flip = |r: objc2_foundation::NSRect| {
-        [
-            r.origin.x,
-            primary_h - r.origin.y - r.size.height,
-            r.size.width,
-            r.size.height,
-        ]
-    };
-    let screen = screens.iter().find(|s| {
-        let [x, y, w, h] = flip(s.frame());
-        (x - frame.x).abs() < 1.0
-            && (y - frame.y).abs() < 1.0
-            && (w - frame.width).abs() < 1.0
-            && (h - frame.height).abs() < 1.0
-    })?;
-    let [fx, fy, fw, fh] = flip(screen.frame());
-    let [vx, vy, vw, vh] = flip(screen.visibleFrame());
-    let (left, right, bottom) = (vx - fx, (fx + fw) - (vx + vw), (fy + fh) - (vy + vh));
-    // A hidden Dock still leaves a few points at the edge.
-    let min = 8.0;
-    if bottom >= min {
-        Some([fx, vy + vh, fw, bottom])
-    } else if left >= min {
-        Some([fx, vy, left, vh])
-    } else if right >= min {
-        Some([vx + vw, vy, right, vh])
-    } else {
-        None
-    }
-}
-
-/// One timed snapshot of the windows overlapping `frame`.
-pub fn snapshot(
+/// One timed snapshot of the windows overlapping `frame` using `probe`.
+pub fn snapshot<P: WindowProbe + ?Sized>(
+    probe: &mut P,
     frame: TargetFrame,
     dock: Option<[f64; 4]>,
     cache: &mut HashMap<i32, AppMeta>,
 ) -> Vec<WindowEntry> {
-    objc2::rc::autoreleasepool(|_| {
-        let raw = raw_windows();
-        let front = crate::capture::frontmost_external_pid();
-        filter_windows(
-            &raw,
-            frame,
-            std::process::id() as i32,
-            front,
-            dock,
-            &mut |pid| cache.entry(pid).or_insert_with(|| app_meta_of(pid)).clone(),
-        )
+    let raw = probe.raw_windows();
+    let front = probe.frontmost_external_pid();
+    let own = probe.own_pid();
+    filter_windows(&raw, frame, own, front, dock, &mut |pid| {
+        cache
+            .entry(pid)
+            .or_insert_with(|| probe.app_meta(pid))
+            .clone()
     })
 }
 
@@ -374,38 +261,32 @@ pub struct WindowLogger {
 }
 
 impl WindowLogger {
-    /// Call on the main thread, so the Dock's strip can be read from `NSScreen`.
-    pub fn start(frame: TargetFrame, started_at: Instant, request: Arc<AtomicBool>) -> Self {
+    /// Starts logging windows and cursor positions overlapping `frame` using `probe`.
+    pub fn start<P: WindowProbe>(
+        frame: TargetFrame,
+        dock: Option<[f64; 4]>,
+        started_at: Instant,
+        request: Arc<AtomicBool>,
+        probe: P,
+    ) -> Self {
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopping);
-        let dock = dock_rect(frame);
         let worker = thread::Builder::new()
             .name("scrawl-window-log".into())
-            .spawn(move || run(frame, dock, started_at, &request, &stop))
+            .spawn(move || run(probe, frame, dock, started_at, &request, &stop))
             .ok();
         Self { stopping, worker }
     }
 
     pub fn stop(mut self) -> ActivityLog {
         self.stopping.store(true, Ordering::Release);
-        let log = self
-            .worker
+        self.worker
             .take()
             .and_then(|w| {
                 w.thread().unpark();
                 w.join().ok()
             })
-            .unwrap_or_default();
-        if log.snapshot_calls > 0 {
-            crate::capture::scrawl_log(format!(
-                "Window log: {} snapshots taken, {} stored, {:.2} ms each; {} cursor samples",
-                log.snapshot_calls,
-                log.windows.len(),
-                log.snapshot_time.as_secs_f64() * 1_000.0 / f64::from(log.snapshot_calls),
-                log.cursor.len()
-            ));
-        }
-        log
+            .unwrap_or_default()
     }
 }
 
@@ -418,7 +299,8 @@ impl Drop for WindowLogger {
     }
 }
 
-fn run(
+fn run<P: WindowProbe>(
+    mut probe: P,
     frame: TargetFrame,
     dock: Option<[f64; 4]>,
     started_at: Instant,
@@ -430,9 +312,9 @@ fn run(
     let mut last_snapshot: Option<Instant> = None;
     let mut last_front = None;
     let mut cursor_at_snapshot: Option<[f32; 2]> = None;
-    let mut take = |log: &mut ActivityLog, t: u64| {
+    let mut take = |probe: &mut P, log: &mut ActivityLog, t: u64| {
         let began = Instant::now();
-        let windows = snapshot(frame, dock, &mut cache);
+        let windows = snapshot(probe, frame, dock, &mut cache);
         log.snapshot_calls += 1;
         log.snapshot_time += began.elapsed();
         log.push_windows(t, windows);
@@ -440,11 +322,11 @@ fn run(
     loop {
         let finishing = stopping.load(Ordering::Acquire);
         let t = started_at.elapsed().as_millis() as u64;
-        let cursor = crate::capture::current_mouse_screen();
+        let cursor = probe.cursor_screen();
         if let Some([x, y]) = cursor {
             log.push_cursor(t, f64::from(x) - frame.x, f64::from(y) - frame.y, frame);
         }
-        let front = crate::capture::frontmost_external_pid();
+        let front = probe.frontmost_external_pid();
         let since = last_snapshot.map(|s| s.elapsed());
         let moved = cursor != cursor_at_snapshot;
         let due = !finishing
@@ -454,7 +336,7 @@ fn run(
                 || (moved && since.is_some_and(|s| s >= MOVING_INTERVAL))
                 || since.is_some_and(|s| s >= IDLE_INTERVAL));
         if due {
-            take(&mut log, t);
+            take(&mut probe, &mut log, t);
             last_snapshot = Some(Instant::now());
             last_front = front;
             cursor_at_snapshot = cursor;
@@ -546,10 +428,43 @@ mod tests {
         );
     }
 
+    struct TestProbe;
+    impl WindowProbe for TestProbe {
+        fn raw_windows(&mut self) -> Vec<RawWindow> {
+            vec![RawWindow {
+                id: 1,
+                pid: 42,
+                owner: "Safari".into(),
+                title: "Test".into(),
+                bounds: [0.0, 0.0, 400.0, 300.0],
+                layer: 0,
+                alpha: 1.0,
+            }]
+        }
+        fn frontmost_external_pid(&mut self) -> Option<i32> {
+            Some(42)
+        }
+        fn app_meta(&mut self, _pid: i32) -> AppMeta {
+            AppMeta {
+                bundle_id: Some("com.apple.Safari".into()),
+                regular: true,
+            }
+        }
+        fn cursor_screen(&mut self) -> Option<[f32; 2]> {
+            Some([100.0, 100.0])
+        }
+    }
+
     #[test]
     fn logger_snapshots_at_start_and_right_after_a_request() {
         let request = Arc::new(AtomicBool::new(false));
-        let logger = WindowLogger::start(frame(), Instant::now(), Arc::clone(&request));
+        let logger = WindowLogger::start(
+            frame(),
+            None,
+            Instant::now(),
+            Arc::clone(&request),
+            TestProbe,
+        );
         thread::sleep(Duration::from_millis(150));
         request.store(true, Ordering::Release);
         thread::sleep(Duration::from_millis(150));

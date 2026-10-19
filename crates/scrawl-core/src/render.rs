@@ -58,7 +58,7 @@ pub fn decode_png<R: std::io::BufRead + std::io::Seek>(source: R) -> anyhow::Res
     match info.color_type {
         png::ColorType::Rgba => rgba.extend_from_slice(data),
         png::ColorType::Rgb => {
-            for p in data.chunks_exact(3) {
+            for p in data.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
             }
         }
@@ -68,7 +68,7 @@ pub fn decode_png<R: std::io::BufRead + std::io::Seek>(source: R) -> anyhow::Res
             }
         }
         png::ColorType::GrayscaleAlpha => {
-            for p in data.chunks_exact(2) {
+            for p in data.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[p[0], p[0], p[0], p[1]]);
             }
         }
@@ -79,7 +79,7 @@ pub fn decode_png<R: std::io::BufRead + std::io::Seek>(source: R) -> anyhow::Res
 
 fn solid(width: u32, height: u32, color: Color) -> RgbaFrame {
     let mut rgba = vec![0; width as usize * height as usize * 4];
-    for p in rgba.chunks_exact_mut(4) {
+    for p in rgba.as_chunks_mut::<4>().0 {
         p.copy_from_slice(&color);
     }
     RgbaFrame::new(0, width, height, rgba)
@@ -147,8 +147,9 @@ fn rounded(frame: &mut RgbaFrame, rect: [f32; 4], radius: f32, color: Color) {
                 (left, left)
             };
         let row = py as usize * frame.width as usize * 4;
-        for pixel in
-            frame.rgba[row + start as usize * 4..row + end as usize * 4].chunks_exact_mut(4)
+        for pixel in frame.rgba[row + start as usize * 4..row + end as usize * 4]
+            .as_chunks_mut::<4>()
+            .0
         {
             pixel.copy_from_slice(&color);
         }
@@ -501,8 +502,8 @@ fn draw_keyframe_badge(
     }
     let badge_k = badge_k.max(0.45);
     let num_label = format!("#{}", keyframe.index);
-    let time_label = (!keyframe.file.is_empty() || !keyframe.event.is_empty())
-        .then(|| format_clock(keyframe.t));
+    let time_label =
+        (!keyframe.file.is_empty() || !keyframe.event.is_empty()).then(|| format_clock(keyframe.t));
     let num_size = 15.5 * badge_k;
     let time_size = 12.5 * badge_k;
     let badge_h = 28.0 * badge_k;
@@ -522,8 +523,7 @@ fn draw_keyframe_badge(
     };
 
     let margin = 7.0 * badge_k;
-    let dodge =
-        dodge_top_right || keyframe.cursor.is_some_and(|[x, y]| x < 0.30 && y < 0.18);
+    let dodge = dodge_top_right || keyframe.cursor.is_some_and(|[x, y]| x < 0.30 && y < 0.18);
     let bx = if dodge {
         (rx + rw - badge_w - margin).max(rx + margin)
     } else {
@@ -716,6 +716,7 @@ const SHEET_MAX_PIXELS: f32 = 1_560_000.0;
 /// Partition `aspects` (in chronological order) into justified rows of 1..=6 frames so that
 /// per-frame displayed areas are balanced across wide and tall crops and the overall sheet aspect
 /// ratio sits near the vision-model sweet spot.
+#[allow(clippy::single_range_in_vec_init, clippy::too_many_arguments)]
 fn plan_contact_sheet_rows(aspects: &[f32]) -> Vec<std::ops::Range<usize>> {
     let n = aspects.len();
     if n == 0 {
@@ -792,8 +793,7 @@ fn plan_contact_sheet_rows(aspects: &[f32]) -> Vec<std::ops::Range<usize>> {
 
             let mut sorted_areas = areas;
             sorted_areas[..n].sort_by(f32::total_cmp);
-            let median_area =
-                (sorted_areas[(n - 1) / 2] + sorted_areas[n / 2]).max(1e-6) * 0.5;
+            let median_area = (sorted_areas[(n - 1) / 2] + sorted_areas[n / 2]).max(1e-6) * 0.5;
             let mut under_pen = 0.0f32;
             for &ar in &areas[..n] {
                 let ratio = ar / median_area;
@@ -1530,86 +1530,7 @@ fn wrap_text_indented(
     lines
 }
 
-#[cfg(target_os = "macos")]
-mod native_text {
-    use core_foundation::{
-        attributed_string::CFMutableAttributedString,
-        base::{CFRange, TCFType},
-        boolean::CFBoolean,
-        string::CFString,
-    };
-    use core_graphics::{
-        base::kCGImageAlphaNone,
-        color_space::CGColorSpace,
-        context::{CGContext, CGTextDrawingMode},
-    };
-    use core_text::{
-        font::{self, CTFont},
-        line::CTLine,
-        string_attributes::{kCTFontAttributeName, kCTForegroundColorFromContextAttributeName},
-    };
-
-    pub fn line(text: &str, size: f32, bold: bool) -> Option<(CTFont, CTLine)> {
-        let font = font::new_from_name(
-            if bold {
-                "HelveticaNeue-Bold"
-            } else {
-                "HelveticaNeue"
-            },
-            size as f64,
-        )
-        .ok()?;
-        let mut attributed = CFMutableAttributedString::new();
-        attributed.replace_str(&CFString::new(text), CFRange::init(0, 0));
-        unsafe {
-            attributed.set_attribute(
-                CFRange::init(0, attributed.char_len()),
-                kCTFontAttributeName,
-                &font,
-            );
-            attributed.set_attribute(
-                CFRange::init(0, attributed.char_len()),
-                kCTForegroundColorFromContextAttributeName,
-                &CFBoolean::true_value(),
-            );
-        }
-        let line = CTLine::new_with_attributed_string(attributed.as_concrete_TypeRef());
-        Some((font, line))
-    }
-
-    pub fn mask(text: &str, size: f32, bold: bool) -> Option<(usize, usize, Vec<u8>)> {
-        let (font, line) = line(text, size, bold)?;
-        let width = line.get_typographic_bounds().width.ceil().max(1.0) as usize + 4;
-        let height = (font.ascent() + font.descent() + font.leading())
-            .ceil()
-            .max(1.0) as usize
-            + 4;
-        let space = CGColorSpace::create_device_gray();
-        let mut ctx = CGContext::create_bitmap_context(
-            None,
-            width,
-            height,
-            8,
-            width,
-            &space,
-            kCGImageAlphaNone,
-        );
-        ctx.data().fill(0);
-        ctx.set_should_antialias(true);
-        ctx.set_gray_fill_color(1.0, 1.0);
-        ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-        ctx.set_text_position(2.0, height as f64 - 2.0 - font.ascent());
-        line.draw(&ctx);
-        ctx.flush();
-        Some((width, height, ctx.data().to_vec()))
-    }
-}
-
 fn text_width(text: &str, size: f32, bold: bool) -> f32 {
-    #[cfg(target_os = "macos")]
-    if let Some((_, line)) = native_text::line(text, size, bold) {
-        return line.get_typographic_bounds().width as f32;
-    }
     let _ = bold;
     text.chars().count() as f32 * size * 6.0 / 7.0
 }
@@ -1624,21 +1545,6 @@ fn draw_text(
     bold: bool,
 ) {
     if text.is_empty() || size <= 0.0 {
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    if let Some((width, height, pixels)) = native_text::mask(text, size, bold) {
-        for py in 0..height {
-            for px in 0..width {
-                blend(
-                    frame,
-                    x.round() as i32 + px as i32 - 2,
-                    y.round() as i32 + py as i32 - 2,
-                    color,
-                    pixels[py * width + px] as f32 / 255.0,
-                );
-            }
-        }
         return;
     }
     let _ = bold;
@@ -1863,11 +1769,14 @@ mod tests {
         let blue = |frame: &RgbaFrame| {
             frame
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| p[2] > 200 && p[0] < 120)
                 .count()
         };
-        let after = render_annotated_keyframe(&base, &key(1), &[], &[], &[swipe.clone()]);
+        let after =
+            render_annotated_keyframe(&base, &key(1), &[], &[], std::slice::from_ref(&swipe));
         assert!(blue(&after) > 500, "trail missing");
         let mut later = key(1);
         later.t = 6000;
@@ -1903,10 +1812,13 @@ mod tests {
             laser: false,
             pts: vec![1500, 6000, 0, 5000, 6000, 200, 8500, 6000, 400],
         };
-        let result = render_annotated_keyframe(&base, &key(1), &[stroke.clone()], &[], &[]);
+        let result =
+            render_annotated_keyframe(&base, &key(1), std::slice::from_ref(&stroke), &[], &[]);
         let red = result
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(i, p)| i / 320 > 100 && p[0] == 255 && p[3] == 255)
             .count();
@@ -1921,7 +1833,13 @@ mod tests {
         };
         let result = render_annotated_keyframe(&base, &key(1), &[future], &[], &[]);
         assert_eq!(&result.rgba[100 * 320 * 4..], &base.rgba[100 * 320 * 4..]);
-        assert!(base.rgba.chunks_exact(4).all(|p| p == [20, 20, 20, 255]));
+        assert!(
+            base.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [20, 20, 20, 255])
+        );
     }
 
     #[test]
@@ -1964,7 +1882,9 @@ mod tests {
         let red_rows = |rows: std::ops::Range<usize>| {
             rows.filter(|y| {
                 result.rgba[y * 320 * 4..(y + 1) * 320 * 4]
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|p| p[0] == 255 && p[1] < 80)
             })
             .count()
@@ -2004,8 +1924,8 @@ mod tests {
                     let mut sum_x = 0usize;
                     let mut sum_y = 0usize;
                     let mut n_px = 0usize;
-                    for (idx, p) in sheet.rgba.chunks_exact(4).enumerate() {
-                        if p == color {
+                    for (idx, p) in sheet.rgba.as_chunks::<4>().0.iter().enumerate() {
+                        if *p == color {
                             sum_x += idx % sheet.width as usize;
                             sum_y += idx / sheet.width as usize;
                             n_px += 1;
@@ -2053,7 +1973,7 @@ mod tests {
         let h = sheet.height as usize;
         let pad = SHEET_PAD as usize;
         assert_eq!(sheet.rgba.len(), w * h * 4);
-        assert!(sheet.rgba.chunks_exact(4).all(|p| p[3] == 255));
+        assert!(sheet.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
 
         // Every non-gutter scanline inside [pad..h-pad] must start with a frame pixel at x=pad
         // and end with a frame pixel at x=w-pad-1 (every row fills the inner width completely).
@@ -2120,7 +2040,9 @@ mod tests {
         // Rows past the frame's width once blended with row `width - 1`.
         let mut frame = solid(100, 400, [200, 0, 0, 255]);
         frame.rgba[200 * 100 * 4..]
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .for_each(|p| p.copy_from_slice(&[0, 0, 200, 255]));
         let mut sheet = solid(100, 400, [0, 0, 0, 255]);
         blit_scaled(&mut sheet, &frame, [0.0, 0.0, 100.0, 400.0], 0.0);

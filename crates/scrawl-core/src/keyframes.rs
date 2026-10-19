@@ -88,7 +88,7 @@ fn luma_grid(frame: &RgbaFrame) -> LumaGrid {
     let lines = frame.rgba.chunks_exact(width.max(1) * 4).take(height);
     for (y, line) in lines.enumerate().step_by(step) {
         let row = y * rows / height * columns;
-        for (p, &x) in line.chunks_exact(4).step_by(step).zip(&cell_x) {
+        for (p, &x) in line.as_chunks::<4>().0.iter().step_by(step).zip(&cell_x) {
             // Rec. 709 luma in 1/256ths.
             sums[row + x] += (54 * p[0] as u32 + 183 * p[1] as u32 + 19 * p[2] as u32) >> 8;
             counts[row + x] += 1;
@@ -1360,11 +1360,11 @@ mod tests {
         // that outrank them: ranked alone, the first keyframe would own a minute and a half.
         let gray = |t: u64| match t {
             ..30_000 => 20,
-            ..60_000 => 50,
-            ..90_000 => 80,
-            ..100_000 => 180,
-            ..110_000 => 250,
-            ..115_000 => 140,
+            30_000..60_000 => 50,
+            60_000..90_000 => 80,
+            90_000..100_000 => 180,
+            100_000..110_000 => 250,
+            110_000..115_000 => 140,
             _ => 220,
         };
         let frames: Vec<_> = (0..=240).map(|i| frame(i * 500, gray(i * 500))).collect();
@@ -1398,9 +1398,9 @@ mod tests {
         // nearest the middle of the lead-in, not the one beside the late frame.
         let gray = |t: u64| match t {
             ..30_000 => 20,
-            ..70_000 => 50,
-            ..130_000 => 80,
-            ..138_000 => 110,
+            30_000..70_000 => 50,
+            70_000..130_000 => 80,
+            130_000..138_000 => 110,
             _ => 210,
         };
         let frames: Vec<_> = (0..=300).map(|i| frame(i * 500, gray(i * 500))).collect();
