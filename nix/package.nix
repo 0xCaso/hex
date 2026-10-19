@@ -126,6 +126,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
     libxi
   ];
 
+  # OpenCode HTTP requests run through curl, including in the tests.
+  nativeCheckInputs = [ curl ];
+
   dontUseCmakeConfigure = true;
   env = buildEnv;
   # Desktop and installed-model tests are #[ignore]; run the remaining suite.
