@@ -24,7 +24,7 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     double_tap_only: true,
     modifier_sides: false,
     indicator_position: true,
-    interface_language: false,
+    interface_language: true,
     software_updates: true,
     terminal_paste: true,
 };
@@ -155,7 +155,7 @@ pub(super) fn hotkey_modifiers(modifiers: GpuiModifiers) -> HotkeyModifiers {
 
 pub(super) fn hotkey_key(key: &str) -> std::result::Result<HotkeyKey, &'static str> {
     if key.trim().is_empty() {
-        Err("Unsupported key")
+        Err(tr("Unsupported key"))
     } else {
         Ok(HotkeyKey::named(key))
     }
@@ -168,7 +168,7 @@ pub(super) fn validate_hotkey(
 ) -> std::result::Result<(), &'static str> {
     LinuxHotkey::from(binding)
         .validate()
-        .map_err(|_| "Add a key Linux can register")
+        .map_err(|_| tr("Add a key Linux can register"))
 }
 
 impl AppWindow {
@@ -453,7 +453,7 @@ impl AppWindow {
         let Some(state) = &self.platform.client.state else {
             return Some(ListenerView {
                 running: false,
-                status: "Service disconnected".into(),
+                status: tr("Service disconnected").into(),
                 last_failure: None,
                 error,
             });

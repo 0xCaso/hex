@@ -195,11 +195,13 @@ fn run(state: &Mutex<State>, stop: &AtomicBool) -> Result<()> {
                 match desired {
                     IndicatorState::Hidden => window.hide(),
                     IndicatorState::Recording | IndicatorState::Processing => {
-                        label.set_text(if desired == IndicatorState::Recording {
-                            "Recording"
-                        } else {
-                            "Transcribing"
-                        });
+                        label.set_text(crate::desktop_i18n::tr(
+                            if desired == IndicatorState::Recording {
+                                "Recording"
+                            } else {
+                                "Transcribing"
+                            },
+                        ));
                         if displayed == IndicatorState::Hidden {
                             place_indicator(window, layer_shell, position);
                         }

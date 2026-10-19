@@ -29,6 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::app_settings::{AppSettings, IndicatorPosition};
 use crate::desktop_activity::DesktopActivity;
+use crate::desktop_i18n::{tr, tr_fill};
 use crate::events::{EventReader, TranscriptPhase, VoiceEvent};
 use crate::history::History;
 
@@ -86,7 +87,10 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
         Ok(settings) => (settings, None),
         Err(error) => (
             AppSettings::default(),
-            Some(format!("Could not load settings: {error:#}")),
+            Some(tr_fill(
+                "Could not load settings: {}",
+                &format!("{error:#}"),
+            )),
         ),
     };
     let listen_on_launch = settings.enable_on_launch;
@@ -249,9 +253,9 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
 
 fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     let menu = Menu::new();
-    let show = MenuItem::with_id("show", "Show Hex", true, None);
-    let toggle = MenuItem::with_id("toggle", "Enable / Disable Hex", true, None);
-    let quit = MenuItem::with_id("quit", "Quit Hex", true, None);
+    let show = MenuItem::with_id("show", tr("Show Hex"), true, None);
+    let toggle = MenuItem::with_id("toggle", tr("Enable / Disable Hex"), true, None);
+    let quit = MenuItem::with_id("quit", tr("Quit Hex"), true, None);
     menu.append(&show)?;
     menu.append(&toggle)?;
     menu.append(&quit)?;
@@ -282,7 +286,7 @@ fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     }));
 
     Ok(TrayIconBuilder::new()
-        .with_tooltip("Hex Dictation")
+        .with_tooltip(tr("Hex Dictation"))
         .with_icon(tray_icon()?)
         .with_menu(Box::new(menu))
         // Left click shows the window (handled above); only right click
@@ -496,7 +500,7 @@ impl WindowsDesktopHost {
             }
             Err(error) => {
                 self.status = "Couldn't enable".into();
-                self.error = Some(format!("Could not start listener: {error}"));
+                self.error = Some(tr_fill("Could not start listener: {}", &error.to_string()));
                 self.listener_stop
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -546,7 +550,7 @@ impl WindowsDesktopHost {
             return Err(eyre!("no installed Windows update is ready"));
         };
         crate::windows_updater::relaunch_at(&executable).inspect_err(|error| {
-            self.error = Some(format!("Could not restart Hex: {error:#}"));
+            self.error = Some(tr_fill("Could not restart Hex: {}", &format!("{error:#}")));
         })?;
         self.stop();
         Ok(())
