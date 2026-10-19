@@ -188,6 +188,7 @@ Model advertises streaming, GPU device             // dictate.streaming
   Short tap, Escape, chord discard, microphone failure -> Drop the stream
   Voice-delimited and programmatic captures (macOS) -> Whole clip after release
   Nothing is shown or pasted until the final text exists
+  Picker -> "Streams" tag on catalog models whose artifact streams   // setup.model-card
 ```
 
 Source: [transcription_engine.rs](../../src/transcription_engine.rs) (one thread

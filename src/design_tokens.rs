@@ -277,6 +277,10 @@ mod tests {
             ("app_window.rs", include_str!("app_window.rs")),
             ("app_window/macos.rs", include_str!("app_window/macos.rs")),
             ("app_window/linux.rs", include_str!("app_window/linux.rs")),
+            (
+                "app_window/windows.rs",
+                include_str!("app_window/windows.rs"),
+            ),
             ("desktop_ui.rs", include_str!("desktop_ui.rs")),
             (
                 "desktop_transcription_picker.rs",

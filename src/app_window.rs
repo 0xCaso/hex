@@ -62,6 +62,8 @@ const WINDOW_HEIGHT: f32 = 700.0;
 const MINIMUM_WIDTH: f32 = 860.0;
 const MINIMUM_HEIGHT: f32 = 560.0;
 const HOTKEY_MIN_WIDTH: f32 = 148.0;
+/// Wide enough for "100%" with the segment's own padding.
+const SOUND_VOLUME_ITEM_WIDTH: f32 = 40.0;
 /// Left / Either / Right segment widths.
 const HOTKEY_SIDE_WIDTHS: [f32; 3] = [40.0, 50.0, 40.0];
 /// The side segments plus the control's 2 px padding and 1 px border per side.
@@ -2672,7 +2674,7 @@ impl AppWindow {
             .when(replacement_count == 0, |panel| {
                 panel.child(
                     div()
-                        .px_3()
+                        .px_4()
                         .py_3()
                         .text_footnote()
                         .text_color(rgb(TEXT_TERTIARY))
@@ -2836,9 +2838,6 @@ impl AppWindow {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .border_l_2()
-                                .border_color(rgb(ACCENT))
-                                .pl_3()
                                 .child(settings_copy(title, description)),
                         )
                         .child(div().flex_shrink_0().child(action)),
@@ -2991,10 +2990,10 @@ impl AppWindow {
             SoftwareUpdate::Available { version } => {
                 let label =
                     version.map_or_else(|| tr("Update").into(), |v| tr_fill("Update to {}", &v));
-                button(ButtonKind::Secondary, label)
+                button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+                    .child(label)
                     .id("software-update")
                     .debug_selector(|| "software-update".into())
-                    .text_color(rgb(ACCENT_TEXT))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.install_update(cx);
                         cx.notify();
@@ -3006,9 +3005,9 @@ impl AppWindow {
                     || tr("Restart to update").into(),
                     |v| tr_fill("Restart into {}", &v),
                 );
-                button(ButtonKind::Secondary, label)
+                button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+                    .child(label)
                     .id("software-update")
-                    .text_color(rgb(ACCENT_TEXT))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.install_update(cx);
                         cx.notify();
@@ -3122,30 +3121,39 @@ impl AppWindow {
             .then(|| self.render_microphone_picker(cx));
         let sound_volume_position = self.sound_volume_spring.render_position(window);
         let selected_volume = sound_volume_index(&self.settings);
-        let sound_volume = sliding_segmented_control(sound_volume_position, &[34.0; 5]).children(
-            crate::desktop_ui::SOUND_VOLUME_STEPS
-                .into_iter()
-                .enumerate()
-                .map(|(index, (label, volume))| {
-                    sliding_segmented_item(34.0, selected_volume == index)
-                        .id(("sound-volume", index))
-                        .child(tr(label))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.update_settings(cx, |settings| {
-                                settings.sound_effects = volume > 0.0;
-                                if volume > 0.0 {
-                                    settings.sound_effect_volume = volume;
-                                }
-                            }) {
-                                return;
-                            }
-                            this.sound_volume_spring.set_target(index as f32);
-                            if volume > 0.0 && !this.preview {
-                                crate::feedback::play(crate::feedback::Tone::DictationStart);
-                            }
-                        }))
-                }),
-        );
+        let sound_volume =
+            sliding_segmented_control(sound_volume_position, &[SOUND_VOLUME_ITEM_WIDTH; 5])
+                .children(
+                    crate::desktop_ui::SOUND_VOLUME_STEPS
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (label, volume))| {
+                            sliding_segmented_item(
+                                SOUND_VOLUME_ITEM_WIDTH,
+                                selected_volume == index,
+                            )
+                            .id(("sound-volume", index))
+                            .child(tr(label))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if !this.update_settings(cx, |settings| {
+                                        settings.sound_effects = volume > 0.0;
+                                        if volume > 0.0 {
+                                            settings.sound_effect_volume = volume;
+                                        }
+                                    }) {
+                                        return;
+                                    }
+                                    this.sound_volume_spring.set_target(index as f32);
+                                    if volume > 0.0 && !this.preview {
+                                        crate::feedback::play(
+                                            crate::feedback::Tone::DictationStart,
+                                        );
+                                    }
+                                },
+                            ))
+                        }),
+                );
         let launch_at_login_control = if self.launch_at_login_status.is_none() {
             div()
                 .text_footnote()
