@@ -63,6 +63,8 @@ enum SettingsChange {
     DoubleTap(bool),
     ShortcutMode(crate::dictation::ShortcutMode),
     PasteWithShift(bool),
+    /// Settings the Settings window already saved.
+    Reload(crate::linux_settings::LinuxSettings),
 }
 
 struct SettingsEdit {
@@ -368,6 +370,7 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
                             host.choose_transcription(model, language)?
                         }
                         Request::CancelModel => host.cancel_transcription_preparation(),
+                        Request::ReloadSettings => host.reload_settings()?,
                         Request::Shutdown => shutdown.store(true, Ordering::Release),
                     }
                     Ok(())
@@ -384,9 +387,14 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
     Ok(())
 }
 
-pub fn open(start_hidden: bool, shutdown: &'static AtomicBool) -> Result<()> {
+pub fn open(start_hidden: bool, event_path: PathBuf, shutdown: &'static AtomicBool) -> Result<()> {
     if start_hidden {
         return linux_service::start();
+    }
+    // TODO(consolidate-screens): HEX_LEGACY_UI=1 keeps the previous Linux
+    // Settings screen for comparison until it is deleted.
+    if std::env::var_os("HEX_LEGACY_UI").is_none_or(|value| value != "1") {
+        return open_shared(event_path, shutdown);
     }
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
@@ -476,6 +484,38 @@ pub fn open(start_hidden: bool, shutdown: &'static AtomicBool) -> Result<()> {
                 window.activate_window();
             })
             .ok();
+        cx.activate(true);
+    });
+    Ok(())
+}
+
+/// The Settings process: the shared app window, which saves `settings.json`
+/// and asks the service to reload it. Closing the window ends the process.
+fn open_shared(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result<()> {
+    Application::new().run(move |cx: &mut App| {
+        cx.bind_keys(crate::text_input::key_bindings());
+        let window =
+            crate::app_window::open(event_path, cx).expect("could not open the Hex window");
+        window
+            .update(cx, |_, window, cx| {
+                window.set_window_title("Hex");
+                window.on_window_should_close(cx, |_, cx| {
+                    cx.quit();
+                    true
+                });
+                window.activate_window();
+            })
+            .ok();
+        cx.spawn(async move |cx| {
+            loop {
+                Timer::after(Duration::from_millis(250)).await;
+                if shutdown.load(Ordering::Relaxed) {
+                    let _ = cx.update(|cx| cx.quit());
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.activate(true);
     });
     Ok(())
@@ -753,6 +793,39 @@ impl LinuxDesktopHost {
         }
     }
 
+    /// Adopts the settings the Settings window saved. A running listener
+    /// restarts when a setting it captured at start changed; the sound
+    /// volume already applied when the settings loaded.
+    fn reload_settings(&mut self) -> Result<()> {
+        let settings = match crate::linux_settings::LinuxSettings::load() {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.settings_error = Some(format!("Could not load settings: {error:#}"));
+                return Err(error);
+            }
+        };
+        if self.settings_valid && settings == self.settings {
+            return Ok(());
+        }
+        let model_changed = settings.transcription != self.settings.transcription;
+        let restart = model_changed
+            || settings.dictation_hotkey != self.settings.dictation_hotkey
+            || settings.double_tap_lock != self.settings.double_tap_lock
+            || settings.shortcut_mode != self.settings.shortcut_mode
+            || settings.paste_with_shift != self.settings.paste_with_shift;
+        if restart && self.is_running() && self.settings_edit.is_none() {
+            self.begin_settings_edit(SettingsChange::Reload(settings));
+            return Ok(());
+        }
+        self.settings = settings;
+        self.settings_valid = true;
+        self.settings_error = None;
+        if model_changed && self.listen_when_ready && !self.is_running() {
+            self.start();
+        }
+        Ok(())
+    }
+
     fn capturing_hotkey(&self) -> bool {
         self.settings_edit.as_ref().is_some_and(|edit| {
             !edit.canceled.load(Ordering::Acquire) && matches!(edit.change, SettingsChange::Capture)
@@ -825,6 +898,7 @@ impl LinuxDesktopHost {
                         candidate.paste_with_shift = enabled;
                         None
                     }
+                    SettingsChange::Reload(settings) => return Ok(settings),
                 };
                 if let Some(binding) = binding {
                     binding.validate()?;

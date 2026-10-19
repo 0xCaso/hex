@@ -26,19 +26,27 @@ use crate::windows_settings::WindowsHotkey;
 /// The focused application's executable stem (e.g. "chrome"), lowercased,
 /// for per-application dictation modes and history entries.
 pub fn foreground_process_stem() -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let window = unsafe { GetForegroundWindow() };
+    let path = window_process_path(window)?;
+    Some(path.file_stem()?.to_string_lossy().to_lowercase())
+}
+
+/// The executable of the process that owns `window`.
+pub fn window_process_path(
+    window: windows_sys::Win32::Foundation::HWND,
+) -> Option<std::path::PathBuf> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
+    if window.is_null() {
+        return None;
+    }
     unsafe {
-        let window = GetForegroundWindow();
-        if window.is_null() {
-            return None;
-        }
         let mut pid = 0_u32;
         GetWindowThreadProcessId(window, &mut pid);
         if pid == 0 {
@@ -55,9 +63,7 @@ pub fn foreground_process_stem() -> Option<String> {
         if ok == 0 {
             return None;
         }
-        let path = String::from_utf16_lossy(&buffer[..length as usize]);
-        let stem = std::path::Path::new(&path).file_stem()?.to_string_lossy();
-        Some(stem.to_lowercase())
+        Some(String::from_utf16_lossy(&buffer[..length as usize]).into())
     }
 }
 

@@ -38,6 +38,8 @@ pub enum Request {
         language: String,
     },
     CancelModel,
+    /// Settings saved `settings.json`; adopt it.
+    ReloadSettings,
     Shutdown,
 }
 

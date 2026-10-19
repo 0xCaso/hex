@@ -272,6 +272,8 @@ mod tests {
     fn desktop_sources_use_tokens_instead_of_raw_styles() {
         const SOURCES: &[(&str, &str)] = &[
             ("app_window.rs", include_str!("app_window.rs")),
+            ("app_window/macos.rs", include_str!("app_window/macos.rs")),
+            ("app_window/linux.rs", include_str!("app_window/linux.rs")),
             ("desktop_ui.rs", include_str!("desktop_ui.rs")),
             (
                 "desktop_transcription_picker.rs",

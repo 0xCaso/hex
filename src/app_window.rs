@@ -1,26 +1,22 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
     KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString,
-    Subscription, Timer, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
-    actions, deferred, div, img, prelude::*, px, relative, rgb, rgba, size,
+    PathPromptOptions, Pixels, Point, Render, SharedString, Subscription, Timer, TitlebarOptions,
+    Window, WindowBounds, WindowHandle, WindowOptions, actions, deferred, div, img, prelude::*, px,
+    rgb, rgba, size,
 };
 
 use crate::app_settings::{
-    AppSettings, DictationMode, HotkeyBinding, HotkeyKey, HotkeyModifiers, ModifierSide,
-    RecordingAudioBehavior, TextReplacement,
+    AppSettings, DictationMode, HotkeyBinding, HotkeyKey, HotkeyModifiers, IndicatorPosition,
+    ModifierSide, RecordingAudioBehavior, TextReplacement,
 };
 use crate::application_catalog::InstalledApplication;
-use crate::commands::{CommandConfig, CommandInfo, CommandScope};
 use crate::design_tokens::*;
 use crate::desktop_activity::DesktopActivity;
 use crate::desktop_transcription_picker::{
@@ -31,32 +27,23 @@ use crate::desktop_transcription_picker::{
 };
 use crate::desktop_ui::{
     ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, danger_menu_item, detail_body,
-    detail_header, detail_placeholder, detail_row, detail_title, disabled_menu_item,
-    disclosure_button, disclosure_frame, dropdown_menu, empty_state, error_message, error_panel,
-    hotkey_keycaps, icon, icon_button, inline_error, list_row, list_row_meta, list_row_title,
-    list_section_label, listener_status, menu, menu_item, menu_separator, mix_color,
-    navigation_item, pane_body, pane_content, pane_detail, pane_header, pane_header_with_action,
-    pane_list, pane_scroll_body, panel, panel_header, section_label, segmented_control,
-    segmented_item, settings_copy, settings_row, settings_section_label, sidebar_frame,
-    sliding_segmented_control, sliding_segmented_item, small_button, status_dot, tag, toggle,
-    truncated_line, window_frame,
+    detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
+    disclosure_frame, dropdown_menu, error_message, error_panel, hotkey_keycaps, icon, icon_button,
+    inline_error, list_row, list_row_meta, list_row_title, listener_status, menu, menu_item,
+    mix_color, navigation_item, pane_body, pane_content, pane_detail, pane_header,
+    pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header, section_label,
+    settings_copy, settings_row, settings_section_label, sidebar_frame, sliding_segmented_control,
+    sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, window_frame,
 };
 use crate::developer_control::DeveloperPane;
-use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender, HudTuning};
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
 use crate::events::{
     CommandOutcome, DictationPhase, EventReader, TranscriptPhase, VoiceEvent, VoiceState, now_ms,
 };
 use crate::history::{History, HistoryEntry, HistoryKind, HistoryRetention};
 use crate::login_item::{LoginItemRequest, LoginItemResponse, LoginItemStatus, LoginItemWorker};
-use crate::meeting::{
-    self, MeetingManifest, MeetingRequest, MeetingSource, MeetingStatus, TranscriptEntry,
-};
-use crate::onboarding::{
-    PermissionAction, PermissionKind, PermissionState, PermissionWarning, SetupStatus,
-};
-use crate::personal_commands::{HostState, StatusContext, StatusSnapshot, StatusTransformation};
-use crate::recognition::CommandModelStatus;
+use crate::onboarding::{PermissionState, SetupStatus};
+use crate::personal_commands::{HostState, StatusSnapshot, StatusTransformation};
 use crate::text_input::{
     Changed as TextChanged, Dismissed as TextDismissed, Navigate as TextNavigate,
     Submitted as TextSubmitted, TextInput,
@@ -83,21 +70,47 @@ const MAX_OPENCODE_ERROR_BYTES: usize = 4 * 1024;
 const ACTIVITY_LIMIT: usize = 100;
 const OPENCODE_BETA_DOCS_URL: &str = "https://v2.opencode.ai/";
 
-fn sidebar_update_button(
-    status: crate::sparkle::UpdateStatus,
-    preview: bool,
-) -> Option<gpui::Stateful<Div>> {
-    (status == crate::sparkle::UpdateStatus::UpdateAvailable).then(|| {
-        button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
-            .child("Update")
-            .id("check-for-updates-sidebar")
-            .on_click(move |_, window, cx| {
-                if !preview {
-                    window.dispatch_action(Box::new(CheckForUpdates), cx);
-                    window.refresh();
-                }
-            })
-    })
+// Each OS supplies the same set of `platform` items: its window state, the
+// capabilities below, window chrome, and the actions only its runtime can
+// perform. Everything else in this file is the one shared window.
+#[cfg_attr(target_os = "macos", path = "app_window/macos.rs")]
+#[cfg_attr(target_os = "windows", path = "app_window/windows.rs")]
+#[cfg_attr(target_os = "linux", path = "app_window/linux.rs")]
+mod platform;
+
+#[cfg(not(target_os = "macos"))]
+pub use platform::open;
+#[cfg(target_os = "macos")]
+pub use platform::{
+    commit_transcription_selection, menu_transcription_selection, open_or_focus, open_preview,
+    refresh_transcription_menu,
+};
+
+/// What the current OS's runtime can do. A missing capability omits its
+/// pane or settings row; the window never shows an imitation of a feature
+/// the runtime cannot perform.
+#[derive(Clone, Copy, Debug)]
+struct Capabilities {
+    meetings: bool,
+    commands: bool,
+    hud_lab: bool,
+    modes: bool,
+    voice_action: bool,
+    history: bool,
+    /// Privacy permissions gate dictation (macOS).
+    permissions: bool,
+    dock_icon: bool,
+    launch_at_login: bool,
+    /// The listener can be off: an Enabled/Disabled card and Enable on launch.
+    listener_control: bool,
+    paste_last: bool,
+    /// Shortcuts can require the left or right modifier key.
+    modifier_sides: bool,
+    indicator_position: bool,
+    interface_language: bool,
+    software_updates: bool,
+    /// Paste with Ctrl-Shift-V for terminals.
+    terminal_paste: bool,
 }
 
 /// The microphone menu is deferred above the settings panel and occludes
@@ -135,6 +148,13 @@ fn microphone_picker_menu(
         .when_some(error, |picker, error| picker.child(inline_error(error)))
 }
 
+/// The sidebar's Update button, shown while an update is available.
+fn sidebar_update_button() -> gpui::Stateful<Div> {
+    button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+        .child("Update")
+        .id("check-for-updates-sidebar")
+}
+
 fn settings_pane(title: &'static str, scroll_id: &'static str, content: Div) -> AnyElement {
     div()
         .size_full()
@@ -168,157 +188,18 @@ actions!(
     ]
 );
 
-/// Opens the app shell, or focuses and refreshes an existing shell window.
-#[allow(clippy::too_many_arguments)]
-pub fn open_or_focus(
-    app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
-    event_path: PathBuf,
-    commands: CommandConfig,
-    meeting_requests: SyncSender<MeetingRequest>,
-    indicator: DictationIndicatorSender,
-    recognition_start: Option<SyncSender<()>>,
-    history: Option<History>,
-    cx: &mut App,
-) -> gpui::Result<WindowHandle<AppWindow>> {
-    if let Some(handle) = app_window.borrow().as_ref().copied()
-        && handle
-            .update(cx, |this, window, cx| {
-                if this.event_reader.path() != event_path {
-                    this.event_reader = EventReader::open(event_path.clone());
-                }
-                this.meeting_requests = meeting_requests.clone();
-                this.indicator = indicator.clone();
-                this.recognition_start = recognition_start.clone();
-                this.history = history.clone();
-                this.refresh(cx);
-                window.activate_window();
-            })
-            .is_ok()
-    {
-        cx.activate(true);
-        return Ok(handle);
-    }
-
-    open_new(
-        app_window,
-        event_path,
-        commands,
-        meeting_requests,
-        indicator,
-        recognition_start,
-        history,
-        None,
-        cx,
-    )
-}
-
-/// Commit through the live editor when present, preserving its unsaved settings.
-/// Quiet startup does not require creating or focusing a Settings window.
-pub fn commit_transcription_selection(
-    app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
-    selection: TranscriptionSelection,
-    cx: &mut App,
-) -> Result<AppSettings, String> {
-    let handle = app_window.borrow().as_ref().copied();
-    if let Some(handle) = handle
-        && let Ok(result) = handle.update(cx, |this, _, cx| {
-            this.apply_transcription_selection(selection.clone(), cx)?;
-            cx.notify();
-            Ok(this.settings.clone())
-        })
-    {
-        return result;
-    }
-    let mut settings = AppSettings::load().map_err(|error| error.to_string())?;
-    settings
-        .save_transcription(selection)
-        .map_err(|error| error.to_string())?;
-    Ok(settings)
-}
-
-pub fn menu_transcription_selection(
-    app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
-    model: TranscriptionModelId,
-    fallback: &AppSettings,
-    cx: &mut App,
-) -> TranscriptionSelection {
-    let handle = app_window.borrow().as_ref().copied();
-    handle
-        .and_then(|handle| {
-            handle
-                .update(cx, |this, _, _| {
-                    this.settings.transcription_for_model(model)
-                })
-                .ok()
-        })
-        .unwrap_or_else(|| fallback.transcription_for_model(model))
-}
-
-pub fn refresh_transcription_menu(
-    app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
-    fallback: &AppSettings,
-    status: &PreparationStatus,
-    cx: &mut App,
-) {
-    let handle = app_window.borrow().as_ref().copied();
-    if handle.is_some_and(|handle| {
-        handle
-            .update(cx, |this, _, _| {
-                crate::status_item::update_transcription(&this.settings, status);
-            })
-            .is_ok()
-    }) {
-        return;
-    }
-    crate::status_item::update_transcription(fallback, status);
-}
-
-pub fn open_preview(
-    app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
-    event_path: PathBuf,
-    commands: CommandConfig,
-    meeting_requests: SyncSender<MeetingRequest>,
-    indicator: DictationIndicatorSender,
-    preview: AppWindowPreview,
-    cx: &mut App,
-) -> gpui::Result<WindowHandle<AppWindow>> {
-    if let Some(handle) = app_window.borrow().as_ref().copied()
-        && handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
-    {
-        cx.activate(true);
-        return Ok(handle);
-    }
-    open_new(
-        app_window,
-        event_path,
-        commands,
-        meeting_requests,
-        indicator,
-        None,
-        None,
-        Some(preview),
-        cx,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
+/// Opens a new app window with this OS's window options and chrome.
 fn open_new(
-    app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
     event_path: PathBuf,
-    commands: CommandConfig,
-    meeting_requests: SyncSender<MeetingRequest>,
-    indicator: DictationIndicatorSender,
-    recognition_start: Option<SyncSender<()>>,
     history: Option<History>,
     preview: Option<AppWindowPreview>,
+    args: platform::Args,
     cx: &mut App,
 ) -> gpui::Result<WindowHandle<AppWindow>> {
     let preview_mode = preview.is_some();
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let handle = cx.open_window(
-        WindowOptions {
+        platform::window_options(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some("Hex".into()),
@@ -330,29 +211,15 @@ fn open_new(
             window_min_size: Some(size(px(MINIMUM_WIDTH), px(MINIMUM_HEIGHT))),
             tabbing_identifier: preview_mode.then(|| "hex-preview".into()),
             ..Default::default()
-        },
-        |window, cx| {
-            cx.new(|cx| {
-                AppWindow::new(
-                    event_path,
-                    commands,
-                    meeting_requests,
-                    indicator,
-                    recognition_start,
-                    history,
-                    preview,
-                    window,
-                    cx,
-                )
-            })
-        },
+        }),
+        |window, cx| cx.new(|cx| AppWindow::new(event_path, history, preview, args, window, cx)),
     )?;
-    *app_window.borrow_mut() = Some(handle);
     cx.activate(true);
     Ok(handle)
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum PreviewModelState {
     Actual,
     Installed,
@@ -362,6 +229,7 @@ pub enum PreviewModelState {
 }
 
 #[derive(Clone)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct AppWindowPreview {
     pub pane: DeveloperPane,
     pub transcription_picker: Option<(String, PreviewModelState)>,
@@ -399,28 +267,8 @@ enum Pane {
     Settings,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HudDemoState {
-    Recording,
-    Transcribing,
-    Processing,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HudControl {
-    LineCount,
-    Curvature,
-    Speed,
-    Blur,
-    Glow,
-    Depth,
-    LightAngle,
-    Outline,
-}
-
-const HUD_MAX_SPEED: f32 = 24.0;
-
 impl Pane {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn on_reopen(self, status: SetupStatus) -> Self {
         if crate::onboarding::permission_warnings(status).is_empty() {
             self
@@ -440,17 +288,18 @@ impl Pane {
         Self::Activity,
     ];
 
-    fn all(developer_features: bool, meetings: bool) -> Vec<Self> {
+    fn all(capabilities: Capabilities, developer_features: bool, meetings: bool) -> Vec<Self> {
         Self::ALL
             .into_iter()
             .filter(|pane| match pane {
-                Self::Settings
-                | Self::Modes
-                | Self::Commands
-                | Self::VoiceAction
-                | Self::History => true,
-                Self::Meetings => developer_features || meetings,
-                Self::HudLab | Self::Activity => developer_features,
+                Self::Settings => true,
+                Self::Modes => capabilities.modes,
+                Self::Commands => capabilities.commands,
+                Self::VoiceAction => capabilities.voice_action,
+                Self::History => capabilities.history,
+                Self::Meetings => capabilities.meetings && (developer_features || meetings),
+                Self::HudLab => capabilities.hud_lab && developer_features,
+                Self::Activity => developer_features,
             })
             .collect()
     }
@@ -494,6 +343,7 @@ impl Pane {
         }
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn developer(self) -> DeveloperPane {
         match self {
             Self::Settings => DeveloperPane::Settings,
@@ -508,17 +358,8 @@ impl Pane {
     }
 }
 
-#[derive(Clone)]
-struct CatalogCommand {
-    task: String,
-    scope: CommandScope,
-    phrase: String,
-    aliases: Vec<String>,
-    description: String,
-    id: String,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum PersonalWorkspaceState {
     Missing,
     Creating,
@@ -526,6 +367,7 @@ enum PersonalWorkspaceState {
     Error,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn personal_workspace_state(
     config_exists: bool,
     creating: bool,
@@ -542,28 +384,6 @@ fn personal_workspace_state(
     } else {
         PersonalWorkspaceState::Missing
     }
-}
-
-#[derive(Clone, PartialEq)]
-struct TranscriptLine {
-    source: MeetingSource,
-    clock: String,
-    text: String,
-    pause_before_ms: Option<u64>,
-}
-
-struct MeetingPreview {
-    recording: bool,
-    confirm_delete: bool,
-    open_actions: bool,
-    empty: bool,
-}
-
-#[derive(Clone)]
-enum MeetingTranscript {
-    Empty,
-    Loaded(Vec<TranscriptLine>),
-    Unavailable(String),
 }
 
 struct ToggleSpring {
@@ -787,7 +607,7 @@ fn start_model_catalog_load() -> Receiver<ModelCatalogState> {
 struct ModelPresentation {
     name: String,
     provider: String,
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     key: String,
     is_default: bool,
 }
@@ -806,6 +626,24 @@ impl ApplicationCatalogState {
             .iter()
             .find(|application| application.name == name)
     }
+}
+
+/// The listener's state on an OS where it can be off.
+struct ListenerView {
+    running: bool,
+    status: String,
+    last_failure: Option<String>,
+    error: Option<String>,
+}
+
+/// The background update check's state, for the Software updates row.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+enum SoftwareUpdate {
+    Checking,
+    Current,
+    Failed,
+    Available { version: String },
+    ReadyToRestart { version: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -829,6 +667,7 @@ fn set_hotkey_binding(settings: &mut AppSettings, kind: HotkeyKind, binding: Hot
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum MicrophonePolicyChange {
     SetCommands(bool),
     SetReleaseWhileIdle(bool),
@@ -926,14 +765,7 @@ pub struct AppWindow {
     pane: Pane,
     event_reader: EventReader,
     activity: DesktopActivity,
-    meeting_requests: SyncSender<MeetingRequest>,
-    indicator: DictationIndicatorSender,
-    hud_tuning: HudTuning,
-    hud_demo: HudDemoState,
-    hud_queued: usize,
-    hud_dragging: Option<HudControl>,
-    hud_copied: bool,
-    recognition_start: Option<SyncSender<()>>,
+    platform: platform::Platform,
     setup_status: SetupStatus,
     setup_visible: bool,
     onboarding_completed: bool,
@@ -949,20 +781,17 @@ pub struct AppWindow {
     login_item_worker: Option<LoginItemWorker>,
     launch_at_login_error: Option<String>,
     launch_at_login_toggle: ToggleSpring,
-    update_status: crate::sparkle::UpdateStatus,
-    update_status_changed_at: Instant,
     commands_toggle: ToggleSpring,
-    command_model_status: CommandModelStatus,
     release_microphone_toggle: ToggleSpring,
     shortcut_mode_toggle: ToggleSpring,
     pending_microphone_policy: Option<MicrophonePolicyChange>,
     double_tap_toggle: ToggleSpring,
     double_tap_only_visibility: ToggleSpring,
     dock_icon_toggle: ToggleSpring,
-    meetings_toggle: ToggleSpring,
-    meeting_notes_toggle: ToggleSpring,
-    screen_recording_permitted: bool,
-    meeting_folder_error: Option<String>,
+    enable_on_launch_toggle: ToggleSpring,
+    terminal_paste_toggle: ToggleSpring,
+    indicator_position_spring: ToggleSpring,
+    interface_language_open: bool,
     sound_volume_spring: ToggleSpring,
     recording_audio_spring: ToggleSpring,
     variant_picker_open: Option<ModelPickerTarget>,
@@ -1000,38 +829,12 @@ pub struct AppWindow {
     hotkey_focus: FocusHandle,
     _hotkey_blur_subscription: Subscription,
     _activation_subscription: Subscription,
-    meetings: Vec<MeetingManifest>,
-    meetings_error: Option<String>,
-    meeting_runtime_error: Option<String>,
-    meeting_refresh_started_ms: Option<u64>,
-    meeting_stop_pending: bool,
-    selected_meeting: Option<String>,
-    meeting_transcript: MeetingTranscript,
-    meeting_transcript_id: Option<String>,
-    meeting_transcript_reader: meeting::TranscriptReader,
-    meeting_transcript_scroll: ScrollHandle,
-    /// Coalesced turns of the selected meeting, for Copy Transcript.
-    meeting_turns: Vec<TranscriptEntry>,
-    meeting_search: ProcessingInput,
-    /// Lowercased searchable text per meeting, loaded when a search starts.
-    meeting_search_text: HashMap<String, String>,
-    meeting_rename: Option<(String, ProcessingInput)>,
-    meeting_delete_armed: Option<String>,
-    /// The detail's overflow menu of less common meeting actions is open.
-    meeting_actions_open: bool,
-    meeting_action_error: Option<String>,
-    meeting_copied: Option<(String, &'static str)>,
-    /// Deterministic transcripts for the Meetings preview.
-    meeting_preview_transcripts: Option<HashMap<String, Vec<TranscriptEntry>>>,
-    compiled_commands: Vec<CatalogCommand>,
-    commands: Vec<CatalogCommand>,
     personal_commands_status: StatusSnapshot,
     personal_workspace: PathBuf,
     personal_workspace_receiver: Option<Receiver<Result<PathBuf, String>>>,
     personal_workspace_error: Option<String>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     personal_commands_prompt_copied: bool,
-    command_search: ProcessingInput,
-    selected_command: Option<String>,
     events: Vec<VoiceEvent>,
     current_context: (Option<String>, Option<String>),
     selected_event: Option<usize>,
@@ -1046,15 +849,11 @@ pub struct AppWindow {
 }
 
 impl AppWindow {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         event_path: PathBuf,
-        commands: CommandConfig,
-        meeting_requests: SyncSender<MeetingRequest>,
-        indicator: DictationIndicatorSender,
-        recognition_start: Option<SyncSender<()>>,
         history: Option<History>,
         preview: Option<AppWindowPreview>,
+        args: platform::Args,
         native_window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1068,53 +867,20 @@ impl AppWindow {
                         let application_catalog_changed = window.poll_application_catalog();
                         let transcription_changed = window.poll_transcription_download();
                         let setup_changed = window.poll_setup(false);
-                        let command_model_status = if window.preview {
-                            window.command_model_status
-                        } else {
-                            crate::recognition::command_model_status()
-                        };
-                        let command_model_changed =
-                            window.command_model_status != command_model_status;
-                        window.command_model_status = command_model_status;
                         let login_item_changed = window.poll_login_item();
                         let personal_commands_changed = window.poll_personal_commands();
                         let personal_workspace_changed = window.poll_personal_workspace();
                         let history_changed = window.poll_history(cx);
-                        let update_status = if window.preview {
-                            window.update_status
-                        } else {
-                            crate::sparkle::status()
-                        };
-                        let update_status_changed = window.update_status != update_status;
-                        if update_status_changed {
-                            window.update_status = update_status;
-                            window.update_status_changed_at = Instant::now();
-                        }
-                        let update_confirmation_expired = window.update_status
-                            == crate::sparkle::UpdateStatus::UpToDate
-                            && window.update_status_changed_at.elapsed() >= Duration::from_secs(4);
-                        if update_confirmation_expired {
-                            window.update_status = crate::sparkle::UpdateStatus::Idle;
-                            crate::sparkle::clear_confirmation();
-                        }
-                        if window.settings.meetings.available()
-                            && (window.meeting_refresh_started_ms.is_some()
-                                || meeting::active(&window.meetings).is_some())
-                        {
-                            window.reload_meetings();
-                            cx.notify();
-                        }
+                        let platform_changed = window.poll_platform(cx);
                         if model_catalog_changed
                             || application_catalog_changed
                             || transcription_changed
                             || setup_changed
-                            || command_model_changed
                             || login_item_changed
                             || personal_commands_changed
                             || personal_workspace_changed
                             || history_changed
-                            || update_status_changed
-                            || update_confirmation_expired
+                            || platform_changed
                         {
                             cx.notify();
                         }
@@ -1127,15 +893,6 @@ impl AppWindow {
         })
         .detach();
         let preview_mode = preview.is_some();
-        let preview_meetings = preview
-            .as_ref()
-            .filter(|preview| matches!(preview.pane, DeveloperPane::Meetings))
-            .map(|preview| MeetingPreview {
-                recording: preview.meeting_recording,
-                confirm_delete: preview.confirm_meeting_delete,
-                open_actions: preview.open_meeting_actions,
-                empty: preview.meetings_empty,
-            });
         let preview_choices = crate::transcription_models::choices_for_runtime;
         let (settings, settings_load_error) = if let Some(preview) = &preview {
             let mut settings = AppSettings {
@@ -1236,9 +993,6 @@ impl AppWindow {
             ApplicationCatalogState::Loading
         };
         let application_search = Self::application_search_input(cx);
-        if !preview_mode {
-            crate::app_settings::set_dock_icon_visible(true);
-        }
         let window_focus = cx.focus_handle();
         window_focus.focus(native_window);
         let hotkey_focus = cx.focus_handle();
@@ -1254,18 +1008,6 @@ impl AppWindow {
                     }
                 }
             });
-        let compiled_commands = commands
-            .catalog()
-            .into_iter()
-            .map(|command| CatalogCommand {
-                task: command_task(&command),
-                scope: command.scope,
-                phrase: command.phrase,
-                aliases: command.aliases,
-                description: command.description,
-                id: command.id,
-            })
-            .collect::<Vec<_>>();
         let personal_workspace = if preview_mode {
             PathBuf::from("~/.config/hex")
         } else {
@@ -1296,7 +1038,13 @@ impl AppWindow {
             })
         };
         crate::personal_commands::include_builtin_transformations(&mut personal_commands_status);
-        let commands = merged_catalog(&compiled_commands, &personal_commands_status);
+        let platform = platform::Platform::new(
+            args,
+            preview.as_ref(),
+            &settings,
+            &personal_commands_status,
+            cx,
+        );
         let preview_picker = preview
             .as_ref()
             .and_then(|preview| preview.transcription_picker.as_ref());
@@ -1355,14 +1103,15 @@ impl AppWindow {
             })
         };
         let launch_at_login_status = preview_mode.then_some(LoginItemStatus::Disabled);
-        let (login_item_worker, launch_at_login_error) = if preview_mode {
-            (None, None)
-        } else {
-            match LoginItemWorker::new() {
-                Ok(worker) => (Some(worker), None),
-                Err(error) => (None, Some(error)),
-            }
-        };
+        let (login_item_worker, launch_at_login_error) =
+            if preview_mode || !platform::CAPABILITIES.launch_at_login {
+                (None, None)
+            } else {
+                match LoginItemWorker::new() {
+                    Ok(worker) => (Some(worker), None),
+                    Err(error) => (None, Some(error)),
+                }
+            };
         let history = if preview_mode {
             preview
                 .as_ref()
@@ -1373,8 +1122,6 @@ impl AppWindow {
             history
         };
         let history_search = Self::history_search_input(cx);
-        let meeting_search = Self::meeting_search_input(cx);
-        let command_search = Self::command_search_input(cx);
         let mut window = Self {
             preview: preview_mode,
             pane: preview.as_ref().map_or(Pane::default(), |preview| {
@@ -1382,14 +1129,7 @@ impl AppWindow {
             }),
             event_reader: EventReader::open(event_path),
             activity: DesktopActivity::default(),
-            meeting_requests,
-            indicator,
-            hud_tuning: HudTuning::default(),
-            hud_demo: HudDemoState::Transcribing,
-            hud_queued: 1,
-            hud_dragging: None,
-            hud_copied: false,
-            recognition_start,
+            platform,
             setup_status,
             setup_visible,
             onboarding_completed,
@@ -1403,27 +1143,7 @@ impl AppWindow {
             launch_at_login_toggle: ToggleSpring::new(
                 launch_at_login_status == Some(LoginItemStatus::Enabled),
             ),
-            update_status: if let Some(preview) = &preview {
-                if preview.update_available {
-                    crate::sparkle::UpdateStatus::UpdateAvailable
-                } else {
-                    crate::sparkle::UpdateStatus::Idle
-                }
-            } else {
-                crate::sparkle::status()
-            },
-            update_status_changed_at: Instant::now(),
             commands_toggle: ToggleSpring::new(settings.commands_enabled),
-            command_model_status: if preview
-                .as_ref()
-                .is_some_and(|preview| preview.command_model_missing)
-            {
-                CommandModelStatus::Failed
-            } else if preview_mode {
-                CommandModelStatus::Disabled
-            } else {
-                crate::recognition::command_model_status()
-            },
             release_microphone_toggle: ToggleSpring::new(settings.release_microphone_while_idle),
             shortcut_mode_toggle: ToggleSpring::new(
                 settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle,
@@ -1437,15 +1157,12 @@ impl AppWindow {
                 settings.double_tap_lock && settings.dictation_hotkey.key.is_some(),
             ),
             dock_icon_toggle: ToggleSpring::new(settings.show_dock_icon),
-            meetings_toggle: ToggleSpring::new(settings.meetings.enabled),
-            meeting_notes_toggle: ToggleSpring::new(
-                settings.meetings.summarize_with_apple_intelligence,
-            ),
-            screen_recording_permitted: match &preview {
-                Some(preview) => !preview.screen_recording_missing,
-                None => crate::meeting::screen_recording_permitted(),
-            },
-            meeting_folder_error: None,
+            enable_on_launch_toggle: ToggleSpring::new(settings.enable_on_launch),
+            terminal_paste_toggle: ToggleSpring::new(settings.paste_with_shift),
+            indicator_position_spring: ToggleSpring::at(indicator_position_index(
+                settings.indicator_position,
+            ) as f32),
+            interface_language_open: false,
             sound_volume_spring: ToggleSpring::at(sound_volume_index(&settings) as f32),
             recording_audio_spring: ToggleSpring::at(recording_audio_index(
                 settings.recording_audio_behavior,
@@ -1560,34 +1277,11 @@ impl AppWindow {
             settings_load_error,
             #[cfg(test)]
             settings_save_override: None,
-            meetings: Vec::new(),
-            meetings_error: None,
-            meeting_runtime_error: None,
-            meeting_refresh_started_ms: None,
-            meeting_stop_pending: false,
-            selected_meeting: None,
-            meeting_transcript: MeetingTranscript::Empty,
-            meeting_transcript_id: None,
-            meeting_transcript_reader: meeting::TranscriptReader::default(),
-            meeting_transcript_scroll: ScrollHandle::new(),
-            meeting_turns: Vec::new(),
-            meeting_search,
-            meeting_search_text: HashMap::new(),
-            meeting_rename: None,
-            meeting_delete_armed: None,
-            meeting_actions_open: false,
-            meeting_action_error: None,
-            meeting_copied: None,
-            meeting_preview_transcripts: None,
-            compiled_commands,
-            commands,
             personal_commands_status,
             personal_workspace,
             personal_workspace_receiver: None,
             personal_workspace_error: None,
             personal_commands_prompt_copied: false,
-            command_search,
-            selected_command: None,
             events: Vec::new(),
             current_context: (None, None),
             selected_event: None,
@@ -1602,40 +1296,26 @@ impl AppWindow {
                 .is_some_and(|preview| preview.open_history_retention),
             history_copied: None,
         };
+        window.platform_opened(preview.as_ref());
         if !window.preview {
-            if window.settings.meetings.available() {
-                window.reload_meetings();
-                if meeting::active(&window.meetings).is_some() {
-                    window.pane = Pane::Meetings;
-                }
-            }
             window.reload_events();
         }
         window.reload_history(cx);
         if window.preview {
             window.selected_history = window.history_entries.first().map(|entry| entry.id);
         }
-        if let Some(preview) = preview_meetings.as_ref()
-            && window.pane == Pane::Meetings
-        {
-            window.load_meeting_preview(preview);
-        }
         if window.pane == Pane::Modes {
             window.ensure_application_catalog_load();
-        }
-        if window.pane == Pane::HudLab {
-            window.apply_hud_lab();
         }
         window
     }
 
     /// Refreshes disk-backed meeting and activity data while retaining valid
     /// selections. This is also called whenever an existing shell is reopened.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if !self.preview {
-            if self.settings.meetings.available() {
-                self.reload_meetings();
-            }
+            self.platform_refresh();
             self.reload_events();
         }
         self.reload_history(cx);
@@ -1657,8 +1337,7 @@ impl AppWindow {
         self.history_retention_open = false;
         self.pending_microphone_policy = None;
         match pane {
-            Pane::HudLab => self.apply_hud_lab(),
-            Pane::Meetings => self.reload_meetings(),
+            Pane::HudLab | Pane::Meetings => self.platform_select_pane(pane),
             Pane::Commands | Pane::Activity => self.reload_events(),
             Pane::History => self.reload_history(cx),
             Pane::Modes => self.ensure_application_catalog_load(),
@@ -1668,18 +1347,12 @@ impl AppWindow {
         cx.notify();
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn show_settings(&mut self, cx: &mut Context<Self>) {
         self.select_pane(Pane::Settings, cx);
     }
 
-    pub(crate) fn show_meetings(&mut self, cx: &mut Context<Self>) {
-        if self.settings.meetings.available() {
-            self.select_pane(Pane::Meetings, cx);
-        } else {
-            self.show_settings(cx);
-        }
-    }
-
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn show_transcription_models(&mut self, cx: &mut Context<Self>) {
         self.show_settings(cx);
         self.transcription_picker_language = Some(self.settings.transcription.language.clone());
@@ -1687,14 +1360,17 @@ impl AppWindow {
         cx.notify();
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn developer_select_pane(&mut self, pane: DeveloperPane, cx: &mut Context<Self>) {
         self.select_pane(Pane::from_developer(pane), cx);
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn developer_pane(&self) -> DeveloperPane {
         self.pane.developer()
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn developer_set_commands_enabled(
         &mut self,
         enabled: bool,
@@ -1820,7 +1496,7 @@ impl AppWindow {
             || !force
                 && (Instant::now() < self.permission_refresh_at
                     || !self.setup_visible
-                        && self.recognition_start.is_none()
+                        && !self.platform_awaits_setup()
                         && self.pane != Pane::Settings
                         && self.setup_status.transcription_model)
         {
@@ -1843,22 +1519,13 @@ impl AppWindow {
                 }
                 self.onboarding_completed = true;
             }
-            if let Some(start) = self.recognition_start.take() {
-                let _ = start.try_send(());
-            }
+            self.platform_setup_ready();
             if self.setup_visible {
                 self.setup_visible = false;
                 changed = true;
             }
         }
-        if self.settings.meetings.available() {
-            let permitted = crate::meeting::screen_recording_permitted();
-            if permitted != self.screen_recording_permitted {
-                self.screen_recording_permitted = permitted;
-                changed = true;
-            }
-        }
-        changed
+        self.platform_poll_setup() || changed
     }
 
     fn poll_login_item(&mut self) -> bool {
@@ -1945,14 +1612,7 @@ impl AppWindow {
             return false;
         }
         self.personal_commands_status = status;
-        self.commands = merged_catalog(&self.compiled_commands, &self.personal_commands_status);
-        if self
-            .selected_command
-            .as_ref()
-            .is_some_and(|id| !self.commands.iter().any(|command| &command.id == id))
-        {
-            self.selected_command = None;
-        }
+        self.personal_commands_changed();
         true
     }
 
@@ -1974,6 +1634,7 @@ impl AppWindow {
         true
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn provision_personal_workspace(&mut self) {
         if self.preview || self.personal_workspace_receiver.is_some() {
             return;
@@ -2109,375 +1770,6 @@ impl AppWindow {
             .unwrap_or_else(|| crate::transcription_models::is_installed(model, language))
     }
 
-    pub fn meeting_starting(&mut self, cx: &mut Context<Self>) {
-        self.meeting_runtime_error = None;
-        self.meeting_refresh_started_ms = Some(now_ms());
-        self.meeting_stop_pending = false;
-        self.pane = Pane::Meetings;
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    pub fn meeting_started(&mut self, cx: &mut Context<Self>) {
-        self.meeting_refresh_started_ms = None;
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    pub fn meeting_updated(&mut self, cx: &mut Context<Self>) {
-        self.meeting_stop_pending = true;
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    pub fn meeting_updated_notes(&mut self, cx: &mut Context<Self>) {
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    fn apple_intelligence_availability(&self) -> crate::apple_intelligence::Availability {
-        if self.preview {
-            crate::apple_intelligence::Availability::Available
-        } else {
-            crate::apple_intelligence::availability()
-        }
-    }
-
-    pub fn meeting_finished(&mut self, cx: &mut Context<Self>) {
-        self.meeting_refresh_started_ms = None;
-        self.meeting_stop_pending = false;
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    pub fn meeting_failed(&mut self, title: String, error: String, cx: &mut Context<Self>) {
-        self.meeting_runtime_error = Some(format!("{title}: {error}"));
-        self.meeting_refresh_started_ms = None;
-        self.meeting_stop_pending = false;
-        self.pane = Pane::Meetings;
-        self.reload_meetings();
-        if let Some(failed) = self
-            .meetings
-            .iter()
-            .find(|meeting| meeting.status == MeetingStatus::Failed && meeting.title == title)
-        {
-            self.selected_meeting = Some(failed.id.clone());
-            self.load_selected_meeting();
-        }
-        cx.notify();
-    }
-
-    fn reload_meetings(&mut self) {
-        if self.meeting_preview_transcripts.is_some() {
-            return;
-        }
-        match meeting::list() {
-            Ok(meetings) => {
-                let previous_active = meeting::active(&self.meetings).map(|meeting| &meeting.id);
-                let next_active = meeting::active(&meetings).map(|meeting| meeting.id.clone());
-                if next_active.as_deref() != previous_active.map(String::as_str)
-                    && next_active.is_some()
-                {
-                    self.selected_meeting = next_active;
-                }
-                if meeting::active(&meetings).is_none()
-                    && (previous_active.is_some()
-                        || self.meeting_refresh_started_ms.is_some_and(|started| {
-                            meetings.iter().any(|meeting| {
-                                meeting.created_at_ms >= started
-                                    && matches!(
-                                        meeting.status,
-                                        MeetingStatus::Complete
-                                            | MeetingStatus::Interrupted
-                                            | MeetingStatus::Failed
-                                    )
-                            })
-                        }))
-                {
-                    self.meeting_refresh_started_ms = None;
-                }
-                self.meetings = meetings;
-                let indexed = &self.meetings;
-                self.meeting_search_text.retain(|id, _| {
-                    indexed
-                        .iter()
-                        .any(|manifest| &manifest.id == id && !manifest.status.is_active())
-                });
-                if meeting::active(&self.meetings)
-                    .is_none_or(|meeting| meeting.status == MeetingStatus::Transcribing)
-                {
-                    self.meeting_stop_pending = false;
-                }
-                self.meetings_error = None;
-                if self
-                    .selected_meeting
-                    .as_ref()
-                    .is_some_and(|selected| !self.meetings.iter().any(|item| &item.id == selected))
-                {
-                    self.selected_meeting = None;
-                    self.meeting_transcript = MeetingTranscript::Empty;
-                } else if self.selected_meeting.is_some() {
-                    self.load_selected_meeting();
-                }
-            }
-            Err(error) => {
-                tracing::error!(%error, "could not list meetings");
-                self.meetings_error = Some(error.to_string());
-            }
-        }
-    }
-
-    fn load_selected_meeting(&mut self) {
-        let Some(id) = self.selected_meeting.clone() else {
-            self.meeting_transcript = MeetingTranscript::Empty;
-            self.meeting_transcript_id = None;
-            return;
-        };
-        let selection_changed = self.meeting_transcript_id.as_deref() != Some(&id);
-        if selection_changed {
-            self.meeting_transcript_id = Some(id.clone());
-            self.meeting_transcript_scroll = ScrollHandle::new();
-        }
-        let previous_lines = match &self.meeting_transcript {
-            MeetingTranscript::Loaded(lines) if !selection_changed => Some(lines.clone()),
-            MeetingTranscript::Empty
-            | MeetingTranscript::Loaded(_)
-            | MeetingTranscript::Unavailable(_) => None,
-        };
-        let was_following = previous_lines.as_ref().is_none_or(|lines| {
-            lines.is_empty()
-                || self.meeting_transcript_scroll.max_offset().height
-                    + self.meeting_transcript_scroll.offset().y
-                    <= px(48.0)
-        });
-        let entries = match &self.meeting_preview_transcripts {
-            Some(fixtures) => Ok(fixtures.get(&id).cloned().unwrap_or_default()),
-            None => self.meeting_transcript_reader.read(&id),
-        };
-        self.meeting_transcript = match entries {
-            Ok(entries) => {
-                self.meeting_turns = meeting::coalesce_transcript(entries);
-                MeetingTranscript::Loaded(transcript_lines(&self.meeting_turns))
-            }
-            Err(error) => {
-                self.meeting_turns.clear();
-                MeetingTranscript::Unavailable(error.to_string())
-            }
-        };
-        if !selection_changed
-            && matches!(
-                &self.meeting_transcript,
-                MeetingTranscript::Loaded(lines) if was_following && previous_lines.as_ref() != Some(lines)
-            )
-        {
-            self.meeting_transcript_scroll.scroll_to_bottom();
-        }
-    }
-
-    fn meeting_search_input(cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search meetings", ""));
-        let changed = cx.subscribe(&entity, |this, _, _: &TextChanged, cx| {
-            this.refresh_meeting_search(cx);
-            cx.notify();
-        });
-        ProcessingInput {
-            entity,
-            _subscriptions: vec![changed],
-        }
-    }
-
-    fn meeting_query(&self, cx: &App) -> String {
-        self.meeting_search
-            .entity
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase()
-    }
-
-    /// Loads searchable text for meetings not yet indexed. Runs only while
-    /// a query is entered, so idle panes never read transcripts.
-    fn refresh_meeting_search(&mut self, cx: &App) {
-        if self.meeting_query(cx).is_empty() {
-            return;
-        }
-        for manifest in &self.meetings {
-            if !self.meeting_search_text.contains_key(&manifest.id) {
-                let text = match &self.meeting_preview_transcripts {
-                    Some(fixtures) => format!(
-                        "{} {}",
-                        meeting::display_title(manifest),
-                        fixtures
-                            .get(&manifest.id)
-                            .into_iter()
-                            .flatten()
-                            .map(|entry| entry.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
-                    .to_lowercase(),
-                    None => meeting::search_text(manifest),
-                };
-                self.meeting_search_text.insert(manifest.id.clone(), text);
-            }
-        }
-    }
-
-    fn visible_meetings(&self, cx: &App) -> Vec<&MeetingManifest> {
-        let query = self.meeting_query(cx);
-        self.meetings
-            .iter()
-            .filter(|manifest| {
-                query.is_empty()
-                    || manifest.status.is_active()
-                    || self
-                        .meeting_search_text
-                        .get(&manifest.id)
-                        .is_none_or(|text| query.split_whitespace().all(|word| text.contains(word)))
-            })
-            .collect()
-    }
-
-    fn select_meeting(&mut self, id: String) {
-        if self.selected_meeting.as_deref() != Some(id.as_str()) {
-            self.meeting_rename = None;
-            self.meeting_delete_armed = None;
-            self.meeting_actions_open = false;
-            self.meeting_action_error = None;
-            self.meeting_copied = None;
-        }
-        self.selected_meeting = Some(id);
-        self.load_selected_meeting();
-    }
-
-    fn copy_meeting_text(
-        &mut self,
-        id: String,
-        what: &'static str,
-        text: String,
-        cx: &mut Context<Self>,
-    ) {
-        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
-            Ok(()) => {
-                self.meeting_copied = Some((id, what));
-                self.meeting_action_error = None;
-            }
-            Err(error) => self.meeting_action_error = Some(error.to_string()),
-        }
-        cx.notify();
-    }
-
-    fn trash_meeting(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.meeting_delete_armed.as_deref() != Some(id.as_str()) {
-            self.meeting_delete_armed = Some(id);
-            self.meeting_rename = None;
-            cx.notify();
-            return;
-        }
-        self.meeting_delete_armed = None;
-        let result = if self.preview {
-            Ok(())
-        } else {
-            meeting::trash(&id)
-        };
-        match result {
-            Ok(()) => {
-                self.meeting_action_error = None;
-                self.meeting_search_text.remove(&id);
-                if self.preview {
-                    self.meetings.retain(|manifest| manifest.id != id);
-                } else {
-                    self.reload_meetings();
-                }
-                let next = self.meetings.first().map(|manifest| manifest.id.clone());
-                self.selected_meeting = None;
-                if let Some(next) = next {
-                    self.select_meeting(next);
-                } else {
-                    self.load_selected_meeting();
-                }
-            }
-            Err(error) => self.meeting_action_error = Some(error.to_string()),
-        }
-        cx.notify();
-    }
-
-    fn start_meeting_rename(
-        &mut self,
-        id: String,
-        title: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let entity = cx.new(|cx| TextInput::new(cx, "Meeting title", &title));
-        let submitted = cx.subscribe(&entity, |this, _, _: &TextSubmitted, cx| {
-            this.finish_meeting_rename(cx);
-        });
-        let dismissed = cx.subscribe(&entity, |this, _, _: &TextDismissed, cx| {
-            this.meeting_rename = None;
-            cx.notify();
-        });
-        entity.focus_handle(cx).focus(window);
-        self.meeting_delete_armed = None;
-        self.meeting_rename = Some((
-            id,
-            ProcessingInput {
-                entity,
-                _subscriptions: vec![submitted, dismissed],
-            },
-        ));
-        cx.notify();
-    }
-
-    fn finish_meeting_rename(&mut self, cx: &mut Context<Self>) {
-        let Some((id, input)) = self.meeting_rename.take() else {
-            return;
-        };
-        let title = input.entity.read(cx).text().to_string();
-        let result = if self.preview {
-            let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-            match self.meetings.iter_mut().find(|manifest| manifest.id == id) {
-                Some(manifest) if !title.is_empty() => {
-                    manifest.title = title;
-                    Ok(())
-                }
-                _ => Err(color_eyre::eyre::eyre!("The title is empty")),
-            }
-        } else {
-            meeting::rename(&id, &title).map(|_| ())
-        };
-        match result {
-            Ok(()) => self.meeting_action_error = None,
-            Err(error) => self.meeting_action_error = Some(format!("{error:#}")),
-        }
-        self.meeting_search_text.remove(&id);
-        if !self.preview {
-            self.reload_meetings();
-        }
-        cx.notify();
-    }
-
-    fn load_meeting_preview(&mut self, preview: &MeetingPreview) {
-        let (meetings, transcripts) = preview_meetings(preview.empty);
-        self.meetings = meetings;
-        self.meeting_preview_transcripts = Some(transcripts);
-        let selected = if preview.recording {
-            meeting::active(&self.meetings)
-        } else {
-            self.meetings
-                .iter()
-                .find(|manifest| manifest.status == MeetingStatus::Complete)
-        }
-        .map(|manifest| manifest.id.clone());
-        if let Some(id) = selected {
-            self.select_meeting(id.clone());
-            if preview.confirm_delete {
-                self.meeting_delete_armed = Some(id);
-            }
-            self.meeting_actions_open = preview.open_actions;
-        }
-    }
-
     fn reload_events(&mut self) {
         if !matches!(self.pane, Pane::Commands | Pane::Activity) {
             return;
@@ -2556,15 +1848,9 @@ impl AppWindow {
         let Some(entry) = self.history_entries.iter().find(|entry| entry.id == id) else {
             return;
         };
-        match arboard::Clipboard::new()
-            .and_then(|mut clipboard| clipboard.set_text(entry.final_text.clone()))
-        {
-            Ok(()) => {
-                self.history_copied = Some(id);
-                self.history_error = None;
-            }
-            Err(error) => self.history_error = Some(error.to_string()),
-        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(entry.final_text.clone()));
+        self.history_copied = Some(id);
+        self.history_error = None;
         cx.notify();
     }
 
@@ -2823,6 +2109,7 @@ impl AppWindow {
 
     fn render_navigation(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let items = Pane::all(
+            platform::CAPABILITIES,
             crate::DEVELOPER_FEATURES_ENABLED,
             self.settings.meetings.available(),
         )
@@ -2838,7 +2125,7 @@ impl AppWindow {
                 }))
         });
 
-        sidebar_frame()
+        platform::sidebar(sidebar_frame())
             .child(div().flex().flex_col().gap_0p5().children(items))
             .child(div().flex_1())
             .child(
@@ -2858,7 +2145,7 @@ impl AppWindow {
                             .text_color(rgb(TEXT_TERTIARY))
                             .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
                     )
-                    .children(sidebar_update_button(self.update_status, self.preview)),
+                    .children(self.platform_update_button(cx)),
             )
             .into_any_element()
     }
@@ -2871,7 +2158,8 @@ impl AppWindow {
     ) -> AnyElement {
         let binding_keycaps = hotkey_binding(&self.settings, kind)
             .map_or_else(|| vec!["Off".into()], HotkeyBinding::keycaps);
-        let idle_width = hotkey_idle_width(binding_keycaps.len());
+        let idle_width =
+            hotkey_idle_width(binding_keycaps.len()) + hotkey_label_overflow(&binding_keycaps);
         if matches!(
             self.hotkey_capture,
             HotkeyCaptureState::Saved { saved_at, .. }
@@ -3049,7 +2337,9 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hotkey = self.render_hotkey_control(kind, window, cx);
-        let side = hotkey_binding(&self.settings, kind).and_then(standalone_modifier_side);
+        let side = hotkey_binding(&self.settings, kind)
+            .filter(|_| platform::CAPABILITIES.modifier_sides)
+            .and_then(standalone_modifier_side);
         let side_animation = &mut self.hotkey_side_animations[hotkey_kind_index(kind)];
         side_animation.set_enabled(side.is_some());
         let side_position = side_animation.render_position(window).clamp(0.0, 1.0);
@@ -3117,7 +2407,7 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) {
         if !self.preview {
-            crate::app_settings::set_hotkey_capture_active(true);
+            platform::set_hotkey_capture_active(true);
         }
         self.hotkey_width_spring.set_target(hotkey_capture_width(0));
         self.hotkey_capture = HotkeyCaptureState::Listening {
@@ -3128,13 +2418,14 @@ impl AppWindow {
         };
         self.hotkey_capture_animation.set_enabled(true);
         self.hotkey_focus.focus(window);
+        self.platform_capture_started(cx);
         cx.notify();
     }
 
     fn cancel_hotkey_capture(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.hotkey_capture, HotkeyCaptureState::Idle) {
             if !self.preview {
-                crate::app_settings::set_hotkey_capture_active(false);
+                platform::set_hotkey_capture_active(false);
             }
             self.hotkey_capture = HotkeyCaptureState::Idle;
             self.hotkey_capture_animation.set_enabled(false);
@@ -3148,15 +2439,16 @@ impl AppWindow {
             return;
         }
         cx.stop_propagation();
-        if event.is_held {
+        if event.is_held || !platform::KEY_EVENT_HOTKEY_CAPTURE {
             return;
         }
         if event.keystroke.key == "escape" {
             self.cancel_hotkey_capture(cx);
             return;
         }
-        let modifiers = hotkey_modifiers(event.keystroke.modifiers).without_side_constraints();
-        let key = match hotkey_key(&event.keystroke.key) {
+        let modifiers =
+            platform::hotkey_modifiers(event.keystroke.modifiers).without_side_constraints();
+        let key = match platform::hotkey_key(&event.keystroke.key) {
             Ok(key) => key,
             Err(message) => {
                 self.set_hotkey_capture_message(message, cx);
@@ -3171,13 +2463,17 @@ impl AppWindow {
             modifiers,
             key: Some(key),
         };
+        let keycaps = binding.keycaps();
         self.hotkey_width_spring
-            .set_target(hotkey_capture_width(binding.keycaps().len()));
+            .set_target(hotkey_capture_width(keycaps.len()) + hotkey_label_overflow(&keycaps));
         self.save_hotkey_binding(binding, cx);
     }
 
     fn capture_hotkey_modifiers(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
-        let current = normalize_captured_modifiers(hotkey_modifiers(event.modifiers));
+        if !platform::KEY_EVENT_HOTKEY_CAPTURE {
+            return;
+        }
+        let current = normalize_captured_modifiers(platform::hotkey_modifiers(event.modifiers));
         let released = {
             let HotkeyCaptureState::Listening {
                 modifiers, message, ..
@@ -3190,15 +2486,14 @@ impl AppWindow {
                     *modifiers = current;
                     *message = None;
                 }
-                let active_modifiers = *modifiers;
-                self.hotkey_width_spring.set_target(hotkey_capture_width(
-                    HotkeyBinding {
-                        modifiers: active_modifiers,
-                        key: None,
-                    }
-                    .keycaps()
-                    .len(),
-                ));
+                let keycaps = HotkeyBinding {
+                    modifiers: *modifiers,
+                    key: None,
+                }
+                .keycaps();
+                self.hotkey_width_spring.set_target(
+                    hotkey_capture_width(keycaps.len()) + hotkey_label_overflow(&keycaps),
+                );
                 cx.notify();
                 None
             } else if message.is_some() {
@@ -3237,22 +2532,28 @@ impl AppWindow {
             HotkeyCaptureState::Listening { kind, .. } => kind,
             HotkeyCaptureState::Idle | HotkeyCaptureState::Saved { .. } => return,
         };
+        if let Err(message) = platform::validate_hotkey(kind, &binding) {
+            self.set_hotkey_capture_message(message, cx);
+            return;
+        }
         if hotkey_binding_conflicts(&self.settings, kind, &binding) {
             self.set_hotkey_capture_message("Already in use", cx);
             return;
         }
-        let keycap_count = binding.keycaps().len();
+        let keycaps = binding.keycaps();
+        let keycap_count = keycaps.len();
+        let label_overflow = hotkey_label_overflow(&keycaps);
         if !self.update_settings(cx, |settings| set_hotkey_binding(settings, kind, binding)) {
             self.set_hotkey_capture_message("Could not save shortcut. Try again.", cx);
             return;
         }
         self.hotkey_width_spring
-            .set_target(hotkey_saved_width(keycap_count));
+            .set_target(hotkey_saved_width(keycap_count) + label_overflow);
         if kind == HotkeyKind::Edit {
             self.voice_action_inputs.error = None;
         }
         if !self.preview {
-            crate::app_settings::set_hotkey_capture_active(false);
+            platform::set_hotkey_capture_active(false);
         }
         self.hotkey_capture = HotkeyCaptureState::Saved {
             kind,
@@ -3457,85 +2758,24 @@ impl AppWindow {
         cx.notify();
     }
 
-    fn render_permission_warnings(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let warnings = crate::onboarding::permission_warnings(self.setup_status);
-        if self.setup_visible || warnings.is_empty() {
-            return None;
-        }
-        let warning_count = warnings.len();
-        Some(
-            div()
-                .child(settings_section_label("Permissions needed"))
-                .child(panel().children(warnings.into_iter().enumerate().map(
-                    |(index, warning)| {
-                        let (name, description) = permission_warning_copy(warning.kind);
-                        let action = button(
-                            ButtonKind::Secondary,
-                            permission_action_label(warning.action),
-                        )
-                        .id(permission_warning_id(warning.kind))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.perform_permission_action(warning);
-                            cx.notify();
-                        }));
-                        settings_row(name, description, action)
-                            .when(index + 1 == warning_count, |row| row.border_b_0())
-                    },
-                )))
-                .into_any_element(),
-        )
-    }
-
     fn render_model_notice(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.setup_visible {
             return None;
         }
         let dictation_notice =
             dictation_model_notice(self.setup_status, self.transcription_status.model.is_some());
-        let (title, description) = dictation_notice.or_else(|| {
-            self.settings
-                .commands_enabled
-                .then(|| command_model_notice(&self.command_model_status))
-                .flatten()
-        })?;
-        let action = if dictation_notice.is_some() {
-            button(ButtonKind::Primary, "Choose model")
+        let (title, description, action) = if let Some((title, description)) = dictation_notice {
+            let action = button(ButtonKind::Primary, "Choose model")
                 .id("choose-required-model")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.transcription_picker_language =
                         Some(this.settings.transcription.language.clone());
                     cx.notify();
                 }))
-                .into_any_element()
+                .into_any_element();
+            (title, description, action)
         } else {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .when(
-                    matches!(self.command_model_status, CommandModelStatus::Failed),
-                    |controls| {
-                        controls.child(
-                            button(ButtonKind::Secondary, "Retry")
-                                .id("retry-command-model")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if !this.preview {
-                                        cx.dispatch_action(&RetryCommands);
-                                    }
-                                })),
-                        )
-                    },
-                )
-                .child(
-                    button(ButtonKind::Secondary, "Turn off commands")
-                        .id("disable-unavailable-commands")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Err(error) = this.developer_set_commands_enabled(false, cx) {
-                                tracing::warn!(%error, "could not disable voice commands");
-                            }
-                        })),
-                )
-                .into_any_element()
+            self.platform_model_notice(cx)?
         };
         Some(
             div()
@@ -3569,24 +2809,193 @@ impl AppWindow {
         )
     }
 
-    fn perform_permission_action(&mut self, warning: PermissionWarning) {
-        match warning.action {
-            PermissionAction::RequestMicrophone => crate::onboarding::request_microphone(),
-            PermissionAction::OpenMicrophoneSettings => {
-                crate::onboarding::open_permission_settings("microphone");
+    fn render_listener_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let listener = self.platform_listener()?;
+        let running = listener.running;
+        let shortcut = self.settings.dictation_hotkey.keycaps().join("+");
+        let hint = match (running, self.settings.shortcut_mode) {
+            (true, crate::dictation::ShortcutMode::Toggle) => {
+                format!("Ready anywhere · Press {shortcut} to start and stop dictating")
             }
-            PermissionAction::OpenInputMonitoringSettings => {
-                crate::permission_guide::show_input_monitoring();
+            (true, crate::dictation::ShortcutMode::Hold) => {
+                format!("Ready anywhere · Hold {shortcut} to dictate")
             }
-            PermissionAction::OpenAccessibilitySettings => {
-                crate::permission_guide::show_accessibility();
+            (false, _) => format!("Enable Hex to dictate into any app with {shortcut}"),
+        };
+        let action = button(
+            ButtonKind::Secondary,
+            if running { "Disable" } else { "Enable" },
+        )
+        .id("toggle-listening")
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.set_listening(!running);
+            cx.notify();
+        }));
+        Some(
+            div()
+                .pt_6()
+                .child(
+                    panel().child(
+                        div()
+                            .w_full()
+                            .min_h(px(72.0))
+                            .px_4()
+                            .py_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(status_dot(if running {
+                                        SUCCESS
+                                    } else {
+                                        TEXT_TERTIARY
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_body()
+                                                    .text_color(rgb(TEXT_PRIMARY))
+                                                    .child(listener.status),
+                                            )
+                                            .child(truncated_line(FOOTNOTE, hint))
+                                            .when_some(listener.last_failure, |column, failure| {
+                                                column.child(
+                                                    truncated_line(
+                                                        FOOTNOTE,
+                                                        format!("Last dictation failed: {failure}"),
+                                                    )
+                                                    .text_color(rgb(DANGER)),
+                                                )
+                                            }),
+                                    ),
+                            )
+                            .child(action),
+                    ),
+                )
+                .when_some(listener.error, |card, error| {
+                    card.child(error_message("Hex could not apply this change.", error))
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_interface_language_control(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.settings.ui_language.clone();
+        let label = crate::desktop_i18n::choice_name(selected.as_deref());
+        let menu = self.interface_language_open.then(|| {
+            dropdown_menu()
+                .id("interface-language-picker")
+                .right_0()
+                .w(px(DISCLOSURE_WIDTH))
+                .max_h(px(240.0))
+                .overflow_y_scroll()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.interface_language_open = false;
+                    cx.notify();
+                }))
+                .children(
+                    crate::desktop_i18n::LANGUAGE_CHOICES
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (code, name))| {
+                            let code = code.map(str::to_string);
+                            menu_item(selected == code)
+                                .id(("interface-language-choice", index))
+                                .child(truncated_line(FOOTNOTE, *name))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.interface_language_open = false;
+                                    let code = code.clone();
+                                    if this.update_settings(cx, |settings| {
+                                        settings.ui_language = code.clone();
+                                    }) {
+                                        crate::desktop_i18n::apply(code.as_deref());
+                                    }
+                                }))
+                        }),
+                )
+        });
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                disclosure_button(label)
+                    .id("interface-language")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.interface_language_open = !this.interface_language_open;
+                        cx.notify();
+                    })),
+            )
+            .children(menu.map(deferred))
+            .into_any_element()
+    }
+
+    fn render_software_update_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let control = match self.platform_software_update()? {
+            SoftwareUpdate::Checking => busy_label("Checking").into_any_element(),
+            SoftwareUpdate::Available { version } => {
+                button(ButtonKind::Secondary, format!("Update to {version}"))
+                    .id("software-update")
+                    .text_color(rgb(ACCENT_TEXT))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.install_update(cx);
+                        cx.notify();
+                    }))
+                    .into_any_element()
             }
-        }
-        self.permission_refresh_at = Instant::now() + PERMISSION_REFRESH_INTERVAL;
+            SoftwareUpdate::ReadyToRestart { version } => {
+                button(ButtonKind::Secondary, format!("Restart into {version}"))
+                    .id("software-update")
+                    .text_color(rgb(ACCENT_TEXT))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.install_update(cx);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+            SoftwareUpdate::Current if !platform::MANUAL_UPDATE_CHECK => div()
+                .text_footnote()
+                .text_color(rgb(TEXT_TERTIARY))
+                .child("Up to date")
+                .into_any_element(),
+            SoftwareUpdate::Failed if !platform::MANUAL_UPDATE_CHECK => div()
+                .text_footnote()
+                .text_color(rgb(TEXT_TERTIARY))
+                .child("Check failed; retrying later")
+                .into_any_element(),
+            SoftwareUpdate::Current | SoftwareUpdate::Failed => {
+                button(ButtonKind::Secondary, "Check now")
+                    .id("software-update")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.check_for_updates();
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+        };
+        Some(control)
     }
 
     fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let permission_warnings = self.render_permission_warnings(cx);
+        let capabilities = platform::CAPABILITIES;
+        let platform_notice = self.platform_settings_notice(cx);
+        let listener_card = capabilities
+            .listener_control
+            .then(|| self.render_listener_card(cx))
+            .flatten();
         let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
         let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
         let transcription_model = definition(self.settings.transcription.model);
@@ -3616,7 +3025,42 @@ impl AppWindow {
             .render_position(window)
             .clamp(0.0, 1.0);
         let dock_icon_position = self.dock_icon_toggle.render_position(window);
-        let meetings_section = self.render_meeting_settings(window, cx);
+        let platform_section = self.platform_settings_section(window, cx);
+        let enable_on_launch_position = self.enable_on_launch_toggle.render_position(window);
+        let terminal_paste_position = self.terminal_paste_toggle.render_position(window);
+        let indicator_position = self.indicator_position_spring.render_position(window);
+        let indicator_control = sliding_segmented_control(indicator_position, &[64.0; 3])
+            .id("indicator-position")
+            .children(
+                [
+                    ("Top", IndicatorPosition::Top),
+                    ("Bottom", IndicatorPosition::Bottom),
+                    ("Off", IndicatorPosition::Hidden),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (label, position))| {
+                    sliding_segmented_item(64.0, self.settings.indicator_position == position)
+                        .id(("indicator-position", index))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.settings.indicator_position != position
+                                && this.update_settings(cx, |settings| {
+                                    settings.indicator_position = position;
+                                })
+                            {
+                                this.indicator_position_spring.set_target(index as f32);
+                            }
+                        }))
+                }),
+            );
+        let interface_language_control = capabilities
+            .interface_language
+            .then(|| self.render_interface_language_control(cx));
+        let software_update_control = capabilities
+            .software_updates
+            .then(|| self.render_software_update_control(cx))
+            .flatten();
         let launch_at_login_position = self.launch_at_login_toggle.render_position(window);
         let microphone_label = self
             .settings
@@ -3801,7 +3245,8 @@ impl AppWindow {
             "Settings",
             "settings-scroll",
             div()
-                .children(permission_warnings)
+                .children(platform_notice)
+                .children(listener_card)
                 .child(settings_section_label("Dictation"))
                 .child(
                     panel()
@@ -3912,7 +3357,39 @@ impl AppWindow {
                                     })),
                                 ),
                         )
-                        .child(
+                        .when(capabilities.indicator_position, |panel| {
+                            panel.child(
+                                settings_row(
+                                    "Recording indicator",
+                                    "Show the dictation pill at the top or bottom of the screen",
+                                    indicator_control,
+                                )
+                                .when(!capabilities.terminal_paste && !capabilities.paste_last, |row| {
+                                    row.border_b_0()
+                                })
+                                .id("indicator-position-setting"),
+                            )
+                        })
+                        .when(capabilities.terminal_paste, |panel| {
+                            panel.child(
+                                settings_row(
+                                    "Terminal paste",
+                                    "Paste with Ctrl+Shift+V so terminals accept it",
+                                    toggle(terminal_paste_position),
+                                )
+                                .when(!capabilities.paste_last, |row| row.border_b_0())
+                                .id("terminal-paste-setting")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let enabled = !this.settings.paste_with_shift;
+                                    if this.update_settings(cx, |settings| {
+                                        settings.paste_with_shift = enabled
+                                    }) {
+                                        this.terminal_paste_toggle.set_enabled(enabled);
+                                    }
+                                })),
+                            )
+                        })
+                        .when(capabilities.paste_last, |panel| panel.child(
                             settings_row(
                                 "Paste last dictation",
                                 "Re-paste the most recent dictation",
@@ -3933,14 +3410,13 @@ impl AppWindow {
                             )
                             .border_b_0()
                             .id("paste-last-hotkey-setting"),
-                        )
+                        ))
                 )
-                .child(settings_section_label("Meetings"))
-                .child(meetings_section)
+                .children(platform_section)
                 .child(settings_section_label("Application"))
                 .child(
                     panel()
-                        .child(
+                        .when(capabilities.launch_at_login, |panel| panel.child(
                             settings_row(
                                 "Launch at login",
                                 "Start Hex when you log in",
@@ -3959,14 +3435,30 @@ impl AppWindow {
                                     ))
                                 },
                             ),
-                        )
+                        ))
                         .when_some(
                             self.launch_at_login_error.clone(),
                             |settings, error| {
                                 settings.child(inline_error(error))
                             },
                         )
-                        .child(
+                        .when(capabilities.listener_control, |panel| panel.child(
+                            settings_row(
+                                "Enable on launch",
+                                "Turn Hex on in every app whenever it opens",
+                                toggle(enable_on_launch_position),
+                            )
+                            .id("enable-on-launch-setting")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let enabled = !this.settings.enable_on_launch;
+                                if this.update_settings(cx, |settings| {
+                                    settings.enable_on_launch = enabled
+                                }) {
+                                    this.enable_on_launch_toggle.set_enabled(enabled);
+                                }
+                            })),
+                        ))
+                        .when(capabilities.dock_icon, |panel| panel.child(
                             settings_row(
                                 "Show Dock icon",
                                 "Keep Hex in the menu bar when Settings is closed",
@@ -3980,161 +3472,39 @@ impl AppWindow {
                                 this.dock_icon_toggle
                                     .set_enabled(this.settings.show_dock_icon);
                             })),
-                        )
+                        ))
+                        .when_some(interface_language_control, |panel, control| {
+                            panel.child(
+                                settings_row(
+                                    "Interface language",
+                                    "Language of the Hex interface",
+                                    control,
+                                )
+                                .id("interface-language-setting"),
+                            )
+                        })
                         .child(
                             settings_row(
                                 "Sound volume",
                                 "Recording, cancellation, and error tones",
                                 sound_volume,
                             )
-                            .border_b_0()
+                            .when(software_update_control.is_none(), |row| row.border_b_0())
                             .id("sound-effects-setting"),
-                        ),
+                        )
+                        .when_some(software_update_control, |panel, control| {
+                            panel.child(
+                                settings_row(
+                                    "Software updates",
+                                    "Checks for new Hex releases in the background",
+                                    control,
+                                )
+                                .border_b_0()
+                                .id("software-updates-setting"),
+                            )
+                        }),
                 ),
         )
-    }
-
-    fn render_meeting_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let enabled = self.settings.meetings.enabled;
-        let position = self.meetings_toggle.render_position(window);
-        let notes_position = self.meeting_notes_toggle.render_position(window);
-        let folder = self.settings.meetings.resolved_output_folder();
-        let folder_label = folder
-            .strip_prefix(dirs::home_dir().unwrap_or_default())
-            .map(|relative| format!("~/{}", relative.display()))
-            .unwrap_or_else(|_| folder.display().to_string());
-        let permission_control = if self.screen_recording_permitted {
-            tag(Tone::Success, "Ready").into_any_element()
-        } else {
-            button(ButtonKind::Secondary, "Open settings")
-                .id("meeting-screen-recording")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !crate::meeting::request_screen_recording() {
-                        crate::meeting::open_screen_recording_settings();
-                    }
-                    this.permission_refresh_at = Instant::now();
-                    cx.notify();
-                }))
-                .into_any_element()
-        };
-        panel()
-            .child(
-                settings_row(
-                    "Meetings (beta)",
-                    "Offer to record calls and save local transcripts",
-                    toggle(position),
-                )
-                .when(!enabled, |row| row.border_b_0())
-                .id("meetings-setting")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let enabled = !this.settings.meetings.enabled;
-                    if this.update_settings(cx, |settings| settings.meetings.enabled = enabled) {
-                        this.meetings_toggle.set_enabled(enabled);
-                        if enabled {
-                            this.screen_recording_permitted =
-                                this.preview || crate::meeting::screen_recording_permitted();
-                            if !this.preview {
-                                this.reload_meetings();
-                            }
-                        } else if this.pane == Pane::Meetings {
-                            this.pane = Pane::Settings;
-                        }
-                    }
-                })),
-            )
-            .when(enabled, |panel| {
-                panel
-                    .child(settings_row(
-                        "Screen & System Audio Recording",
-                        if self.screen_recording_permitted {
-                            "Captures the other participants' audio"
-                        } else {
-                            "Required to hear the other participants. Allow Hex, then reopen it."
-                        },
-                        permission_control,
-                    ))
-                    .child(settings_row(
-                        "Transcript folder",
-                        "Finished meetings are saved here as Markdown",
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                button(ButtonKind::Secondary, "Reveal")
-                                    .id("reveal-meeting-folder")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let folder =
-                                            this.settings.meetings.resolved_output_folder();
-                                        match std::fs::create_dir_all(&folder) {
-                                            Ok(()) => crate::meeting::reveal(&folder),
-                                            Err(error) => {
-                                                this.meeting_folder_error = Some(error.to_string());
-                                            }
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                disclosure_button(folder_label)
-                                    .id("meeting-folder-setting")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.choose_meeting_folder(cx);
-                                    })),
-                            ),
-                    ))
-                    .child(
-                        settings_row(
-                            "Summarize with Apple Intelligence",
-                            self.apple_intelligence_availability().description(),
-                            toggle(notes_position),
-                        )
-                        .border_b_0()
-                        .id("meeting-notes-setting")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let enabled = !this.settings.meetings.summarize_with_apple_intelligence;
-                            if this.update_settings(cx, |settings| {
-                                settings.meetings.summarize_with_apple_intelligence = enabled
-                            }) {
-                                this.meeting_notes_toggle.set_enabled(enabled);
-                            }
-                        })),
-                    )
-                    .when_some(self.meeting_folder_error.clone(), |panel, error| {
-                        panel.child(inline_error(error))
-                    })
-            })
-    }
-
-    fn choose_meeting_folder(&mut self, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Use Folder".into()),
-        });
-        cx.spawn(async move |window, cx| {
-            let result = receiver
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|result| result.map_err(|error| error.to_string()));
-            let _ = window.update(cx, |window, cx| match result {
-                Ok(Some(paths)) => {
-                    if let Some(folder) = paths.into_iter().next() {
-                        window.meeting_folder_error = None;
-                        window.update_settings(cx, |settings| {
-                            settings.meetings.output_folder = Some(folder);
-                        });
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    window.meeting_folder_error = Some(error);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     fn toggle_microphone_picker(&mut self, cx: &mut Context<Self>) {
@@ -4153,67 +3523,7 @@ impl AppWindow {
 
     fn render_setup(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let status = self.setup_status;
-        let microphone = match status.microphone {
-            PermissionState::Ready => tag(Tone::Success, "Ready").into_any_element(),
-            PermissionState::NeedsRequest => button(ButtonKind::Secondary, "Allow")
-                .id("setup-microphone")
-                .on_click(cx.listener(|_this, _, _, cx| {
-                    crate::onboarding::request_microphone();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            PermissionState::NeedsSettings => button(ButtonKind::Secondary, "Open settings")
-                .id("setup-microphone")
-                .on_click(cx.listener(|_this, _, _, cx| {
-                    crate::onboarding::open_permission_settings("microphone");
-                    cx.notify();
-                }))
-                .into_any_element(),
-        };
-        let mut permission_items: Vec<(&'static str, &'static str, AnyElement)> = Vec::new();
-        if status.microphone != PermissionState::Ready {
-            permission_items.push((
-                "Microphone",
-                if self.settings.commands_enabled {
-                    "Hear commands and dictation."
-                } else {
-                    "Record dictation while you hold the shortcut"
-                },
-                microphone,
-            ));
-        }
-        if status.input_monitoring != PermissionState::Ready {
-            let input_monitoring = button(ButtonKind::Secondary, "Grant access")
-                .id("setup-input-monitoring")
-                .on_click(cx.listener(|_this, _, _, cx| {
-                    crate::permission_guide::show_input_monitoring();
-                    cx.notify();
-                }))
-                .into_any_element();
-            permission_items.push((
-                "Input Monitoring",
-                "Recognize the dictation shortcut anywhere",
-                input_monitoring,
-            ));
-        }
-        if status.accessibility != PermissionState::Ready {
-            let accessibility = button(ButtonKind::Secondary, "Grant access")
-                .id("setup-accessibility")
-                .on_click(cx.listener(|_this, _, _, cx| {
-                    crate::permission_guide::show_accessibility();
-                    cx.notify();
-                }))
-                .into_any_element();
-            permission_items.push((
-                "Accessibility",
-                if self.settings.commands_enabled {
-                    "Paste text and run keyboard commands."
-                } else {
-                    "Paste completed dictation into the foreground app"
-                },
-                accessibility,
-            ));
-        }
+        let permission_items = self.platform_setup_permissions(cx);
         let permission_count = permission_items.len();
         let permission_rows = permission_items
             .into_iter()
@@ -4273,7 +3583,11 @@ impl AppWindow {
                                 div()
                                     .text_footnote()
                                     .text_color(rgb(TEXT_TERTIARY))
-                                    .child("Grant permissions and choose a local model to start dictating."),
+                                    .child(if platform::CAPABILITIES.permissions {
+                                        "Grant permissions and choose a local model to start dictating."
+                                    } else {
+                                        "Choose a local model to start dictating."
+                                    }),
                             ),
                     )
                     .when(!permission_rows.is_empty(), |setup| {
@@ -4302,8 +3616,10 @@ impl AppWindow {
                                         },
                                         if let Some((_, description)) = model_notice {
                                             description
-                                        } else {
+                                        } else if platform::CAPABILITIES.permissions {
                                             "The selected model transcribes speech entirely on this Mac."
+                                        } else {
+                                            "The selected model transcribes speech entirely on this computer."
                                         },
                                         models,
                                     )
@@ -4311,7 +3627,7 @@ impl AppWindow {
                                 ),
                             ),
                     )
-                    .when(crate::DEVELOPER_FEATURES_ENABLED, |setup| {
+                    .when(crate::DEVELOPER_FEATURES_ENABLED && platform::CAPABILITIES.meetings, |setup| {
                         setup.child(
                             div()
                                 .text_footnote()
@@ -4466,6 +3782,9 @@ impl AppWindow {
         self.settings_save_generation = self.settings_save_generation.wrapping_add(1);
         self.settings_dirty = false;
         self.settings_load_error = None;
+        if !self.preview {
+            self.platform_settings_saved();
+        }
         Ok(())
     }
 
@@ -6169,849 +5488,9 @@ impl AppWindow {
         }
     }
 
-    fn render_meetings(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let active_meeting = meeting::active(&self.meetings);
-        let action = match active_meeting.map(|meeting| meeting.status) {
-            _ if self.meeting_stop_pending => busy_label("Finalizing…").into_any_element(),
-            Some(MeetingStatus::Transcribing) => busy_label("Finalizing…").into_any_element(),
-            Some(MeetingStatus::Starting) => busy_label("Starting…").into_any_element(),
-            // Recording is a state, not the screen's main action: a neutral
-            // button in the same red-dot language as the Recording tag.
-            Some(MeetingStatus::Recording) => button(ButtonKind::Secondary, status_dot(DANGER))
-                .child("Stop & transcribe")
-                .children(active_meeting.map(|meeting| {
-                    div()
-                        .text_color(rgb(TEXT_TERTIARY))
-                        .child(meeting::format_duration(meeting_duration(meeting)))
-                }))
-                .id("stop-meeting")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.meeting_stop_pending = true;
-                    if let Err(error) = this.meeting_requests.try_send(MeetingRequest::Stop) {
-                        this.meeting_stop_pending = false;
-                        log_meeting_request_error(error);
-                    }
-                    cx.notify();
-                }))
-                .into_any_element(),
-            _ if self.meeting_refresh_started_ms.is_some() => {
-                busy_label("Starting…").into_any_element()
-            }
-            _ => button(ButtonKind::Primary, "Start recording")
-                .id("start-meeting")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.meeting_refresh_started_ms = Some(now_ms());
-                    if let Err(error) = this.meeting_requests.try_send(MeetingRequest::Start) {
-                        this.meeting_refresh_started_ms = None;
-                        log_meeting_request_error(error);
-                    }
-                    cx.notify();
-                }))
-                .into_any_element(),
-        };
-        let header_action = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .w(px(SEARCH_FIELD_WIDTH))
-                    .child(self.meeting_search.entity.clone()),
-            )
-            .child(action)
-            .into_any_element();
-
-        let now = now_ms();
-        let visible = self.visible_meetings(cx);
-        let searching = !self.meeting_query(cx).is_empty();
-        let mut rows: Vec<AnyElement> = Vec::new();
-        let mut current_day = None;
-        for (index, meeting) in visible.iter().enumerate() {
-            let day = meeting::day_label(meeting.created_at_ms, now);
-            if current_day.as_ref() != Some(&day) {
-                rows.push(list_section_label(day.clone(), rows.is_empty()).into_any_element());
-                current_day = Some(day);
-            }
-            let id = meeting.id.clone();
-            let selected = self.selected_meeting.as_deref() == Some(id.as_str());
-            let mut meta = vec![
-                meeting::clock(meeting.created_at_ms),
-                meeting_length(meeting_duration(meeting)),
-            ];
-            meta.extend(meeting.app.clone());
-            rows.push(
-                list_row(selected)
-                    .id(("meeting", index))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                list_row_title(meeting::display_title(meeting), selected).flex_1(),
-                            )
-                            .when_some(
-                                meeting_status_chip(
-                                    meeting.status,
-                                    self.meeting_stop_pending,
-                                    false,
-                                ),
-                                |row, chip| row.child(chip),
-                            ),
-                    )
-                    .child(list_row_meta(meta.join(" · "), selected))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_meeting(id.clone());
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-
-        let list = pane_list(
-            "meetings-list",
-            PANE_LIST_WIDTH,
-            (visible.is_empty() && self.meetings_error.is_none()).then_some(if searching {
-                "No meetings match."
-            } else {
-                "No meetings yet."
-            }),
-            "Meetings could not be loaded.",
-            self.meetings_error.clone(),
-            rows,
-        );
-
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(pane_header_with_action("Meetings", Some(header_action)))
-            .child(
-                pane_body().child(
-                    pane_content()
-                        .id("meetings-workspace")
-                        .gap_3()
-                        .when_some(self.meeting_runtime_error.clone(), |column, error| {
-                            column.child(
-                                error_panel("Meeting could not be recorded.", error).flex_none(),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h(px(0.0))
-                                .flex()
-                                .gap_5()
-                                .child(list)
-                                .child(pane_detail(self.render_meeting_detail(cx))),
-                        ),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_meeting_detail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(meeting) = self
-            .selected_meeting
-            .as_deref()
-            .and_then(|id| self.meetings.iter().find(|meeting| meeting.id == id))
-            .cloned()
-        else {
-            return detail_placeholder(if self.meetings.is_empty() {
-                "Record a call to see its notes and transcript here."
-            } else {
-                "Select a meeting."
-            });
-        };
-        let id = meeting.id.clone();
-        let active = meeting.status.is_active();
-        let recording = meeting.status == MeetingStatus::Recording && !self.meeting_stop_pending;
-        let title = meeting::display_title(&meeting);
-        let copied = |what: &'static str| {
-            self.meeting_copied
-                .as_ref()
-                .is_some_and(|(copied_id, copied)| copied_id == &id && *copied == what)
-        };
-        let action_of = |kind: ButtonKind, key: &'static str, label: &'static str| {
-            button(kind, label).id(SharedString::from(format!("meeting-action-{key}")))
-        };
-        let action =
-            |key: &'static str, label: &'static str| action_of(ButtonKind::Secondary, key, label);
-        let menu_action = |key: &'static str, item: Div| {
-            item.id(SharedString::from(format!("meeting-action-{key}")))
-        };
-
-        // Copy transcript and Rename stay visible; the rest live in the
-        // overflow menu, with Delete last.
-        let mut actions: Vec<AnyElement> = Vec::new();
-        let mut menu_items: Vec<AnyElement> = Vec::new();
-        if let Some(notes) = meeting.notes.clone() {
-            let id = id.clone();
-            menu_items.push(
-                menu_action(
-                    "copy-notes",
-                    menu_item(false).child(if copied("notes") {
-                        "Copied"
-                    } else {
-                        "Copy summary"
-                    }),
-                )
-                // Stays open so "Copied" confirms the copy.
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.copy_meeting_text(id.clone(), "notes", meeting::notes_markdown(&notes), cx)
-                }))
-                .into_any_element(),
-            );
-        }
-        if !self.meeting_turns.is_empty() {
-            let id = id.clone();
-            let turns = self.meeting_turns.clone();
-            actions.push(
-                action(
-                    "copy-transcript",
-                    if copied("transcript") {
-                        "Copied"
-                    } else {
-                        "Copy transcript"
-                    },
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.copy_meeting_text(
-                        id.clone(),
-                        "transcript",
-                        meeting::transcript_markdown(&turns),
-                        cx,
-                    )
-                }))
-                .into_any_element(),
-            );
-        }
-        if !active && self.meeting_rename.is_none() {
-            let (id, title) = (id.clone(), title.clone());
-            actions.push(
-                action("rename", "Rename")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_meeting_rename(id.clone(), title.clone(), window, cx)
-                    }))
-                    .into_any_element(),
-            );
-        }
-        if !active {
-            let export_path = meeting.export_path.clone().filter(|path| path.exists());
-            let reveal_id = id.clone();
-            menu_items.push(
-                menu_action(
-                    "reveal",
-                    menu_item(false).child(if export_path.is_some() {
-                        "Reveal Markdown"
-                    } else {
-                        "Reveal files"
-                    }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.meeting_actions_open = false;
-                    reveal_meeting(&reveal_id, export_path.as_deref());
-                    cx.notify();
-                }))
-                .into_any_element(),
-            );
-        }
-        let notes_running = meeting::notes_in_progress(&meeting.id);
-        if meeting.status == MeetingStatus::Complete
-            && self.apple_intelligence_availability().is_available()
-        {
-            if notes_running {
-                menu_items.push(
-                    disabled_menu_item()
-                        .child("Summarizing…")
-                        .into_any_element(),
-                );
-            } else {
-                let id = id.clone();
-                menu_items.push(
-                    menu_action(
-                        "notes",
-                        menu_item(false).child(if meeting.notes.is_some() {
-                            "Regenerate summary"
-                        } else {
-                            "Summarize"
-                        }),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.meeting_actions_open = false;
-                        if let Err(error) = this
-                            .meeting_requests
-                            .try_send(MeetingRequest::Summarize(id.clone()))
-                        {
-                            log_meeting_request_error(error);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-                );
-            }
-        }
-        let armed = self.meeting_delete_armed.as_deref() == Some(id.as_str());
-        if !active && !notes_running && !armed {
-            let delete_id = id.clone();
-            if !menu_items.is_empty() {
-                menu_items.push(menu_separator().into_any_element());
-            }
-            menu_items.push(
-                menu_action("delete", danger_menu_item().child("Delete…"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.meeting_actions_open = false;
-                        this.trash_meeting(delete_id.clone(), cx)
-                    }))
-                    .into_any_element(),
-            );
-        }
-        if !menu_items.is_empty() {
-            let trigger = icon_button(ButtonKind::Secondary, Icon::Ellipsis)
-                .id("meeting-action-more")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.meeting_actions_open = true;
-                    cx.notify();
-                }));
-            actions.push(
-                div()
-                    .relative()
-                    .child(trigger)
-                    .when(self.meeting_actions_open, |more| {
-                        more.child(deferred(
-                            dropdown_menu()
-                                .id("meeting-actions-menu")
-                                .debug_selector(|| "meeting-actions-menu".into())
-                                .left_0()
-                                .w(px(MENU_WIDTH))
-                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                    this.meeting_actions_open = false;
-                                    cx.notify();
-                                }))
-                                .children(menu_items),
-                        ))
-                    })
-                    .into_any_element(),
-            );
-        }
-        if !active && !notes_running && armed {
-            // The confirmation takes the whole row until it is answered.
-            actions.clear();
-            let delete_id = id.clone();
-            actions.push(
-                action_of(
-                    ButtonKind::Danger,
-                    "delete",
-                    if meeting
-                        .export_path
-                        .as_ref()
-                        .is_some_and(|path| path.exists())
-                    {
-                        "Trash recording & Markdown"
-                    } else {
-                        "Trash recording"
-                    },
-                )
-                .on_click(
-                    cx.listener(move |this, _, _, cx| this.trash_meeting(delete_id.clone(), cx)),
-                )
-                .into_any_element(),
-            );
-            actions.push(
-                action("cancel-delete", "Cancel")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.meeting_delete_armed = None;
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-
-        let title_row: AnyElement = match &self.meeting_rename {
-            Some((rename_id, input)) if rename_id == &id => div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().flex_1().min_w(px(0.0)).child(input.entity.clone()))
-                .child(
-                    action("save-title", "Save")
-                        .on_click(cx.listener(|this, _, _, cx| this.finish_meeting_rename(cx))),
-                )
-                .child(
-                    action("cancel-title", "Cancel").on_click(cx.listener(|this, _, _, cx| {
-                        this.meeting_rename = None;
-                        cx.notify();
-                    })),
-                )
-                .into_any_element(),
-            _ => detail_title(title).into_any_element(),
-        };
-
-        let mut meta = vec![
-            meeting::day_label(meeting.created_at_ms, now_ms()),
-            meeting::clock(meeting.created_at_ms),
-            meeting::format_duration(meeting_duration(&meeting)),
-        ];
-        meta.extend(meeting.app.clone());
-
-        let errors = [
-            self.meeting_action_error
-                .clone()
-                .map(|error| ("Meeting could not be updated.", error)),
-            meeting
-                .error
-                .clone()
-                .map(|error| ("Recording failed.", error)),
-            meeting
-                .export_error
-                .clone()
-                .map(|error| ("Markdown not saved.", error)),
-            meeting
-                .notes_error
-                .clone()
-                .filter(|_| !notes_running)
-                .map(|error| ("Notes could not be written.", error)),
-            meeting
-                .live_transcription_error
-                .clone()
-                .filter(|_| active)
-                .map(|error| ("Live draft unavailable.", error)),
-        ]
-        .into_iter()
-        .flatten();
-
-        let notes = meeting.notes.clone().map(render_meeting_notes).or_else(|| {
-            notes_running.then(|| {
-                div()
-                    .pb_5()
-                    .text_footnote()
-                    .text_color(rgb(TEXT_TERTIARY))
-                    .child("Writing a title and summary with Apple Intelligence…")
-            })
-        });
-
-        let transcript = match &self.meeting_transcript {
-            MeetingTranscript::Empty => empty_state("No transcript selected."),
-            MeetingTranscript::Loaded(lines) if lines.is_empty() => {
-                empty_state(match meeting.status {
-                    MeetingStatus::Starting => "Preparing local audio capture…",
-                    MeetingStatus::Recording if meeting.live_transcription_error.is_some() => {
-                        "Live transcription is unavailable. Audio is still recording safely."
-                    }
-                    MeetingStatus::Recording if self.meeting_stop_pending => {
-                        "Building the final transcript…"
-                    }
-                    MeetingStatus::Recording => "Listening for speech…",
-                    MeetingStatus::Transcribing => "Building the final transcript…",
-                    MeetingStatus::Complete => "No speech was transcribed.",
-                    MeetingStatus::Interrupted | MeetingStatus::Failed => {
-                        "No recoverable transcript is available."
-                    }
-                })
-            }
-            MeetingTranscript::Loaded(lines) => div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .children(
-                    lines
-                        .iter()
-                        .enumerate()
-                        .map(|(index, line)| transcript_turn(index, line)),
-                )
-                .when(recording, |turns| {
-                    turns.child(
-                        div()
-                            .pt_1()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_caption()
-                            .text_color(rgb(TEXT_TERTIARY))
-                            .child(status_dot(DANGER))
-                            .child("Listening…"),
-                    )
-                })
-                .into_any_element(),
-            MeetingTranscript::Unavailable(error) => {
-                error_message("Transcript unavailable.", error.clone())
-            }
-        };
-        let transcript_label = match meeting.status {
-            MeetingStatus::Starting | MeetingStatus::Recording if !self.meeting_stop_pending => {
-                "Live transcript"
-            }
-            MeetingStatus::Starting | MeetingStatus::Recording | MeetingStatus::Transcribing => {
-                "Draft transcript"
-            }
-            MeetingStatus::Complete => "Transcript",
-            MeetingStatus::Interrupted | MeetingStatus::Failed => "Recovered draft",
-        };
-
-        div()
-            .debug_selector(|| "meeting-detail".into())
-            .flex_1()
-            .min_w(px(0.0))
-            .h_full()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(detail_header(
-                title_row,
-                meeting_status_chip(meeting.status, self.meeting_stop_pending, true)
-                    .map(IntoElement::into_any_element)
-                    .into_iter()
-                    .chain([truncated_line(FOOTNOTE, meta.join(" · "))
-                        .flex_1()
-                        .into_any_element()])
-                    .collect(),
-                actions,
-            ))
-            .child(
-                detail_body("meeting-transcript")
-                    .track_scroll(&self.meeting_transcript_scroll)
-                    .children(errors.map(|(message, error)| error_panel(message, error).mb_4()))
-                    .when_some(notes, |content, notes| content.child(notes))
-                    .child(
-                        div()
-                            .pb_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(section_label(transcript_label))
-                            .when(recording, |label| label.child(status_dot(DANGER))),
-                    )
-                    .child(transcript),
-            )
-            .into_any_element()
-    }
-
-    fn render_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let config_path = self.personal_workspace.join("hex.config.ts");
-        let workspace_state = personal_workspace_state(
-            !self.preview && config_path.is_file(),
-            self.personal_workspace_receiver.is_some(),
-            &self.personal_commands_status,
-        );
-        let last_error = self
-            .personal_workspace_error
-            .clone()
-            .or_else(|| self.personal_commands_status.last_reload_error.clone());
-        let open_config = config_path.clone();
-        let config_control = match workspace_state {
-            PersonalWorkspaceState::Missing => button(ButtonKind::Secondary, "Create config")
-                .id("personal-commands-create")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.provision_personal_workspace();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            PersonalWorkspaceState::Creating => busy_label("Creating config…").into_any_element(),
-            PersonalWorkspaceState::Ready | PersonalWorkspaceState::Error => {
-                button(ButtonKind::Secondary, "Edit config")
-                    .id("personal-commands-open-config")
-                    .on_click(move |_, _, _| open_path(&open_config))
-                    .into_any_element()
-            }
-        };
-        let copy_prompt = matches!(
-            workspace_state,
-            PersonalWorkspaceState::Ready | PersonalWorkspaceState::Error
-        )
-        .then(|| {
-            let copied = self.personal_commands_prompt_copied;
-            let workspace = self.personal_workspace.display();
-            let config = config_path.display();
-            let prompt = format!(
-                "Help me configure my Hex custom voice commands.\n\n\
-                 Workspace: {workspace}\n\
-                 Config: {config}\n\n\
-                 Read AGENTS.md and .agents/skills/personal-commands/SKILL.md in the workspace \
-                 before editing. Ask me what commands or dictation phrases I want, update \
-                 hex.config.ts, and run `bun run check` from the workspace when finished. You \
-                 may add npm packages when a command needs them."
-            );
-            button(
-                ButtonKind::Secondary,
-                if copied {
-                    "Copied"
-                } else {
-                    "Copy agent prompt"
-                },
-            )
-            .id("personal-commands-copy-prompt")
-            .on_click(cx.listener(move |this, _, _, cx| {
-                match arboard::Clipboard::new()
-                    .and_then(|mut clipboard| clipboard.set_text(prompt.clone()))
-                {
-                    Ok(()) => {
-                        this.personal_commands_prompt_copied = true;
-                        cx.notify();
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "could not copy personal command agent prompt")
-                    }
-                }
-            }))
-        });
-        let commands_position = self.commands_toggle.render_position(window);
-        let commands_toggle_control = if self.pending_microphone_policy
-            == Some(MicrophonePolicyChange::KeepReadyAndEnableCommands)
-        {
-            button(
-                ButtonKind::Primary,
-                "Keep microphone ready & enable commands",
-            )
-            .id("confirm-enable-commands")
-            .on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                if let Err(error) = this.update_microphone_policy(
-                    MicrophonePolicyChange::KeepReadyAndEnableCommands,
-                    cx,
-                ) {
-                    tracing::error!(%error, "could not update microphone policy");
-                }
-            }))
-            .into_any_element()
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_footnote()
-                        .text_color(rgb(TEXT_SECONDARY))
-                        .child("Voice commands"),
-                )
-                .child(toggle(commands_position))
-                .into_any_element()
-        };
-        let commands_control = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(config_control)
-            .when_some(copy_prompt, |controls, prompt| controls.child(prompt))
-            .child(div().mx_1().w(px(1.0)).h_5().bg(rgb(LINE)))
-            .child(
-                div()
-                    .id("commands-enabled")
-                    .flex()
-                    .items_center()
-                    .child(commands_toggle_control)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let enabled = !this.settings.commands_enabled;
-                        if enabled && this.settings.release_microphone_while_idle {
-                            this.pending_microphone_policy =
-                                Some(MicrophonePolicyChange::KeepReadyAndEnableCommands);
-                            cx.notify();
-                            return;
-                        }
-                        if let Err(error) = this.developer_set_commands_enabled(enabled, cx) {
-                            tracing::error!(%error, "could not save app settings");
-                        }
-                    })),
-            )
-            .into_any_element();
-        let context_label = self.current_context_label();
-        let query = self
-            .command_search
-            .entity
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
-        let visible: Vec<usize> = self
-            .commands
-            .iter()
-            .enumerate()
-            .filter_map(|(index, command)| Self::command_matches(command, &query).then_some(index))
-            .collect();
-        let mut tasks = Vec::new();
-        for index in &visible {
-            let task = self.commands[*index].task.clone();
-            if !tasks.contains(&task) {
-                tasks.push(task);
-            }
-        }
-        let effective_selected = self
-            .selected_command
-            .clone()
-            .filter(|id| visible.iter().any(|index| self.commands[*index].id == *id))
-            .or_else(|| {
-                visible
-                    .first()
-                    .map(|index| self.commands[*index].id.clone())
-            });
-        let mut groups: Vec<AnyElement> = Vec::new();
-        for task in tasks {
-            groups.push(list_section_label(task.clone(), groups.is_empty()).into_any_element());
-            groups.extend(
-                visible
-                    .iter()
-                    .copied()
-                    .filter(|index| self.commands[*index].task == task)
-                    .map(|index| {
-                        let command = self.commands[index].clone();
-                        let command_id = command.id.clone();
-                        let selected = effective_selected.as_deref() == Some(command_id.as_str());
-                        list_row(selected)
-                            .id(("command", index))
-                            .gap_0p5()
-                            .child(list_row_title(command.phrase, selected))
-                            .child(list_row_meta(command.description, selected))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.selected_command = Some(command_id.clone());
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                    }),
-            );
-        }
-
-        let no_commands = groups.is_empty();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(pane_header_with_action("Commands", Some(commands_control)))
-            .child(
-                pane_body().child(
-                    pane_content()
-                        .gap_3()
-                        .when_some(last_error, |column, error| {
-                            column.child(
-                                error_panel("Personal commands are not loading.", error)
-                                    .flex_none(),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h(px(0.0))
-                                .flex()
-                                .gap_5()
-                                .child(
-                                    div()
-                                        .w(px(PANE_LIST_WIDTH))
-                                        .h_full()
-                                        .flex_none()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .child(self.command_search.entity.clone()),
-                                        )
-                                        .child(
-                                            pane_list(
-                                                "commands-list",
-                                                PANE_LIST_WIDTH,
-                                                no_commands.then_some(if query.is_empty() {
-                                                    "No commands yet."
-                                                } else {
-                                                    "No matching commands."
-                                                }),
-                                                "",
-                                                None,
-                                                groups,
-                                            )
-                                            .flex_1()
-                                            .min_h(px(0.0)),
-                                        ),
-                                )
-                                .child(
-                                    pane_detail(self.render_command_detail(
-                                        effective_selected.as_deref(),
-                                        &context_label,
-                                    ))
-                                    .id("command-detail"),
-                                ),
-                        ),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_command_detail(&self, selected: Option<&str>, context_label: &str) -> AnyElement {
-        let Some(command) =
-            selected.and_then(|id| self.commands.iter().find(|command| command.id == id))
-        else {
-            return detail_placeholder("Select a command.");
-        };
-        let aliases = if command.aliases.is_empty() {
-            "None".into()
-        } else {
-            command.aliases.join("\n")
-        };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(detail_header(
-                detail_title(command.phrase.clone()),
-                vec![command.description.clone().into_any_element()],
-                Vec::new(),
-            ))
-            .child(
-                detail_body("command-detail-body")
-                    .pt_1()
-                    .child(detail_row("Task", command.task.clone()))
-                    .child(detail_row("Context", command_scope(&command.scope)))
-                    .child(detail_row("Aliases", aliases))
-                    .child(detail_row("Current context", context_label.to_string())),
-            )
-            .into_any_element()
-    }
-
-    fn command_search_input(cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search commands", ""));
-        let changed = cx.subscribe(&entity, |_, _, _: &TextChanged, cx| {
-            cx.notify();
-        });
-        ProcessingInput {
-            entity,
-            _subscriptions: vec![changed],
-        }
-    }
-
-    /// Case-insensitive match over everything a person might remember about a
-    /// command: its phrase, aliases, description, and group.
-    fn command_matches(command: &CatalogCommand, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
-        }
-        let scope = match &command.scope {
-            CommandScope::Sleeping | CommandScope::Global => "global",
-            CommandScope::Application(name) => name,
-            CommandScope::Browser(host) => host,
-        };
-        command.phrase.to_lowercase().contains(query)
-            || command.description.to_lowercase().contains(query)
-            || command.task.to_lowercase().contains(query)
-            || scope.to_lowercase().contains(query)
-            || command
-                .aliases
-                .iter()
-                .any(|alias| alias.to_lowercase().contains(query))
-    }
-
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn current_context(&self) -> (Option<String>, Option<String>) {
         self.current_context.clone()
-    }
-
-    fn current_context_label(&self) -> String {
-        let (application, browser_host) = self.current_context();
-        match (application, browser_host) {
-            (Some(application), Some(host)) => format!("{application} / {host}"),
-            (Some(application), None) => application,
-            _ => "Unavailable".into(),
-        }
     }
 
     fn render_activity(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -7136,391 +5615,6 @@ impl AppWindow {
             )
             .into_any_element()
     }
-    fn apply_hud_lab(&self) {
-        self.indicator
-            .send(DictationIndicatorEvent::Configure(self.hud_tuning));
-        self.indicator.send(DictationIndicatorEvent::Reset);
-        match self.hud_demo {
-            HudDemoState::Recording => {
-                for job_id in 0..self.hud_queued as u64 {
-                    self.indicator
-                        .send(DictationIndicatorEvent::Submitted { job_id });
-                    self.indicator
-                        .send(DictationIndicatorEvent::Transcribing { job_id });
-                }
-                self.indicator.send(DictationIndicatorEvent::Started);
-                self.indicator.send(DictationIndicatorEvent::Meter {
-                    average: 0.08,
-                    peak: 0.42,
-                });
-            }
-            HudDemoState::Transcribing | HudDemoState::Processing => {
-                self.indicator
-                    .send(DictationIndicatorEvent::Submitted { job_id: 0 });
-                self.indicator.send(match self.hud_demo {
-                    HudDemoState::Transcribing => {
-                        DictationIndicatorEvent::Transcribing { job_id: 0 }
-                    }
-                    HudDemoState::Processing => DictationIndicatorEvent::Processing { job_id: 0 },
-                    HudDemoState::Recording => unreachable!(),
-                });
-                for job_id in 1..=self.hud_queued as u64 {
-                    self.indicator
-                        .send(DictationIndicatorEvent::Submitted { job_id });
-                    self.indicator
-                        .send(DictationIndicatorEvent::Transcribing { job_id });
-                }
-            }
-        }
-    }
-
-    fn hud_control_value(&self, control: HudControl) -> f32 {
-        match control {
-            HudControl::LineCount => (self.hud_tuning.line_count - 1.0) / 5.0,
-            HudControl::Curvature => self.hud_tuning.curvature,
-            HudControl::Speed => self.hud_tuning.speed / HUD_MAX_SPEED,
-            HudControl::Blur => 1.0 - self.hud_tuning.sharpness,
-            HudControl::Glow => self.hud_tuning.glow,
-            HudControl::Depth => self.hud_tuning.depth,
-            HudControl::LightAngle => self.hud_tuning.light_angle,
-            HudControl::Outline => self.hud_tuning.outline,
-        }
-        .clamp(0.0, 1.0)
-    }
-
-    fn set_hud_control(&mut self, control: HudControl, value: f32, cx: &mut Context<Self>) {
-        let value = value.clamp(0.0, 1.0);
-        match control {
-            HudControl::LineCount => self.hud_tuning.line_count = (1.0 + value * 5.0).round(),
-            HudControl::Curvature => self.hud_tuning.curvature = value,
-            HudControl::Speed => self.hud_tuning.speed = value * HUD_MAX_SPEED,
-            HudControl::Blur => self.hud_tuning.sharpness = 1.0 - value,
-            HudControl::Glow => self.hud_tuning.glow = value,
-            HudControl::Depth => self.hud_tuning.depth = value,
-            HudControl::LightAngle => self.hud_tuning.light_angle = value,
-            HudControl::Outline => self.hud_tuning.outline = value,
-        }
-        self.hud_copied = false;
-        self.indicator
-            .send(DictationIndicatorEvent::Configure(self.hud_tuning));
-        cx.notify();
-    }
-
-    fn update_hud_from_pointer(
-        &mut self,
-        control: HudControl,
-        pointer_x: f32,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        const SLIDER_WIDTH: f32 = 360.0;
-        let available = (f32::from(window.viewport_size().width) - SIDEBAR_WIDTH - 64.0).max(0.0);
-        let content_width = available.min(PANE_CONTENT_WIDTH);
-        let slider_left = SIDEBAR_WIDTH + 32.0 + (available - content_width) / 2.0;
-        self.set_hud_control(control, (pointer_x - slider_left) / SLIDER_WIDTH, cx);
-    }
-
-    fn select_hud_style(&mut self, style: usize, cx: &mut Context<Self>) {
-        self.hud_tuning = match style {
-            0 => HudTuning {
-                style: 0.0,
-                line_count: 1.0,
-                curvature: 0.5,
-                speed: 0.7,
-                sharpness: 0.42,
-                glow: 0.4,
-                depth: 0.75,
-                light_angle: 0.35,
-                outline: 0.25,
-            },
-            1 => HudTuning::default(),
-            _ => HudTuning {
-                style: 2.0,
-                line_count: 3.0,
-                curvature: 0.7,
-                speed: 0.9,
-                sharpness: 0.64,
-                glow: 0.28,
-                depth: 0.74,
-                light_angle: 0.35,
-                outline: 0.3,
-            },
-        };
-        self.hud_copied = false;
-        self.apply_hud_lab();
-        cx.notify();
-    }
-
-    fn hud_preset(&self) -> String {
-        format!(
-            "hud-v1 style={} lines={:.0} curvature={:.2} speed={:.2} blur={:.2} glow={:.2} depth={:.2} light={:.2} outline={:.2}",
-            self.hud_tuning.style as usize,
-            self.hud_tuning.line_count,
-            self.hud_tuning.curvature,
-            self.hud_tuning.speed,
-            1.0 - self.hud_tuning.sharpness,
-            self.hud_tuning.glow,
-            self.hud_tuning.depth,
-            self.hud_tuning.light_angle,
-            self.hud_tuning.outline,
-        )
-    }
-
-    fn render_hud_slider(
-        &self,
-        control: HudControl,
-        label: &'static str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let value = self.hud_control_value(control);
-        let display = match control {
-            HudControl::LineCount => format!("{:.0}", self.hud_tuning.line_count),
-            HudControl::Speed => format!("{:.2}x", self.hud_tuning.speed),
-            HudControl::LightAngle => format!("{:.0}°", self.hud_tuning.light_angle * 360.0),
-            _ => format!("{:.2}", value),
-        };
-        div()
-            .w(px(360.0))
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .text_footnote()
-                    .child(label)
-                    .child(div().text_color(rgb(TEXT_TERTIARY)).child(display)),
-            )
-            .child(
-                div()
-                    .id(("hud-slider", control as usize))
-                    .relative()
-                    .w_full()
-                    .h(px(18.0))
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .top(px(7.0))
-                            .h(px(4.0))
-                            .rounded_full()
-                            .bg(rgb(SURFACE_SELECTED)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(px(7.0))
-                            .w(relative(value))
-                            .h(px(4.0))
-                            .rounded_full()
-                            .bg(rgb(ACCENT)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .left(relative(value))
-                            .top(px(2.0))
-                            .ml(px(-7.0))
-                            .size(px(14.0))
-                            .rounded_full()
-                            .border_2()
-                            .border_color(rgb(TEXT_PRIMARY))
-                            .bg(rgb(SURFACE_SELECTED)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            this.hud_dragging = Some(control);
-                            this.update_hud_from_pointer(
-                                control,
-                                f32::from(event.position.x),
-                                window,
-                                cx,
-                            );
-                        }),
-                    )
-                    .on_mouse_move(
-                        cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
-                            if event.dragging() && this.hud_dragging == Some(control) {
-                                this.update_hud_from_pointer(
-                                    control,
-                                    f32::from(event.position.x),
-                                    window,
-                                    cx,
-                                );
-                            }
-                        }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_hud_lab(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let styles = [
-            (
-                "A",
-                "Moving light",
-                "A line-free area light travels around the orb.",
-            ),
-            (
-                "B",
-                "Meridians",
-                "Highlights wrap around the sphere instead of crossing it.",
-            ),
-            (
-                "C",
-                "Ribbons",
-                "Curved bands retained for comparison and tuning.",
-            ),
-        ];
-        let style_cards =
-            styles
-                .into_iter()
-                .enumerate()
-                .map(|(index, (key, name, description))| {
-                    let selected = self.hud_tuning.style as usize == index;
-                    div()
-                        .id(("hud-style", index))
-                        .w(px(190.0))
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .rounded(RADIUS_PANEL)
-                        .border_1()
-                        .border_color(rgb(if selected { ACCENT } else { LINE }))
-                        .bg(rgb(if selected { ACCENT_SURFACE } else { SURFACE }))
-                        .hover(|card| card.bg(rgb(SURFACE_HOVER)))
-                        .child(div().text_caption().text_color(rgb(ACCENT_TEXT)).child(key))
-                        .child(
-                            div()
-                                .text_body()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(name),
-                        )
-                        .child(
-                            div()
-                                .text_caption()
-                                .text_color(rgb(TEXT_TERTIARY))
-                                .child(description),
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_hud_style(index, cx)),
-                        )
-                });
-        let state_button = |state, label: &'static str, index: usize| {
-            segmented_item(self.hud_demo == state)
-                .id(("hud-state", index))
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.hud_demo = state;
-                    this.apply_hud_lab();
-                    cx.notify();
-                }))
-        };
-        let queue_buttons = (0..=3).map(|count| {
-            segmented_item(self.hud_queued == count)
-                .id(("hud-queue", count))
-                .child(count.to_string())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.hud_queued = count;
-                    this.apply_hud_lab();
-                    cx.notify();
-                }))
-        });
-        let preset = self.hud_preset();
-        let copied = self.hud_copied;
-
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| {
-                    this.hud_dragging = None;
-                }),
-            )
-            .child(pane_header_with_action(
-                "HUD Lab",
-                Some(
-                    button(
-                        ButtonKind::Secondary,
-                        if copied { "Copied" } else { "Copy preset" },
-                    )
-                    .id("copy-hud-preset")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                            let _ = clipboard.set_text(this.hud_preset());
-                            this.hud_copied = true;
-                            cx.notify();
-                        }
-                    }))
-                    .into_any_element(),
-                ),
-            ))
-            .child(pane_scroll_body(
-                "hud-lab-scroll",
-                pane_content()
-                    .pt_6()
-                    .gap_6()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_4()
-                            .child(segmented_control().children([
-                                state_button(HudDemoState::Recording, "Recording", 0),
-                                state_button(HudDemoState::Transcribing, "Transcribing", 1),
-                                state_button(HudDemoState::Processing, "Processing", 2),
-                            ]))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_caption()
-                                            .text_color(rgb(TEXT_TERTIARY))
-                                            .child("Queued"),
-                                    )
-                                    .child(segmented_control().children(queue_buttons)),
-                            ),
-                    )
-                    .child(div().flex().gap_3().children(style_cards))
-                    .child(
-                        div()
-                            .flex()
-                            .child(div().flex().flex_col().gap_4().children([
-                                self.render_hud_slider(HudControl::LineCount, "Line count", cx),
-                                self.render_hud_slider(HudControl::Curvature, "Curvature", cx),
-                                self.render_hud_slider(HudControl::Speed, "Speed", cx),
-                                self.render_hud_slider(HudControl::Blur, "Highlight blur", cx),
-                                self.render_hud_slider(HudControl::Glow, "Line glow", cx),
-                                self.render_hud_slider(HudControl::Depth, "Sphere depth", cx),
-                                self.render_hud_slider(HudControl::LightAngle, "Light angle", cx),
-                                self.render_hud_slider(HudControl::Outline, "Sphere outline", cx),
-                            ])),
-                    )
-                    .child(
-                        div()
-                            .p_3()
-                            .rounded(RADIUS_PANEL)
-                            .border_1()
-                            .border_color(rgb(LINE))
-                            .bg(rgb(SURFACE))
-                            .text_monospace()
-                            .text_caption()
-                            .text_color(rgb(TEXT_SECONDARY))
-                            .child(preset),
-                    ),
-            ))
-            .into_any_element()
-    }
 }
 
 fn application_catalog_load_needed(
@@ -7540,11 +5634,8 @@ impl Drop for AppWindow {
             tracing::error!(%error, "could not flush app settings while closing window");
         }
         if !self.preview {
-            crate::app_settings::set_hotkey_capture_active(false);
-            crate::app_settings::set_dock_icon_visible(crate::app_settings::dock_icon_visible(
-                self.settings.show_dock_icon,
-                crate::status_item::installed(),
-            ));
+            platform::set_hotkey_capture_active(false);
+            self.platform_closed();
         }
     }
 }
@@ -7585,9 +5676,12 @@ impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model_notice = self.render_model_notice(cx);
         let content = match self.pane {
-            Pane::HudLab => self.render_hud_lab(cx),
-            Pane::Meetings => self.render_meetings(cx),
-            Pane::Commands => self.render_commands(window, cx),
+            Pane::HudLab | Pane::Meetings | Pane::Commands => {
+                match self.render_platform_pane(self.pane, window, cx) {
+                    Some(content) => content,
+                    None => self.render_settings(window, cx),
+                }
+            }
             Pane::Activity => self.render_activity(cx),
             Pane::History => self.render_history(cx),
             Pane::Modes => self.render_modes(window, cx),
@@ -7602,7 +5696,7 @@ impl Render for AppWindow {
         let mode_context_menu = (self.pane == Pane::Modes)
             .then(|| self.render_mode_context_menu(cx))
             .flatten();
-        window_frame()
+        platform::frame(window_frame())
             .track_focus(&self.window_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key != "escape" {
@@ -7662,6 +5756,7 @@ impl Render for AppWindow {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
+                    .children(platform::caption(window))
                     .children(model_notice)
                     .when_some(self.settings_load_error.clone(), |column, error| {
                         column.child(
@@ -7904,11 +5999,28 @@ fn hotkey_saved_width(keycap_count: usize) -> f32 {
     (53.0 + hotkey_keycaps_width(keycap_count)).max(HOTKEY_MIN_WIDTH)
 }
 
+/// Extra width for keycaps whose word labels ("Space", "Ctrl") outgrow the
+/// square keycap that symbol labels fit.
+fn hotkey_label_overflow(keycaps: &[String]) -> f32 {
+    keycaps
+        .iter()
+        .map(|label| (label.chars().count() as f32 * 7.0 + 16.0 - KEYCAP_WIDTH).max(0.0))
+        .sum()
+}
+
 fn hotkey_keycaps_width(keycap_count: usize) -> f32 {
     if keycap_count == 0 {
         0.0
     } else {
         KEYCAP_WIDTH * keycap_count as f32 + 3.0 * keycap_count.saturating_sub(1) as f32
+    }
+}
+
+fn indicator_position_index(position: IndicatorPosition) -> usize {
+    match position {
+        IndicatorPosition::Top => 0,
+        IndicatorPosition::Bottom => 1,
+        IndicatorPosition::Hidden => 2,
     }
 }
 
@@ -8099,7 +6211,7 @@ fn model_presentation(
     Some(ModelPresentation {
         name,
         provider,
-        #[cfg(test)]
+        #[cfg(all(test, target_os = "macos"))]
         key: key.to_owned(),
         is_default,
     })
@@ -8150,7 +6262,7 @@ fn fallback_model_presentation(key: &str) -> ModelPresentation {
     ModelPresentation {
         name: model_id(key).to_owned(),
         provider: provider_label(provider),
-        #[cfg(test)]
+        #[cfg(all(test, target_os = "macos"))]
         key: key.to_owned(),
         is_default: false,
     }
@@ -8317,58 +6429,7 @@ fn dictation_model_notice(
     })
 }
 
-fn command_model_notice(status: &CommandModelStatus) -> Option<(&'static str, &'static str)> {
-    match status {
-        CommandModelStatus::Disabled | CommandModelStatus::Ready => None,
-        CommandModelStatus::Loading => Some((
-            "Preparing voice commands",
-            "The command model is loading. Hotkey dictation does not require it.",
-        )),
-        CommandModelStatus::Failed => Some((
-            "Voice commands are unavailable",
-            "The command model could not load. Retry or turn off commands; hotkey dictation is unaffected.",
-        )),
-    }
-}
-
-const fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'static str) {
-    match kind {
-        PermissionKind::Microphone => (
-            "Microphone access is off",
-            "Hex cannot record dictation until microphone access is restored.",
-        ),
-        PermissionKind::InputMonitoring => (
-            "Input Monitoring is off",
-            "Hex cannot recognize the dictation shortcut in other apps.",
-        ),
-        PermissionKind::Accessibility => (
-            "Accessibility is off",
-            "Hex cannot paste completed dictation into the foreground app.",
-        ),
-    }
-}
-
-const fn permission_action_label(action: PermissionAction) -> &'static str {
-    match action {
-        PermissionAction::RequestMicrophone => "Allow",
-        PermissionAction::OpenMicrophoneSettings => "Open settings",
-        PermissionAction::OpenInputMonitoringSettings
-        | PermissionAction::OpenAccessibilitySettings => "Grant access",
-    }
-}
-
-const fn permission_warning_id(kind: PermissionKind) -> &'static str {
-    match kind {
-        PermissionKind::Microphone => "permission-warning-microphone",
-        PermissionKind::InputMonitoring => "permission-warning-input-monitoring",
-        PermissionKind::Accessibility => "permission-warning-accessibility",
-    }
-}
-
-fn hotkey_modifiers(modifiers: GpuiModifiers) -> HotkeyModifiers {
-    hotkey_modifiers_with_flags(modifiers, crate::suppression::physical_modifier_flags())
-}
-
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn hotkey_modifiers_with_flags(modifiers: GpuiModifiers, flags: u64) -> HotkeyModifiers {
     let physical = crate::app_settings::modifiers_from_flags(flags);
     if !physical.is_empty() {
@@ -8383,130 +6444,11 @@ fn hotkey_modifiers_with_flags(modifiers: GpuiModifiers, flags: u64) -> HotkeyMo
     }
 }
 
-fn hotkey_key(key: &str) -> std::result::Result<HotkeyKey, &'static str> {
-    let special = match key {
-        "space" => Some((49, "Space")),
-        "tab" => Some((48, "Tab")),
-        "enter" => Some((36, "Return")),
-        "backspace" => Some((51, "Delete")),
-        "up" => Some((126, "Up")),
-        "down" => Some((125, "Down")),
-        "left" => Some((123, "Left")),
-        "right" => Some((124, "Right")),
-        "pageup" => Some((116, "Page Up")),
-        "pagedown" => Some((121, "Page Down")),
-        "home" => Some((115, "Home")),
-        "end" => Some((119, "End")),
-        "delete" => Some((117, "Forward Delete")),
-        "insert" => Some((114, "Help")),
-        "f1" => Some((122, "F1")),
-        "f2" => Some((120, "F2")),
-        "f3" => Some((99, "F3")),
-        "f4" => Some((118, "F4")),
-        "f5" => Some((96, "F5")),
-        "f6" => Some((97, "F6")),
-        "f7" => Some((98, "F7")),
-        "f8" => Some((100, "F8")),
-        "f9" => Some((101, "F9")),
-        "f10" => Some((109, "F10")),
-        "f11" => Some((103, "F11")),
-        "f12" => Some((111, "F12")),
-        "f13" => Some((105, "F13")),
-        "f14" => Some((107, "F14")),
-        "f15" => Some((113, "F15")),
-        "f16" => Some((106, "F16")),
-        "f17" => Some((64, "F17")),
-        "f18" => Some((79, "F18")),
-        "f19" => Some((80, "F19")),
-        "f20" => Some((90, "F20")),
-        _ => None,
-    };
-    if let Some((code, label)) = special {
-        return Ok(HotkeyKey {
-            code,
-            label: label.into(),
-        });
-    }
-    let mut characters = key.chars();
-    let Some(character) = characters.next() else {
-        return Err("Unsupported key");
-    };
-    if characters.next().is_some() {
-        return Err("Unsupported key");
-    }
-    let code = crate::keyboard::key_code_for(character).map_err(|_| "Unsupported key")?;
-    Ok(HotkeyKey {
-        code,
-        label: character.to_uppercase().collect(),
-    })
-}
-
 fn is_function_key(label: &str) -> bool {
     label
         .strip_prefix('F')
         .and_then(|number| number.parse::<u8>().ok())
         .is_some_and(|number| (1..=20).contains(&number))
-}
-
-fn command_task(command: &CommandInfo) -> String {
-    if let Some(group) = &command.group {
-        return group.clone();
-    }
-    if command.id.starts_with("mode.") {
-        "Voice control".into()
-    } else if command.id.starts_with("dictation.") {
-        "Dictation".into()
-    } else if command.id.starts_with("meeting.") {
-        "Meetings".into()
-    } else {
-        match command.description.as_str() {
-            "Open application" => "Open applications",
-            "Open website" => "Open websites",
-            "Navigate active tab" => "Browser navigation",
-            "Use keyboard shortcut" => "Keyboard",
-            "Use application shortcut" | "Open application destination" => "Application navigation",
-            _ => "Other",
-        }
-        .into()
-    }
-}
-
-fn merged_catalog(compiled: &[CatalogCommand], personal: &StatusSnapshot) -> Vec<CatalogCommand> {
-    let mut commands = compiled.to_vec();
-    commands.extend(personal.catalog.iter().filter_map(|command| {
-        let (phrase, aliases) = command.phrases.split_first()?;
-        Some(CatalogCommand {
-            task: command.group.clone(),
-            scope: match &command.context {
-                StatusContext::Global => CommandScope::Global,
-                StatusContext::Application { application } => {
-                    CommandScope::Application(application.clone())
-                }
-                StatusContext::BrowserHost { browser_host } => {
-                    CommandScope::Browser(browser_host.clone())
-                }
-            },
-            phrase: phrase.clone(),
-            aliases: aliases.to_vec(),
-            description: command.description.clone(),
-            id: command.id.clone(),
-        })
-    }));
-    commands
-}
-
-fn open_path(path: &std::path::Path) {
-    if let Err(error) = ProcessCommand::new("/usr/bin/open").arg(path).spawn() {
-        tracing::error!(%error, path = %path.display(), "could not open personal command path");
-    }
-}
-
-fn command_scope(scope: &CommandScope) -> String {
-    match scope {
-        CommandScope::Sleeping | CommandScope::Global => "Global".into(),
-        CommandScope::Application(application) => application.clone(),
-        CommandScope::Browser(host) => host.clone(),
-    }
 }
 
 fn timestamped_list_row(
@@ -8534,329 +6476,6 @@ fn timestamped_list_row(
                 }))
                 .child(age),
         )
-}
-
-fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
-    let summary = notes.summary.trim().to_string();
-    div()
-        .mb_5()
-        .pb_5()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .border_b_1()
-        .border_color(rgb(LINE))
-        .child(section_label("Summary"))
-        .child(
-            div()
-                .text_body()
-                .text_color(rgb(if summary.is_empty() {
-                    TEXT_TERTIARY
-                } else {
-                    TEXT_SECONDARY
-                }))
-                .child(if summary.is_empty() {
-                    "Nothing to summarize.".to_string()
-                } else {
-                    summary
-                }),
-        )
-}
-
-/// A compact status tag; `Ready` appears only in the detail header, so the
-/// list stays quiet for finished meetings.
-fn meeting_status_chip(status: MeetingStatus, stop_pending: bool, show_ready: bool) -> Option<Div> {
-    let (label, tone) = match status {
-        MeetingStatus::Recording if stop_pending => ("Transcribing", Tone::Accent),
-        MeetingStatus::Starting | MeetingStatus::Recording => ("Recording", Tone::Danger),
-        MeetingStatus::Transcribing => ("Transcribing", Tone::Accent),
-        MeetingStatus::Complete if show_ready => ("Ready", Tone::Success),
-        MeetingStatus::Complete => return None,
-        MeetingStatus::Interrupted => ("Interrupted", Tone::Neutral),
-        MeetingStatus::Failed => ("Failed", Tone::Danger),
-    };
-    let live =
-        matches!(status, MeetingStatus::Starting | MeetingStatus::Recording) && !stop_pending;
-    Some(tag(tone, label).when(live, |chip| {
-        chip.child(status_dot(DANGER).size(px(5.0)))
-            .flex_row_reverse()
-    }))
-}
-
-/// `42 min`, `1 h 05 min`, or `< 1 min`.
-fn meeting_length(milliseconds: u64) -> String {
-    let minutes = milliseconds / 60_000;
-    match minutes {
-        0 => "< 1 min".into(),
-        1..=59 => format!("{minutes} min"),
-        _ => format!("{} h {:02} min", minutes / 60, minutes % 60),
-    }
-}
-
-fn transcript_lines(turns: &[TranscriptEntry]) -> Vec<TranscriptLine> {
-    turns
-        .iter()
-        .scan(None, |previous_end: &mut Option<u64>, turn| {
-            let pause_before_ms = previous_end
-                .map(|end| turn.start_ms.saturating_sub(end))
-                .filter(|pause| *pause >= 30_000);
-            *previous_end = Some(previous_end.map_or(turn.end_ms, |end| end.max(turn.end_ms)));
-            Some(TranscriptLine {
-                source: turn.source,
-                clock: meeting::format_duration(turn.start_ms),
-                text: turn.text.clone(),
-                pause_before_ms,
-            })
-        })
-        .collect()
-}
-
-/// One conversational turn: the other side on the left, the user on the
-/// right in the accent color.
-fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement {
-    let mine = line.source == MeetingSource::Microphone;
-    div()
-        .id(("transcript-line", index))
-        .flex()
-        .flex_col()
-        .when_some(line.pause_before_ms, |row, pause| {
-            row.child(
-                div()
-                    .py_2()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_caption()
-                    .text_color(rgb(TEXT_TERTIARY))
-                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE)))
-                    .child(format!("{} pause", meeting_length(pause)))
-                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE))),
-            )
-        })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .when(mine, |turn| turn.items_end())
-                .when(!mine, |turn| turn.items_start())
-                .child(
-                    // Inset to the bubble's text, not its rounded edge.
-                    div()
-                        .px_3()
-                        .flex()
-                        .gap_2()
-                        .text_caption()
-                        .text_color(rgb(TEXT_TERTIARY))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(if mine { ACCENT_TEXT } else { TEXT_TERTIARY }))
-                                .child(line.source.label()),
-                        )
-                        .child(line.clock.clone()),
-                )
-                .child(
-                    div()
-                        .debug_selector(move || format!("meeting-bubble-{index}"))
-                        .max_w(relative(0.82))
-                        .px_3()
-                        .py_2()
-                        .rounded(RADIUS_PANEL)
-                        .border_1()
-                        .when(mine, |bubble| {
-                            bubble
-                                .border_color(rgb(ACCENT_BORDER))
-                                .bg(rgb(ACCENT_SURFACE))
-                                .text_color(rgb(TEXT_PRIMARY))
-                        })
-                        .when(!mine, |bubble| {
-                            bubble
-                                .border_color(rgb(LINE))
-                                .bg(rgb(CANVAS))
-                                .text_color(rgb(TEXT_SECONDARY))
-                        })
-                        .text_body()
-                        .child(line.text.clone()),
-                ),
-        )
-        .into_any_element()
-}
-
-fn reveal_meeting(id: &str, export_path: Option<&std::path::Path>) {
-    if let Some(path) = export_path {
-        meeting::reveal(path);
-        return;
-    }
-    match meeting::root() {
-        Ok(root) => match ProcessCommand::new("/usr/bin/open")
-            .arg(root.join(id))
-            .status()
-        {
-            Ok(status) if status.success() => {}
-            Ok(status) => tracing::error!(%status, "could not reveal meeting files"),
-            Err(error) => tracing::error!(%error, "could not reveal meeting files"),
-        },
-        Err(error) => tracing::error!(%error, "could not locate meeting files"),
-    }
-}
-
-/// Deterministic meetings for the Meetings preview: one recording, one with
-/// notes, one without, and one that failed.
-fn preview_meetings(empty: bool) -> (Vec<MeetingManifest>, HashMap<String, Vec<TranscriptEntry>>) {
-    if empty {
-        return (Vec::new(), HashMap::new());
-    }
-    let now = now_ms();
-    let minute = 60_000;
-    let manifest =
-        |id: &str, title: &str, status, started: u64, duration: u64, app: Option<&str>| {
-            MeetingManifest {
-                schema_version: 1,
-                id: id.into(),
-                title: title.into(),
-                status,
-                created_at_ms: started,
-                ended_at_ms: (status != MeetingStatus::Recording).then_some(started + duration),
-                duration_ms: (status != MeetingStatus::Recording).then_some(duration),
-                system: Default::default(),
-                microphone: Default::default(),
-                live_dropped_packets: 0,
-                live_transcription_error: None,
-                error: None,
-                app: app.map(Into::into),
-                export_path: None,
-                export_error: None,
-                echo_suppressed_utterances: 0,
-                provisional_title: None,
-                notes: None,
-                notes_error: None,
-            }
-        };
-    let recording_start = now - 7 * minute - 12_000;
-    let mut live = manifest(
-        "preview-live",
-        &meeting::default_title(Some("Zoom"), recording_start),
-        MeetingStatus::Recording,
-        recording_start,
-        0,
-        Some("Zoom"),
-    );
-    live.created_at_ms = recording_start;
-    let synced_start = now - 3 * 60 * minute;
-    let mut synced = manifest(
-        "preview-notes",
-        &meeting::default_title(Some("Zoom"), synced_start),
-        MeetingStatus::Complete,
-        synced_start,
-        38 * minute + 20_000,
-        Some("Zoom"),
-    );
-    synced.notes = Some(meeting::MeetingNotes {
-        title: "Arcade launch plan".into(),
-        summary: "One login for every Anomaly Arcade game, aiming for twenty to thirty games \
-over the next couple of months. The build screen needs a proposal before more polish."
-            .into(),
-        generated_at_ms: synced_start + 39 * minute,
-        elapsed_ms: 4_000,
-        ..Default::default()
-    });
-    let design_start = now - 27 * 60 * minute;
-    let design = manifest(
-        "preview-design",
-        "Design review",
-        MeetingStatus::Complete,
-        design_start,
-        24 * minute,
-        Some("FaceTime"),
-    );
-    let failed_start = now - 29 * 60 * minute;
-    let mut failed = manifest(
-        "preview-failed",
-        &meeting::default_title(None, failed_start),
-        MeetingStatus::Failed,
-        failed_start,
-        2 * minute,
-        None,
-    );
-    failed.error = Some("ScreenCaptureKit stopped the capture.".into());
-
-    let turn = |source, seconds: u64, text: &str| TranscriptEntry {
-        source,
-        start_ms: seconds * 1_000,
-        end_ms: seconds * 1_000 + 2_500,
-        text: text.into(),
-    };
-    use MeetingSource::{Microphone as You, System as Them};
-    let conversation = vec![
-        turn(
-            Them,
-            1,
-            "Basically, I want Anomaly Arcade to be one login where you add friends and jump into any game.",
-        ),
-        turn(Them, 4, "I need to finish my StarCraft game, too."),
-        turn(You, 9, "Oh nice. How far along is it?"),
-        turn(
-            Them,
-            13,
-            "Close. I feel like over a couple of months we could make twenty to thirty games.",
-        ),
-        turn(You, 20, "That's basically a new version of Steam."),
-        turn(
-            Them,
-            24,
-            "If we're seeing Roblox, the idea should be to become Roblox.",
-        ),
-        turn(
-            You,
-            31,
-            "Apple has a new thing where you hold two phones together and there's this pulse and gravity well.",
-        ),
-        turn(
-            You,
-            34,
-            "Could be a nice mini gravity well for the transitions.",
-        ),
-        turn(Them, 40, "Prototype it in WebGPU, whatever's faster."),
-        turn(
-            You,
-            95,
-            "The build screen looks rough, by the way. We need a proposal for it.",
-        ),
-        turn(
-            Them,
-            101,
-            "Agreed. Write it up and I'll review it tomorrow.",
-        ),
-    ];
-    let transcripts = HashMap::from([
-        ("preview-live".to_string(), conversation[..7].to_vec()),
-        ("preview-notes".to_string(), conversation.clone()),
-        ("preview-design".to_string(), conversation[2..6].to_vec()),
-    ]);
-    (vec![live, synced, design, failed], transcripts)
-}
-
-fn log_meeting_request_error(error: TrySendError<MeetingRequest>) {
-    match error {
-        TrySendError::Full(_) => tracing::warn!("meeting controller is busy"),
-        TrySendError::Disconnected(_) => tracing::error!("meeting controller is unavailable"),
-    }
-}
-
-fn meeting_duration(meeting: &MeetingManifest) -> u64 {
-    meeting.duration_ms.unwrap_or_else(|| {
-        if matches!(
-            meeting.status,
-            MeetingStatus::Starting | MeetingStatus::Recording
-        ) {
-            now_ms().saturating_sub(meeting.created_at_ms)
-        } else {
-            meeting
-                .ended_at_ms
-                .map_or(0, |ended| ended.saturating_sub(meeting.created_at_ms))
-        }
-    })
 }
 
 fn activity_context(reader: &EventReader) -> (Option<String>, Option<String>) {
@@ -8985,12 +6604,21 @@ fn text_or(prefix: &str, text: &str) -> String {
     }
 }
 
-#[cfg(test)]
+// The window tests drive GPUI's test platform, a macOS dev-dependency.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::fs;
 
+    use std::cell::RefCell;
+
+    use super::platform::{
+        CatalogCommand, command_model_notice, merged_catalog, sidebar_update_button,
+    };
     use super::*;
-    use crate::personal_commands::StatusExecution;
+    use crate::commands::CommandScope;
+    use crate::meeting;
+    use crate::personal_commands::{StatusContext, StatusExecution};
+    use crate::recognition::CommandModelStatus;
 
     fn preview_fixture(
         preview: AppWindowPreview,
@@ -8999,12 +6627,14 @@ mod tests {
     ) -> AppWindow {
         AppWindow::new(
             PathBuf::from("unused-preview-events.ndjson"),
-            crate::config::voice_control(),
-            sync_channel(1).0,
-            crate::dictation_indicator::channel().0,
-            None,
             None,
             Some(preview),
+            platform::Args {
+                commands: crate::config::voice_control(),
+                meeting_requests: sync_channel(1).0,
+                indicator: crate::dictation_indicator::channel().0,
+                recognition_start: None,
+            },
             window,
             cx,
         )
@@ -9098,7 +6728,7 @@ mod tests {
     fn meeting_overflow_menu_opens_beside_the_visible_actions(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(meetings_fixture);
         cx.update(|window, cx| {
-            view.update(cx, |view, _| view.meeting_actions_open = true);
+            view.update(cx, |view, _| view.platform.meeting_actions_open = true);
             window.refresh();
         });
         cx.run_until_parked();
@@ -9110,7 +6740,7 @@ mod tests {
             view.update(cx, |view, _| {
                 view.select_meeting("preview-design".into());
                 assert!(
-                    !view.meeting_actions_open,
+                    !view.platform.meeting_actions_open,
                     "a new selection closes the menu"
                 );
             })
@@ -9124,8 +6754,12 @@ mod tests {
         let (view, cx) = cx.add_window_view(meetings_fixture);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                assert_eq!(view.selected_meeting.as_deref(), Some("preview-notes"));
-                view.meeting_search
+                assert_eq!(
+                    view.platform.selected_meeting.as_deref(),
+                    Some("preview-notes")
+                );
+                view.platform
+                    .meeting_search
                     .entity
                     .update(cx, |input, cx| input.set_text("gravity", cx));
                 view.refresh_meeting_search(cx);
@@ -9135,7 +6769,8 @@ mod tests {
                     .map(|meeting| meeting.id.as_str())
                     .collect::<Vec<_>>();
                 assert_eq!(visible, ["preview-live", "preview-notes"]);
-                view.meeting_search
+                view.platform
+                    .meeting_search
                     .entity
                     .update(cx, |input, cx| input.set_text("", cx));
 
@@ -9145,13 +6780,14 @@ mod tests {
                     window,
                     cx,
                 );
-                let (_, input) = view.meeting_rename.as_ref().unwrap();
+                let (_, input) = view.platform.meeting_rename.as_ref().unwrap();
                 input
                     .entity
                     .update(cx, |input, cx| input.set_text("  Motion   review ", cx));
                 view.finish_meeting_rename(cx);
-                assert!(view.meeting_rename.is_none());
+                assert!(view.platform.meeting_rename.is_none());
                 let design = view
+                    .platform
                     .meetings
                     .iter()
                     .find(|m| m.id == "preview-design")
@@ -9159,12 +6795,23 @@ mod tests {
                 assert_eq!(meeting::display_title(design), "Motion review");
 
                 view.trash_meeting("preview-notes".into(), cx);
-                assert_eq!(view.meeting_delete_armed.as_deref(), Some("preview-notes"));
-                assert_eq!(view.meetings.len(), 4, "the first click only asks");
+                assert_eq!(
+                    view.platform.meeting_delete_armed.as_deref(),
+                    Some("preview-notes")
+                );
+                assert_eq!(view.platform.meetings.len(), 4, "the first click only asks");
                 view.trash_meeting("preview-notes".into(), cx);
-                assert_eq!(view.meetings.len(), 3);
-                assert!(view.meetings.iter().all(|m| m.id != "preview-notes"));
-                assert_eq!(view.selected_meeting.as_deref(), Some("preview-live"));
+                assert_eq!(view.platform.meetings.len(), 3);
+                assert!(
+                    view.platform
+                        .meetings
+                        .iter()
+                        .all(|m| m.id != "preview-notes")
+                );
+                assert_eq!(
+                    view.platform.selected_meeting.as_deref(),
+                    Some("preview-live")
+                );
             });
         });
     }
@@ -9979,7 +7626,7 @@ mod tests {
     #[test]
     fn production_navigation_keeps_commands_available_as_an_opt_in() {
         assert_eq!(
-            Pane::all(false, false),
+            Pane::all(platform::CAPABILITIES, false, false),
             vec![
                 Pane::Settings,
                 Pane::Modes,
@@ -9989,7 +7636,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            Pane::all(false, true),
+            Pane::all(platform::CAPABILITIES, false, true),
             vec![
                 Pane::Settings,
                 Pane::Modes,
@@ -10005,7 +7652,7 @@ mod tests {
     #[test]
     fn developer_navigation_appends_developer_panes_in_order() {
         assert_eq!(
-            Pane::all(true, false),
+            Pane::all(platform::CAPABILITIES, true, false),
             vec![
                 Pane::Settings,
                 Pane::Modes,

@@ -4,26 +4,22 @@ mod accessibility;
 mod app_paths;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod app_settings;
-#[cfg(target_os = "macos")]
 mod app_window;
 #[cfg(target_os = "macos")]
 mod apple_intelligence;
 #[cfg(target_os = "macos")]
 mod apple_speech;
-#[cfg(target_os = "macos")]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod application_catalog;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod audio;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod command_grammar;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod commands;
 #[cfg(target_os = "macos")]
 mod config;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod context;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod dashboard;
@@ -36,7 +32,7 @@ mod desktop_host;
 mod desktop_transcription_picker;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod desktop_ui;
-#[cfg(target_os = "macos")]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod developer_control;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod dictation;
@@ -46,8 +42,7 @@ mod dictation_audio;
 mod dictation_diagnostics;
 #[cfg(target_os = "macos")]
 mod dictation_indicator;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod dictation_processor;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod events;
@@ -60,7 +55,7 @@ mod history;
 mod instance;
 #[cfg(target_os = "macos")]
 mod keyboard;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod keys;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -89,7 +84,7 @@ mod local_api;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 mod local_transcriber;
-#[cfg(target_os = "macos")]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod login_item;
 #[cfg(target_os = "macos")]
 mod meeting;
@@ -106,7 +101,7 @@ mod microphone_activity;
 mod moonshine;
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod moonshine_lab;
-#[cfg(target_os = "macos")]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod onboarding;
 #[cfg(target_os = "macos")]
 mod parakeet;
@@ -116,8 +111,7 @@ mod paste;
 mod pause_segmenter;
 #[cfg(target_os = "macos")]
 mod permission_guide;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod personal_commands;
 #[cfg(target_os = "macos")]
 mod recognition;
@@ -131,7 +125,7 @@ mod spoken_text;
 mod status_item;
 #[cfg(target_os = "macos")]
 mod suppression;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod text_input;
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 mod text_replacements;
@@ -142,7 +136,7 @@ mod transcription_benchmark;
 mod transcription_engine;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod transcription_models;
-#[cfg(target_os = "macos")]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod transcription_preparation;
 #[cfg(target_os = "macos")]
 mod transcription_service;
@@ -156,7 +150,7 @@ mod desktop_activity_pane;
 mod desktop_history_pane;
 #[cfg(target_os = "windows")]
 mod desktop_hud_lab;
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod desktop_i18n;
 #[cfg(target_os = "windows")]
 mod desktop_indicator_model;

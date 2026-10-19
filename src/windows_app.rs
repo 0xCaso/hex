@@ -107,7 +107,7 @@ struct TranscriptionPreparation {
     worker: Option<JoinHandle<()>>,
 }
 
-struct WindowsDesktopHost {
+pub(crate) struct WindowsDesktopHost {
     event_path: PathBuf,
     event_reader: EventReader,
     activity: DesktopActivity,
@@ -258,6 +258,11 @@ impl TranscriptionPickerState {
 }
 
 pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bool) -> Result<()> {
+    // TODO(consolidate-screens): HEX_LEGACY_UI=1 keeps the previous Windows
+    // screens for comparison until they are deleted.
+    if std::env::var_os("HEX_LEGACY_UI").is_none_or(|value| value != "1") {
+        return open_shared(event_path, shutdown, start_hidden);
+    }
     shutdown.store(false, Ordering::Relaxed);
     let (tray_sender, tray_commands) = mpsc::channel();
     let (indicator_sender, indicator_events) = crate::windows_indicator::channel();
@@ -623,6 +628,180 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
     Ok(())
 }
 
+/// The Windows lifecycle around the shared app window: the tray, the HUD
+/// window, and the listener host, which outlive the window while Hex hides
+/// in the tray.
+fn open_shared(
+    event_path: PathBuf,
+    shutdown: &'static AtomicBool,
+    start_hidden: bool,
+) -> Result<()> {
+    shutdown.store(false, Ordering::Relaxed);
+    let (tray_sender, tray_commands) = mpsc::channel();
+    let (indicator_sender, indicator_events) = crate::windows_indicator::channel();
+    let (settings, settings_error) = match crate::windows_settings::WindowsSettings::load() {
+        Ok(settings) => (settings, None),
+        Err(error) => (
+            crate::windows_settings::WindowsSettings::default(),
+            Some(format!("Could not load settings: {error:#}")),
+        ),
+    };
+    let listen_on_launch = settings.listen_on_launch;
+    let indicator_position = settings.indicator_position;
+    Application::new().run(move |cx: &mut App| {
+        cx.bind_keys(crate::text_input::key_bindings());
+        let (host, _) = WindowsDesktopHost::new(
+            event_path.clone(),
+            settings.clone(),
+            settings_error.clone(),
+            indicator_sender.clone(),
+        );
+        let host = std::rc::Rc::new(std::cell::RefCell::new(host));
+        // The microphone stays cold until first-run setup finishes.
+        let setup_done = crate::onboarding::completion_recorded();
+        if listen_on_launch && setup_done {
+            host.borrow_mut().start();
+        }
+        let window = crate::app_window::open(
+            event_path.clone(),
+            host.clone(),
+            listen_on_launch && !setup_done,
+            cx,
+        )
+        .expect("could not open the Hex window");
+        let (indicator, indicator_hwnd, indicator_scale) = match cx
+            .open_window(crate::windows_indicator::window_options(cx), |_, cx| {
+                cx.new(|_| crate::windows_indicator::WindowsIndicator::new())
+            }) {
+            Ok(indicator_window) => {
+                let indicator = indicator_window.update(cx, |_, _, cx| cx.entity()).ok();
+                let placement = indicator_window
+                    .update(cx, |_, window, _| {
+                        (windows_hwnd(window), window.scale_factor())
+                    })
+                    .ok();
+                let hwnd = placement.and_then(|(hwnd, _)| hwnd);
+                let scale_factor = placement.map_or(1.0, |(_, scale_factor)| scale_factor);
+                configure_indicator_window(hwnd, scale_factor, indicator_position);
+                (indicator, hwnd, scale_factor)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Windows dictation HUD is unavailable");
+                (None, None, 1.0)
+            }
+        };
+        let tray = match create_tray(tray_sender.clone()) {
+            Ok(tray) => Some(tray),
+            Err(error) => {
+                tracing::warn!(%error, "Windows system tray is unavailable; closing Hex will quit");
+                None
+            }
+        };
+        let close_to_tray = tray.is_some();
+        let hwnd = window
+            .update(cx, |_, window, _| windows_hwnd(window))
+            .ok()
+            .flatten();
+        crate::windows_ui::apply_window_icon(hwnd);
+        let indicator_host = host.clone();
+        cx.spawn(async move |cx| {
+            // The pump is the HUD's display link; see `open`.
+            let mut shown = false;
+            loop {
+                Timer::after(Duration::from_millis(16)).await;
+                let Some(indicator) = &indicator else {
+                    while indicator_events.try_recv().is_ok() {}
+                    continue;
+                };
+                while let Ok(event) = indicator_events.try_recv() {
+                    if indicator
+                        .update(cx, |indicator, _| indicator.handle(event))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                let Ok(visible) = indicator.update(cx, |indicator, cx| indicator.tick(cx)) else {
+                    return;
+                };
+                let position = indicator_host.borrow().indicator_position();
+                let show = visible && position != IndicatorPosition::Hidden;
+                if show != shown {
+                    if show {
+                        position_indicator_window(indicator_hwnd, indicator_scale, position);
+                    }
+                    set_window_visible(indicator_hwnd, show);
+                    shown = show;
+                }
+            }
+        })
+        .detach();
+        let lifecycle_host = host.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                Timer::after(Duration::from_millis(250)).await;
+                while let Ok(command) = tray_commands.try_recv() {
+                    match command {
+                        TrayCommand::Show => {
+                            set_window_visible(hwnd, true);
+                            let _ = window.update(cx, |_, window, _| window.activate_window());
+                        }
+                        TrayCommand::ToggleListening => {
+                            let mut host = lifecycle_host.borrow_mut();
+                            if host.is_running() {
+                                host.stop();
+                            } else {
+                                host.start();
+                            }
+                        }
+                        TrayCommand::Quit => {
+                            lifecycle_host.borrow_mut().stop();
+                            let _ = cx.update(|cx| cx.quit());
+                            return;
+                        }
+                    }
+                }
+                if shutdown.load(Ordering::Relaxed) {
+                    lifecycle_host.borrow_mut().stop();
+                    let _ = cx.update(|cx| cx.quit());
+                    return;
+                }
+                lifecycle_host.borrow_mut().refresh();
+            }
+        })
+        .detach();
+        let close_host = host.clone();
+        window
+            .update(cx, |_, window, cx| {
+                if close_to_tray {
+                    window.on_window_should_close(cx, move |_, _| {
+                        set_window_visible(hwnd, false);
+                        false
+                    });
+                } else {
+                    // Without a tray, closing must quit the whole app; the
+                    // hidden HUD window would otherwise keep it alive.
+                    window.on_window_should_close(cx, move |_, cx| {
+                        close_host.borrow_mut().stop();
+                        cx.quit();
+                        true
+                    });
+                }
+                window.activate_window();
+            })
+            .ok();
+        if start_hidden && close_to_tray {
+            set_window_visible(hwnd, false);
+        }
+        cx.on_app_quit(move |_| {
+            let _keep_alive = (&tray, &host);
+            async {}
+        })
+        .detach();
+    });
+    Ok(())
+}
+
 fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     let menu = Menu::new();
     let show = MenuItem::with_id("show", "Show Hex", true, None);
@@ -863,13 +1042,13 @@ impl WindowsDesktopHost {
         (host, history_error)
     }
 
-    fn model_ready(&self) -> bool {
+    pub(crate) fn model_ready(&self) -> bool {
         let model = crate::transcription_models::definition(self.settings.transcription.model);
         crate::transcription_models::is_installed(model, &self.settings.transcription.language)
             && crate::transcription_models::is_verified(model)
     }
 
-    fn start(&mut self) {
+    pub(crate) fn start(&mut self) {
         self.listen_when_ready = true;
         if self.listener_result.is_some() {
             return;
@@ -969,7 +1148,7 @@ impl WindowsDesktopHost {
         }
     }
 
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         self.listen_when_ready = false;
         if let Some(stop) = self
             .listener_stop
@@ -1165,14 +1344,19 @@ impl WindowsDesktopHost {
         };
         match receiver.try_recv() {
             Ok(Ok(catalog)) => {
-                // First load with nothing configured adopts the default.
+                // With nothing configured, voice actions use the OpenCode
+                // default model; settings keep "default" so the choice
+                // follows OpenCode.
                 if self.settings.voice_action_model.is_none()
                     && let Some(default) = catalog
                         .default_key
                         .as_ref()
                         .and_then(|key| catalog.models.iter().find(|choice| &choice.key == key))
                 {
-                    self.set_voice_action_model(Some(default.model()));
+                    *self
+                        .voice_action_model
+                        .write()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(default.model());
                 }
                 self.opencode_catalog = Some(catalog);
                 self.opencode_catalog_error = None;
@@ -1750,8 +1934,93 @@ impl WindowsDesktopHost {
         }
     }
 
-    fn is_running(&self) -> bool {
+    pub(crate) fn is_running(&self) -> bool {
         self.listener_result.is_some()
+    }
+
+    pub(crate) fn history(&self) -> Option<History> {
+        self.history.clone()
+    }
+
+    pub(crate) fn indicator_position(&self) -> IndicatorPosition {
+        self.settings.indicator_position
+    }
+
+    pub(crate) fn update_state(&self) -> crate::windows_updater::UpdateCheck {
+        self.updater.state()
+    }
+
+    /// Applies the settings the shared window saved. Shared state the
+    /// listener reads changes in place; anything the listener captured at
+    /// start restarts a running listener.
+    pub(crate) fn apply_settings(&mut self, settings: &crate::app_settings::AppSettings) {
+        let next = crate::windows_settings::WindowsSettings::from_app(settings);
+        let current = next.clone();
+        let previous = std::mem::replace(&mut self.settings, next);
+        if previous.text_replacements != current.text_replacements {
+            *self
+                .replacements
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) =
+                crate::text_replacements::ReplacementSet::new(&current.text_replacements);
+        }
+        let modes_changed = previous.modes != current.modes
+            || previous.dictation_post_processing != current.dictation_post_processing
+            || previous.dictation_transformations != current.dictation_transformations;
+        if modes_changed {
+            *self
+                .mode_runtime
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) =
+                crate::windows_dictation::WindowsModeRuntime::from_settings(&current);
+        }
+        if previous.voice_action_model != current.voice_action_model {
+            *self
+                .voice_action_model
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) = current.voice_action_model.clone();
+        }
+        let needs_default_model =
+            current.voice_action_hotkey.is_some() && current.voice_action_model.is_none();
+        let needed_default_model =
+            previous.voice_action_hotkey.is_some() && previous.voice_action_model.is_none();
+        if needs_default_model
+            && !needed_default_model
+            && crate::dictation_processor::opencode_installed()
+        {
+            self.request_opencode_catalog();
+        }
+        if previous.ui_language != current.ui_language {
+            crate::desktop_i18n::apply(current.ui_language.as_deref());
+        }
+        let model_changed = previous.transcription.model != current.transcription.model
+            || previous.transcription.language != current.transcription.language;
+        let restart = model_changed
+            || previous.microphone != current.microphone
+            || previous.dictation_hotkey != current.dictation_hotkey
+            || previous.paste_last_hotkey != current.paste_last_hotkey
+            || previous.voice_action_hotkey != current.voice_action_hotkey
+            || previous.double_tap_lock != current.double_tap_lock
+            || previous.double_tap_only != current.double_tap_only
+            || previous.shortcut_mode != current.shortcut_mode
+            || previous.while_dictating != current.while_dictating
+            || previous.release_microphone_while_idle != current.release_microphone_while_idle;
+        if previous.transcription.recognition_hints != current.transcription.recognition_hints
+            && crate::transcription_models::definition(current.transcription.model)
+                .supports_recognition_hints
+            && self.is_running()
+        {
+            self.hints_restart_after = Some(Instant::now());
+        }
+        if modes_changed {
+            self.refresh_personal_commands_host();
+        }
+        if restart && self.is_running() {
+            self.restart_listener_for_settings();
+        } else if model_changed && self.listen_when_ready && !self.is_running() {
+            // A listener waiting for a model starts once one is chosen.
+            self.start();
+        }
     }
 
     fn join_listener(&mut self) {
@@ -1874,7 +2143,7 @@ impl WindowsDesktopHost {
         DesktopCapabilities::windows()
     }
 
-    fn snapshot(&self) -> DesktopSnapshot {
+    pub(crate) fn snapshot(&self) -> DesktopSnapshot {
         DesktopSnapshot {
             activity: self.activity.clone(),
             transcripts: self
@@ -1942,7 +2211,7 @@ impl WindowsDesktopHost {
         }
     }
 
-    fn dispatch(&mut self, action: DesktopAction) -> Result<()> {
+    pub(crate) fn dispatch(&mut self, action: DesktopAction) -> Result<()> {
         match action {
             DesktopAction::CheckForUpdates => self.updater.request_check(),
             DesktopAction::ClearError => {

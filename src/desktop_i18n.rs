@@ -51,7 +51,7 @@ pub(crate) fn system_language() -> String {
     {
         crate::windows_settings::user_language()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "windows"))]
     {
         language_from_env(
             std::env::var("LC_ALL").ok().as_deref(),
