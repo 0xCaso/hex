@@ -247,6 +247,7 @@ pub enum PreviewModelState {
 
 /// A deterministic onboarding state for previews and screenshots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum OnboardingPreview {
     Welcome,
     HowItWorks,
