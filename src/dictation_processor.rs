@@ -1172,6 +1172,18 @@ fn read_service_registration(state: &Path, pid: u32, version: &str) -> Result<(S
     found.ok_or_else(|| eyre!("OpenCode active service registration is unavailable"))
 }
 
+/// macOS always has /usr/bin/curl, and most Linux distributions do too.
+/// NixOS doesn't; Hex's Nix package puts curl on PATH instead.
+#[cfg(not(target_os = "windows"))]
+fn curl_program() -> PathBuf {
+    let system = Path::new("/usr/bin/curl");
+    if cfg!(target_os = "macos") || system.exists() {
+        system.into()
+    } else {
+        PathBuf::from("curl")
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn opencode_http_command(
     endpoint: &str,
@@ -1200,7 +1212,7 @@ fn opencode_http_command(
         _ => return Err(eyre!("OpenCode service must use a loopback HTTP endpoint")),
     }
     url.set_path(path);
-    let mut command = Command::new("/usr/bin/curl");
+    let mut command = Command::new(curl_program());
     let directory = if let Some(workspace) = workspace {
         fs::create_dir_all(workspace).wrap_err_with(|| {
             format!(
@@ -2170,7 +2182,7 @@ mod tests {
         )
         .unwrap();
         let workspace = root.canonicalize().unwrap();
-        assert_eq!(command.get_program(), OsStr::new("/usr/bin/curl"));
+        assert_eq!(command.get_program(), curl_program().as_os_str());
         assert_eq!(command.get_current_dir(), Some(workspace.as_path()));
         for arg in command.get_args() {
             assert!(!arg.to_string_lossy().contains("fixture-password"));
