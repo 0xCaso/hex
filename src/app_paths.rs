@@ -19,6 +19,7 @@ pub fn logs_dir() -> Result<PathBuf> {
     Ok(support_dir()?.join("logs"))
 }
 
+#[cfg(target_os = "macos")]
 pub fn scrawl_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("SCRAWL_CAPTURES_DIR") {
         return Ok(path.into());
