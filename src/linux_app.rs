@@ -108,6 +108,10 @@ struct LinuxDesktopHost {
     transcription_preparation: Option<TranscriptionPreparation>,
     transcription_error: Option<String>,
     update: UpdateState,
+    output: crate::linux_dictation::DictationOutput,
+    /// Hosts the personal transformations workspace while a mode uses one.
+    personal_commands: Option<crate::personal_commands::PersonalCommands>,
+    personal_commands_checked_at: Instant,
 }
 
 enum UpdateState {
@@ -290,7 +294,16 @@ impl LinuxDesktopHost {
         let mut event_reader = EventReader::open(&event_path);
         let mut activity = DesktopActivity::default();
         activity.refresh(&mut event_reader);
-        Self {
+        // Tests never touch the user's history.
+        let history = if cfg!(test) {
+            None
+        } else {
+            crate::history::History::open_default(settings.history_retention)
+                .inspect_err(|error| tracing::warn!(%error, "could not open retained history"))
+                .ok()
+        };
+        let output = crate::linux_dictation::DictationOutput::from_settings(&settings, history);
+        let mut host = Self {
             event_reader,
             event_path,
             activity,
@@ -307,6 +320,47 @@ impl LinuxDesktopHost {
             transcription_preparation: None,
             transcription_error: None,
             update,
+            output,
+            personal_commands: None,
+            personal_commands_checked_at: Instant::now(),
+        };
+        host.refresh_personal_commands();
+        host
+    }
+
+    /// Applies saved settings the running listener reads live: modes,
+    /// history retention, and the transformations workspace.
+    fn apply_output_settings(&mut self) {
+        *self
+            .output
+            .modes
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) =
+            crate::dictation_modes::ModeRuntime::from_settings(&self.settings);
+        if let Some(history) = &self.output.history
+            && let Err(error) = history.set_retention(self.settings.history_retention)
+        {
+            tracing::warn!(%error, "could not apply the history retention");
+        }
+        self.refresh_personal_commands();
+    }
+
+    fn refresh_personal_commands(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let enabled =
+            crate::app_settings::transformations_used(&self.settings.dictation_processing)
+                || crate::personal_commands::workspace_configured();
+        match (enabled, self.personal_commands.is_some()) {
+            (true, false) => {
+                self.personal_commands = crate::personal_commands::PersonalCommands::start(
+                    crate::commands::CommandConfig::new(),
+                    self.output.transformations.clone(),
+                );
+            }
+            (false, true) => self.personal_commands = None,
+            _ => {}
         }
     }
 
@@ -333,6 +387,7 @@ impl LinuxDesktopHost {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let settings = self.settings.clone();
+        let output = self.output.clone();
         let event_path = self.event_path.clone();
         let prepared_transcriber = self.prepared_transcriber.take();
         let hotkey_status = crate::linux_input::HotkeyStatus::default();
@@ -344,6 +399,7 @@ impl LinuxDesktopHost {
                     None,
                     &worker_stop,
                     &settings,
+                    output,
                     prepared_transcriber,
                     worker_hotkey_status,
                 )
@@ -374,6 +430,11 @@ impl LinuxDesktopHost {
     }
 
     fn refresh(&mut self) {
+        // Settings may set up the transformations workspace at any time.
+        if self.personal_commands_checked_at.elapsed() >= Duration::from_secs(2) {
+            self.personal_commands_checked_at = Instant::now();
+            self.refresh_personal_commands();
+        }
         if matches!(&self.update, UpdateState::Waiting(at) | UpdateState::Failed(at) if Instant::now() >= *at)
         {
             self.update = UpdateState::Checking(start_update_check());
@@ -550,7 +611,8 @@ impl LinuxDesktopHost {
             || settings.dictation_hotkey != self.settings.dictation_hotkey
             || settings.double_tap_lock != self.settings.double_tap_lock
             || settings.shortcut_mode != self.settings.shortcut_mode
-            || settings.paste_with_shift != self.settings.paste_with_shift;
+            || settings.paste_with_shift != self.settings.paste_with_shift
+            || settings.microphone != self.settings.microphone;
         if restart && self.is_running() && self.settings_edit.is_none() {
             self.begin_settings_edit(SettingsChange::Reload(Box::new(settings)));
             return Ok(());
@@ -558,6 +620,7 @@ impl LinuxDesktopHost {
         self.settings = settings;
         self.settings_valid = true;
         self.settings_error = None;
+        self.apply_output_settings();
         if model_changed && self.listen_when_ready && !self.is_running() {
             self.start();
         }
@@ -599,6 +662,7 @@ impl LinuxDesktopHost {
                     self.settings = settings;
                     self.settings_valid = true;
                     self.settings_error = None;
+                    self.apply_output_settings();
                 }
                 Ok(Err(error)) if !canceled => {
                     self.error = Some(format!("Could not update dictation settings: {error:#}"));

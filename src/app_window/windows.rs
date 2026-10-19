@@ -39,6 +39,19 @@ pub(super) fn records_key_events() -> bool {
     false
 }
 
+/// How the Modes pane describes website rules; `None` hides them where
+/// the listener can't read the browser's address.
+pub(super) const WEB_PAGES_DESCRIPTION: Option<&str> =
+    Some("Switch when a domain is active in your browser");
+
+/// Whether the listener knows which application is frontmost.
+pub(super) fn focused_application_known() -> bool {
+    true
+}
+
+/// The Modes application picker's button for an app it doesn't list.
+pub(super) const CHOOSE_APPLICATION_FILE: &str = "Choose an .exe…";
+
 pub(super) const MANUAL_UPDATE_CHECK: bool = true;
 
 /// What the Windows lifecycle hands the window.
