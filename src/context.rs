@@ -1,11 +1,18 @@
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
-use color_eyre::eyre::{Result, WrapErr, eyre};
+use color_eyre::eyre::Result;
+#[cfg(target_os = "macos")]
+use color_eyre::eyre::WrapErr;
+#[cfg(any(target_os = "macos", test))]
+use color_eyre::eyre::eyre;
 use url::Url;
 
 #[cfg(target_os = "macos")]
@@ -155,9 +162,10 @@ impl ContextSnapshot {
     }
 
     pub fn browser_host_is(&self, host: &str) -> bool {
-        // Brave is the first browser adapter. Command semantics intentionally
+        // Brave is the first macOS browser adapter; Windows reads any
+        // browser's URL through UI Automation. Command semantics intentionally
         // depend on browser host, not this application name.
-        self.application.as_deref() == Some("Brave Browser")
+        (cfg!(not(target_os = "macos")) || self.application.as_deref() == Some("Brave Browser"))
             && self
                 .browser_host()
                 .is_some_and(|current| browser_hosts_equal(current, host))

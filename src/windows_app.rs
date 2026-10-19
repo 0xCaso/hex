@@ -8,10 +8,9 @@ use std::time::{Duration, Instant};
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, Div, Entity, FontWeight, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Subscription, Timer,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, canvas, div, prelude::*, px, relative,
-    rgb, size,
+    AnyElement, App, Application, Bounds, Context, Div, Entity, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, SharedString, Subscription, Timer, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, canvas, div, prelude::*, px, rgb, size,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
@@ -26,15 +25,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
+use crate::design_tokens::*;
 use crate::desktop_activity::DesktopActivity;
 use crate::desktop_history_pane::{
     HistoryPaneAction, HistoryPaneDelegate, HistoryPaneState,
     render_history_pane as render_shared_history_pane,
-};
-use crate::desktop_host::{
-    DesktopAction, DesktopCapabilities, DesktopHost, DesktopListenerSnapshot,
-    DesktopMicrophoneSnapshot, DesktopShortcut, DesktopSnapshot, DesktopTranscriptionSnapshot,
-    DesktopUpdateStatus,
 };
 use crate::desktop_i18n::{tr, tr_fill};
 use crate::desktop_mode_basics::{
@@ -62,12 +57,10 @@ use crate::desktop_replacement_editor::{
 use crate::desktop_shell::{DesktopPane, render_navigation_items};
 use crate::desktop_transcription_picker::TranscriptionPickerDelegate;
 use crate::desktop_ui::{
-    FAINT, LINE, MUTED, PANE_LIST_WIDTH, SECTION_GAP, SIDEBAR_WIDTH, TEXT, TEXT_ON_ACCENT,
-    TEXT_SOFT, accent_color, compact_button, compact_section_label, disclosure_button,
-    dropdown_backdrop, dropdown_item, dropdown_panel, dropdown_panel_with_width, error_message,
-    header_button, hotkey_keycaps, pane_body, pane_content, pane_header_with_action,
-    segmented_control, segmented_item, settings_copy, settings_panel, settings_row,
-    settings_section_label, sidebar_frame, toggle, window_frame,
+    ButtonKind, button, disclosure_button, error_message, hotkey_keycaps, pane_body, pane_content,
+    pane_header_with_action, pane_scroll_body, panel, section_label, segmented_control,
+    segmented_item, settings_copy, settings_row, settings_section_label, sidebar_frame,
+    slider_track, small_button, status_dot, toggle, window_frame,
 };
 use crate::desktop_voice_action_pane::{
     OPENCODE_SETUP_URL, VoiceActionError, VoiceActionPaneAction, VoiceActionPaneDelegate,
@@ -77,8 +70,15 @@ use crate::desktop_voice_action_pane::{
 use crate::events::EventReader;
 use crate::history::{History, HistoryRetention};
 use crate::text_input::{Changed as TextChanged, TextInput};
+use crate::windows_desktop_host::{
+    DesktopAction, DesktopCapabilities, DesktopListenerSnapshot, DesktopMicrophoneSnapshot,
+    DesktopShortcut, DesktopSnapshot, DesktopTranscriptionSnapshot, DesktopUpdateStatus,
+};
 use crate::windows_settings::IndicatorPosition;
-use crate::windows_ui::{CRITICAL, SUCCESS, caption_bar};
+use crate::windows_ui::{
+    caption_brand, caption_controls, dropdown_backdrop, dropdown_item, dropdown_panel,
+    dropdown_panel_with_width,
+};
 
 const WINDOW_WIDTH: f32 = 1040.0;
 const WINDOW_HEIGHT: f32 = 700.0;
@@ -107,6 +107,7 @@ struct WindowsDesktopHost {
     event_path: PathBuf,
     event_reader: EventReader,
     activity: DesktopActivity,
+    transcripts: Vec<(u64, String)>,
     listener_stop: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     listener_terminated: Arc<AtomicBool>,
     listener_result: Option<Receiver<ListenerResult>>,
@@ -132,9 +133,10 @@ struct WindowsDesktopHost {
     personal_commands_status: crate::personal_commands::StatusSnapshot,
     personal_commands_setup: Option<Receiver<PersonalCommandsSetupResult>>,
     personal_commands_setup_error: Option<String>,
-    voice_action_model: Arc<RwLock<Option<crate::opencode::Model>>>,
-    opencode_catalog: Option<crate::opencode::ModelCatalog>,
-    opencode_catalog_rx: Option<std::sync::mpsc::Receiver<Result<crate::opencode::ModelCatalog>>>,
+    voice_action_model: Arc<RwLock<Option<crate::dictation_processor::Model>>>,
+    opencode_catalog: Option<crate::dictation_processor::ModelCatalog>,
+    opencode_catalog_rx:
+        Option<std::sync::mpsc::Receiver<Result<crate::dictation_processor::ModelCatalog>>>,
     opencode_catalog_error: Option<String>,
     prepared_transcriber: Option<crate::local_transcriber::LocalTranscriber>,
     hints_restart_after: Option<Instant>,
@@ -276,7 +278,7 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(MINIMUM_WIDTH), px(MINIMUM_HEIGHT))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("HEX".into()),
+                        title: Some("Hex".into()),
                         appears_transparent: true,
                         ..Default::default()
                     }),
@@ -422,7 +424,7 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
                     })
                 },
             )
-            .expect("could not open the HEX Windows window");
+            .expect("could not open the Hex Windows window");
         let app = window.update(cx, |_, _, cx| cx.entity()).unwrap();
         let (indicator, indicator_hwnd, indicator_scale) = match cx
             .open_window(crate::windows_indicator::window_options(cx), |_, cx| {
@@ -452,7 +454,7 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
         let tray = match create_tray(tray_sender.clone()) {
             Ok(tray) => Some(tray),
             Err(error) => {
-                tracing::warn!(%error, "Windows system tray is unavailable; closing HEX will quit");
+                tracing::warn!(%error, "Windows system tray is unavailable; closing Hex will quit");
                 None
             }
         };
@@ -619,9 +621,9 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
 
 fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     let menu = Menu::new();
-    let show = MenuItem::with_id("show", "Show HEX", true, None);
-    let toggle = MenuItem::with_id("toggle", "Enable / Disable HEX", true, None);
-    let quit = MenuItem::with_id("quit", "Quit HEX", true, None);
+    let show = MenuItem::with_id("show", "Show Hex", true, None);
+    let toggle = MenuItem::with_id("toggle", "Enable / Disable Hex", true, None);
+    let quit = MenuItem::with_id("quit", "Quit Hex", true, None);
     menu.append(&show)?;
     menu.append(&toggle)?;
     menu.append(&quit)?;
@@ -652,7 +654,7 @@ fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     }));
 
     Ok(TrayIconBuilder::new()
-        .with_tooltip("HEX Dictation")
+        .with_tooltip("Hex Dictation")
         .with_icon(tray_icon()?)
         .with_menu(Box::new(menu))
         // Left click shows the window (handled above); only right click
@@ -753,6 +755,8 @@ impl WindowsDesktopHost {
         let mut event_reader = EventReader::open(&event_path);
         let mut activity = DesktopActivity::default();
         activity.refresh(&mut event_reader);
+        let transcripts =
+            crate::windows_desktop_host::recent_transcripts(event_reader.events().iter());
         let (history, history_error) = match History::open_default(settings.history_retention) {
             Ok(history) => (Some(history), None),
             Err(error) => (
@@ -786,7 +790,7 @@ impl WindowsDesktopHost {
             || personal_commands_configured)
             .then(|| {
                 crate::personal_commands::PersonalCommands::start(
-                    crate::commands_engine::CommandConfig::new(),
+                    crate::commands::CommandConfig::new(),
                     transformations.clone(),
                 )
             })
@@ -808,6 +812,7 @@ impl WindowsDesktopHost {
             event_path,
             event_reader,
             activity,
+            transcripts,
             listener_stop: Arc::new(Mutex::new(None)),
             listener_terminated: Arc::new(AtomicBool::new(true)),
             listener_result: None,
@@ -847,7 +852,7 @@ impl WindowsDesktopHost {
         // OpenCode default without a visit to the Voice Action tab.
         if host.settings.voice_action_hotkey.is_some()
             && host.settings.voice_action_model.is_none()
-            && crate::windows_voice_action::opencode_installed()
+            && crate::dictation_processor::opencode_installed()
         {
             host.request_opencode_catalog();
         }
@@ -1112,7 +1117,7 @@ impl WindowsDesktopHost {
         }
     }
 
-    fn set_voice_action_model(&mut self, model: Option<crate::opencode::Model>) {
+    fn set_voice_action_model(&mut self, model: Option<crate::dictation_processor::Model>) {
         if model == self.settings.voice_action_model {
             return;
         }
@@ -1146,7 +1151,7 @@ impl WindowsDesktopHost {
         let _ = std::thread::Builder::new()
             .name("windows-opencode-catalog".into())
             .spawn(move || {
-                let _ = sender.send(crate::opencode::load_model_catalog());
+                let _ = sender.send(crate::dictation_processor::load_model_catalog());
             });
     }
 
@@ -1391,7 +1396,7 @@ impl WindowsDesktopHost {
         match (enabled, self.personal_commands.is_some()) {
             (true, false) => {
                 self.personal_commands = crate::personal_commands::PersonalCommands::start(
-                    crate::commands_engine::CommandConfig::new(),
+                    crate::commands::CommandConfig::new(),
                     self.transformations.clone(),
                 );
             }
@@ -1489,7 +1494,7 @@ impl WindowsDesktopHost {
     fn set_mode_post_processing(
         &mut self,
         target: ModeTarget,
-        settings: crate::dictation_processing::PostProcessingSettings,
+        settings: crate::dictation_processor::PostProcessingSettings,
     ) -> Result<()> {
         let mut candidate = self.settings.clone();
         match target {
@@ -1726,6 +1731,8 @@ impl WindowsDesktopHost {
         }
 
         self.activity.refresh(&mut self.event_reader);
+        self.transcripts =
+            crate::windows_desktop_host::recent_transcripts(self.event_reader.events().iter());
         if self.awaiting_session_start
             && self.activity.session_started_at != self.session_before_start
         {
@@ -1858,7 +1865,7 @@ impl Drop for WindowsDesktopHost {
     }
 }
 
-impl DesktopHost for WindowsDesktopHost {
+impl WindowsDesktopHost {
     fn capabilities(&self) -> DesktopCapabilities {
         DesktopCapabilities::windows()
     }
@@ -1866,6 +1873,15 @@ impl DesktopHost for WindowsDesktopHost {
     fn snapshot(&self) -> DesktopSnapshot {
         DesktopSnapshot {
             activity: self.activity.clone(),
+            transcripts: self
+                .transcripts
+                .iter()
+                .map(|(_, text)| text.clone())
+                .collect(),
+            last_failure: crate::windows_desktop_host::visible_failure(
+                &self.activity,
+                &self.transcripts,
+            ),
             dictation_shortcut: self.settings.dictation_hotkey.keycaps(),
             dictation_shortcut_label: self.settings.dictation_hotkey.label(),
             double_tap_lock: self.settings.double_tap_lock,
@@ -1938,7 +1954,7 @@ impl DesktopHost for WindowsDesktopHost {
                     return Err(eyre!("no installed Windows update is ready"));
                 };
                 crate::windows_updater::relaunch_at(&executable).map_err(|error| {
-                    let message = format!("Could not restart HEX: {error:#}");
+                    let message = format!("Could not restart Hex: {error:#}");
                     self.settings_error = Some(message);
                     error
                 })?;
@@ -2285,8 +2301,8 @@ impl WindowsApp {
     /// of its keycaps while a capture is active.
     fn capture_hint() -> Div {
         div()
-            .text_size(px(11.0))
-            .text_color(rgb(accent_color()))
+            .text_caption()
+            .text_color(rgb(ACCENT))
             .child(tr("Press the new shortcut, Esc cancels"))
     }
 
@@ -2314,7 +2330,7 @@ impl WindowsApp {
     ///
     /// Model support comes from the compiled definition, not the smaller
     /// recommendation list. A model can support a language without being the
-    /// model HEX recommends for it.
+    /// model Hex recommends for it.
     fn language_for_model(
         model: crate::transcription_models::TranscriptionModelId,
         preferred: &str,
@@ -2392,7 +2408,7 @@ impl WindowsApp {
             .is_some_and(|listener| listener.running);
         if !self.host.model_ready() {
             let language = snapshot.transcription.selection.language.clone();
-            return header_button(tr("Install model"))
+            return button(ButtonKind::Secondary, tr("Install model"))
                 .id("install-model")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.model_catalog_language_filter =
@@ -2403,18 +2419,21 @@ impl WindowsApp {
                 }))
                 .into_any_element();
         }
-        header_button(if running { tr("Disable") } else { tr("Enable") })
-            .id("toggle-listening")
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let action = if running {
-                    DesktopAction::StopListening
-                } else {
-                    DesktopAction::StartListening
-                };
-                let _ = this.host.dispatch(action);
-                cx.notify();
-            }))
-            .into_any_element()
+        button(
+            ButtonKind::Secondary,
+            if running { tr("Disable") } else { tr("Enable") },
+        )
+        .id("toggle-listening")
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let action = if running {
+                DesktopAction::StopListening
+            } else {
+                DesktopAction::StartListening
+            };
+            let _ = this.host.dispatch(action);
+            cx.notify();
+        }))
+        .into_any_element()
     }
 
     fn select_pane(&mut self, pane: DesktopPane, cx: &mut Context<Self>) {
@@ -2423,7 +2442,7 @@ impl WindowsApp {
         self.pane = pane;
         self.history_pane.disarm_clear();
         match pane {
-            DesktopPane::VoiceAction if crate::windows_voice_action::opencode_installed() => {
+            DesktopPane::VoiceAction if crate::dictation_processor::opencode_installed() => {
                 self.host.request_opencode_catalog();
             }
             DesktopPane::History => self.reload_history(),
@@ -2450,46 +2469,39 @@ impl WindowsApp {
             crate::windows_updater::UpdateCheck::Available { version, url } => Some((version, url)),
             _ => None,
         };
+        // The sidebar runs under the caption row; its half holds the brand.
         sidebar_frame()
-            .w(px(SIDEBAR_WIDTH))
-            .px(px(4.0))
-            .pt(px(6.0))
-            .pb_4()
-            .flex()
-            .flex_col()
-            .children(items)
+            .pt_0()
+            .child(caption_brand())
+            .child(div().mt_2().flex().flex_col().gap_0p5().children(items))
             .child(div().flex_1())
-            .when_some(update, |nav, (version, url)| {
-                nav.child(
-                    div()
-                        .id("windows-update-pill")
-                        .mx(px(4.0))
-                        .mb_2()
-                        .h(px(32.0))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(px(4.0))
-                        .bg(rgb(accent_color()))
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_ON_ACCENT))
-                        .cursor_pointer()
-                        .hover(|pill| pill.opacity(0.9))
-                        .child(crate::windows_ui::fluent_icon("\u{E896}", 12.0, 0x000000))
-                        .child(tr_fill("Update to {}", &version))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.open_url(&url);
-                        })),
-                )
-            })
             .child(
                 div()
-                    .px(px(16.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(FAINT))
-                    .child(format!("HEX {} · Windows", env!("CARGO_PKG_VERSION"))),
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .h(px(CONTROL_HEIGHT))
+                    .mt_3()
+                    .child(
+                        div()
+                            .flex_none()
+                            .pl_3()
+                            .text_caption()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .child(tr_fill("Version {}", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .when_some(update, |footer, (_version, url)| {
+                        footer.child(
+                            button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+                                .child(tr("Update"))
+                                .id("windows-update-sidebar")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.open_url(&url);
+                                })),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -2595,53 +2607,25 @@ impl WindowsApp {
                 cx.listener(|this, _, _, cx| this.finish_volume_drag(cx)),
             )
             .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .h(px(4.0))
-                    .rounded_full()
-                    .bg(rgb(0x454545))
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top_0()
-                            .h_full()
-                            .w(relative(volume_fraction))
-                            .rounded_full()
-                            .bg(rgb(accent_color())),
+                slider_track(volume_fraction).flex_1().child(
+                    canvas(
+                        move |bounds, _, cx| {
+                            slider_bounds_entity.update(cx, |this, _| {
+                                this.volume_slider_bounds = Some(bounds);
+                            });
+                        },
+                        |_, _, _, _| {},
                     )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(-5.0))
-                            .left(relative(volume_fraction))
-                            .ml(px(-7.0))
-                            .size(px(14.0))
-                            .rounded_full()
-                            .border_2()
-                            .border_color(rgb(0x1c1c1c))
-                            .bg(rgb(accent_color())),
-                    )
-                    .child(
-                        canvas(
-                            move |bounds, _, cx| {
-                                slider_bounds_entity.update(cx, |this, _| {
-                                    this.volume_slider_bounds = Some(bounds);
-                                });
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    ),
+                    .absolute()
+                    .size_full(),
+                ),
             )
             .child(
                 div()
                     .w(px(36.0))
                     .flex_none()
-                    .text_size(px(12.0))
-                    .text_color(rgb(TEXT_SOFT))
+                    .text_footnote()
+                    .text_color(rgb(TEXT_SECONDARY))
                     .child(volume_label),
             );
         let release_microphone_while_idle = self.host.settings.release_microphone_while_idle;
@@ -2721,12 +2705,7 @@ impl WindowsApp {
                                 control.child(hotkey_keycaps(keycaps, 1.0))
                             })
                             .when(!paste_last_enabled, |control| {
-                                control.child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(FAINT))
-                                        .child(tr("Disabled")),
-                                )
+                                control.opacity(DISABLED_OPACITY)
                             })
                             .into_any_element()
                     }),
@@ -2747,7 +2726,7 @@ impl WindowsApp {
             match (running, toggle_shortcut) {
                 (true, true) => "Ready anywhere · Press {} to start and stop dictating",
                 (true, false) => "Ready anywhere · Hold {} to dictate",
-                (false, _) => "Enable HEX to dictate into any app with {}",
+                (false, _) => "Enable Hex to dictate into any app with {}",
             },
             &snapshot.dictation_shortcut_label,
         );
@@ -2756,23 +2735,13 @@ impl WindowsApp {
             .size_full()
             .flex()
             .flex_col()
-            .child(pane_header_with_action("Settings", None))
+            .child(pane_header_with_action(tr("Settings"), None))
             .child(
-                pane_body().child(
-                    div()
-                        .id("windows-settings-scroll")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .px_8()
-                        .pt_1()
-                        .pb_7()
-                        .child(
-                            div().w_full().flex().justify_center().child(
-                            pane_content()
+                pane_scroll_body("windows-settings-scroll", pane_content()
                                 .relative()
                                 .child(
                                     div().pt(px(20.0)).child(
-                                        settings_panel().child(
+                                        panel().child(
                                             div()
                                                 .w_full()
                                                 .min_h(px(72.0))
@@ -2796,7 +2765,7 @@ impl WindowsApp {
                                                                 .bg(if running {
                                                                     rgb(SUCCESS)
                                                                 } else {
-                                                                    rgb(FAINT)
+                                                                    rgb(TEXT_TERTIARY)
                                                                 }),
                                                         )
                                                         .child(
@@ -2807,8 +2776,8 @@ impl WindowsApp {
                                                                 .gap(px(2.0))
                                                                 .child(
                                                                     div()
-                                                                        .text_size(px(14.0))
-                                                                        .text_color(rgb(TEXT))
+                                                                        .text_body()
+                                                                        .text_color(rgb(TEXT_PRIMARY))
                                                                         .child(
                                                                             tr(&listener_label)
                                                                                 .to_string(),
@@ -2816,24 +2785,19 @@ impl WindowsApp {
                                                                 )
                                                                 .child(
                                                                     div()
-                                                                        .text_size(px(12.0))
-                                                                        .text_color(rgb(MUTED))
+                                                                        .text_footnote()
+                                                                        .text_color(rgb(TEXT_TERTIARY))
                                                                         .truncate()
                                                                         .child(status_hint),
                                                                 )
                                                                 .when_some(
-                                                                    snapshot
-                                                                        .activity
-                                                                        .last_failure
-                                                                        .clone(),
+                                                                    snapshot.last_failure.clone(),
                                                                     |column, failure| {
                                                                         column.child(
                                                                             div()
-                                                                                .text_size(px(
-                                                                                    12.0,
-                                                                                ))
+                                                                                .text_footnote()
                                                                                 .text_color(rgb(
-                                                                                    CRITICAL,
+                                                                                    DANGER,
                                                                                 ))
                                                                                 .truncate()
                                                                                 .child(tr_fill(
@@ -2849,17 +2813,15 @@ impl WindowsApp {
                                         ),
                                     ),
                                 )
-                                .child(settings_section_label("Dictation"))
+                                .child(settings_section_label(tr("Dictation")))
                                 .child(
-                                    settings_panel()
-                                        .child(settings_row(
-                                            "Model",
-                                            "Choose any on-device speech model",
+                                    panel()
+                                        .child(settings_row(tr("Model"), tr("Choose any on-device speech model"),
                                             div()
                                                 .flex()
                                                 .items_center()
                                                 .child(
-                                                    header_button(
+                                                    button(ButtonKind::Secondary,
                                                         div()
                                                             .flex()
                                                             .items_center()
@@ -2867,7 +2829,7 @@ impl WindowsApp {
                                                             .child(crate::windows_ui::fluent_icon(
                                                                 "\u{E896}",
                                                                 12.0,
-                                                                TEXT,
+                                                                TEXT_PRIMARY,
                                                             ))
                                                             .child(tr("Browse")),
                                                     )
@@ -2925,9 +2887,7 @@ impl WindowsApp {
                                                         ),
                                                 ),
                                         ))
-                                        .child(settings_row(
-                                            "Language",
-                                            "The language you dictate in; Auto detects it",
+                                        .child(settings_row(tr("Language"), tr("The language you dictate in; Auto detects it"),
                                             div()
                                                 .relative()
                                                 .child(
@@ -2965,9 +2925,7 @@ impl WindowsApp {
                                             )
                                             .supports_recognition_hints,
                                             |panel| {
-                                                panel.child(settings_row(
-                                                    "Recognition hints",
-                                                    "Names and terms to softly prime the speech model",
+                                                panel.child(settings_row(tr("Recognition hints"), tr("Names and terms to softly prime the speech model"),
                                                     div()
                                                         .w(px(320.0))
                                                         .py_2()
@@ -2975,9 +2933,7 @@ impl WindowsApp {
                                                 ))
                                             },
                                         )
-                                        .child(settings_row(
-                                            "Microphone",
-                                            "Uses the selected WASAPI input or the Windows default",
+                                        .child(settings_row(tr("Microphone"), tr("Uses the selected WASAPI input or the Windows default"),
                                             div()
                                                 .relative()
                                                 .child(
@@ -3011,8 +2967,7 @@ impl WindowsApp {
                                                     .h(px(0.0)),
                                                 ),
                                         ))
-                                        .child(settings_row(
-                                            "Shortcut mode",
+                                        .child(settings_row(tr("Shortcut mode"),
                                             if toggle_mode {
                                                 "Press the shortcut to start; press it again to transcribe and paste"
                                             } else {
@@ -3021,9 +2976,7 @@ impl WindowsApp {
                                             shortcut_mode_control,
                                         ))
                                         .child(
-                                            settings_row(
-                                                "Dictation shortcut",
-                                                "Click to record a new shortcut",
+                                            settings_row(tr("Dictation shortcut"), tr("Click to record a new shortcut"),
                                                 div()
                                                     .id("windows-dictation-shortcut")
                                                     .cursor_pointer()
@@ -3045,9 +2998,7 @@ impl WindowsApp {
                                             ),
                                         )
                                         .when(!toggle_mode, |panel| panel.child(
-                                            settings_row(
-                                                "Double-tap to lock",
-                                                "Tap the shortcut twice, then speak hands-free; press it again to finish",
+                                            settings_row(tr("Double-tap to lock"), tr("Tap the shortcut twice, then speak hands-free; press it again to finish"),
                                                 toggle(if double_tap_lock { 1.0 } else { 0.0 }),
                                             )
                                             .id("windows-double-tap-lock")
@@ -3062,9 +3013,7 @@ impl WindowsApp {
                                         ))
                                         .when(!toggle_mode && double_tap_lock, |panel| {
                                             panel.child(
-                                                settings_row(
-                                                    "Double-tap only",
-                                                    "Wait for two complete shortcut taps before recording",
+                                                settings_row(tr("Double-tap only"), tr("Wait for two complete shortcut taps before recording"),
                                                     toggle(if double_tap_only {
                                                         1.0
                                                     } else {
@@ -3082,20 +3031,14 @@ impl WindowsApp {
                                                 })),
                                             )
                                         })
-                                        .child(settings_row(
-                                            "Paste last dictation",
-                                            "Insert the most recent completed dictation at the current focus",
+                                        .child(settings_row(tr("Paste last dictation"), tr("Insert the most recent completed dictation at the current focus"),
                                             paste_last_control,
                                         ))
-                                        .child(settings_row(
-                                            "While dictating",
-                                            "Control other audio while a dictation records",
+                                        .child(settings_row(tr("While dictating"), tr("Control other audio while a dictation records"),
                                             while_dictating_control,
                                         ))
                                         .child(
-                                            settings_row(
-                                                "Release microphone while idle",
-                                                "Adds first-capture latency and disables audio pre-roll",
+                                            settings_row(tr("Release microphone while idle"), tr("Adds first-capture latency and disables audio pre-roll"),
                                                 toggle(if release_microphone_while_idle {
                                                     1.0
                                                 } else {
@@ -3110,26 +3053,20 @@ impl WindowsApp {
                                                 cx.notify();
                                             })),
                                         )
-                                        .child(settings_row(
-                                            "Recording indicator",
-                                            "Show the dictation pill at the top or bottom of the screen",
+                                        .child(settings_row(tr("Recording indicator"), tr("Show the dictation pill at the top or bottom of the screen"),
                                             indicator_control,
                                         ))
                                         .child(
-                                            settings_row(
-                                                "Feedback volume",
-                                                "Recording start, stop, and cancellation tones",
+                                            settings_row(tr("Feedback volume"), tr("Recording start, stop, and cancellation tones"),
                                                 feedback_control,
                                             )
                                             .border_b_0(),
                                         ),
                                 )
-                                .child(settings_section_label("Application"))
+                                .child(settings_section_label(tr("Application")))
                                 .child(
-                                    settings_panel()
-                                        .child(settings_row(
-                                            "Interface language",
-                                            "Language of the HEX interface",
+                                    panel()
+                                        .child(settings_row(tr("Interface language"), tr("Language of the Hex interface"),
                                             div()
                                                 .relative()
                                                 .child(
@@ -3160,24 +3097,22 @@ impl WindowsApp {
                                                     .h(px(0.0)),
                                                 ),
                                         ))
-                                        .child(settings_row(
-                                            "Software updates",
-                                            "Checks for new HEX releases in the background",
+                                        .child(settings_row(tr("Software updates"), tr("Checks for new Hex releases in the background"),
                                             match self.host.updater.state() {
                                                 crate::windows_updater::UpdateCheck::Checking => {
-                                                    header_button(tr("Checking"))
+                                                    button(ButtonKind::Secondary, tr("Checking"))
                                                         .id("windows-update-check")
                                                         .into_any_element()
                                                 }
                                                 crate::windows_updater::UpdateCheck::Available {
                                                     version,
                                                     url,
-                                                } => header_button(tr_fill(
+                                                } => button(ButtonKind::Secondary, tr_fill(
                                                     "Update to {}",
                                                     &version,
                                                 ))
                                                 .id("windows-update-check")
-                                                .text_color(rgb(accent_color()))
+                                                .text_color(rgb(ACCENT))
                                                 .on_click(cx.listener(move |_, _, _, cx| {
                                                     cx.open_url(&url);
                                                 }))
@@ -3185,12 +3120,12 @@ impl WindowsApp {
                                                 crate::windows_updater::UpdateCheck::ReadyToRestart {
                                                     version,
                                                     ..
-                                                } => header_button(tr_fill(
+                                                } => button(ButtonKind::Secondary, tr_fill(
                                                     "Restart into {}",
                                                     &version,
                                                 ))
                                                 .id("windows-update-check")
-                                                .text_color(rgb(accent_color()))
+                                                .text_color(rgb(ACCENT))
                                                 .when(self.restart_scheduled, |button| {
                                                     button.opacity(0.5)
                                                 })
@@ -3218,7 +3153,7 @@ impl WindowsApp {
                                                 .into_any_element(),
                                                 crate::windows_updater::UpdateCheck::Current
                                                 | crate::windows_updater::UpdateCheck::Failed => {
-                                                    header_button(tr("Check now"))
+                                                    button(ButtonKind::Secondary, tr("Check now"))
                                                         .id("windows-update-check")
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             let _ = this.host.dispatch(
@@ -3231,9 +3166,7 @@ impl WindowsApp {
                                             },
                                         ))
                                         .child(
-                                            settings_row(
-                                                "Launch at login",
-                                                "Start HEX hidden in the Windows system tray after sign-in",
+                                            settings_row(tr("Launch at login"), tr("Start Hex hidden in the Windows system tray after sign-in"),
                                                 toggle(if launch_at_login { 1.0 } else { 0.0 }),
                                             )
                                             .id("windows-launch-at-login")
@@ -3244,9 +3177,7 @@ impl WindowsApp {
                                             })),
                                         )
                                         .child(
-                                            settings_row(
-                                                "Enable on launch",
-                                                "Turn HEX on in every app whenever it opens",
+                                            settings_row(tr("Enable on launch"), tr("Turn Hex on in every app whenever it opens"),
                                                 toggle(if listen_on_launch { 1.0 } else { 0.0 }),
                                             )
                                             .id("windows-listen-on-launch")
@@ -3260,15 +3191,14 @@ impl WindowsApp {
                                 )
                                 .when_some(snapshot.operation_error.clone(), |content, error| {
                                     content
-                                        .child(settings_section_label("Problem"))
+                                        .child(settings_section_label(tr("Problem")))
                                         .child(
-                                            settings_panel()
-                                                .child(error_message(
-                                                    "HEX could not apply this change.",
+                                            panel()
+                                                .child(error_message(tr("Hex could not apply this change."),
                                                     error,
                                                 ))
                                                 .child(
-                                                    compact_button(tr("Dismiss"))
+                                                    small_button(ButtonKind::Secondary, tr("Dismiss"))
                                                         .id("dismiss-windows-error")
                                                         .mx_4()
                                                         .mb_4()
@@ -3284,10 +3214,7 @@ impl WindowsApp {
                                                         )),
                                                 ),
                                         )
-                                }),
-                            ),
-                        ),
-                    ),
+                                })),
             )
             .into_any_element()
     }
@@ -3298,7 +3225,7 @@ impl WindowsApp {
         {
             self.selected_mode = ModeTarget::Global;
         }
-        let add = header_button(tr("Add mode"))
+        let add = button(ButtonKind::Secondary, tr("Add mode"))
             .id("windows-add-mode")
             .on_click(cx.listener(|this, _, window, cx| this.add_mode(window, cx)))
             .into_any_element();
@@ -3349,16 +3276,16 @@ impl WindowsApp {
             .size_full()
             .flex()
             .flex_col()
-            .child(pane_header_with_action("Modes", Some(add)))
+            .child(pane_header_with_action(tr("Modes"), Some(add)))
             .child(
-                pane_body().p_5().child(
+                pane_body().child(
                     pane_content()
                         .flex_row()
                         .gap_5()
                         .child(
                             div()
                                 .id("modes-list")
-                                .w(px(PANE_LIST_WIDTH))
+                                .w(px(PANE_LIST_WIDTH_COMPACT))
                                 .h_full()
                                 .flex_none()
                                 .child(mode_list),
@@ -3408,11 +3335,11 @@ impl WindowsApp {
                         .max_w(px(700.0))
                         .flex()
                         .flex_col()
-                        .gap(px(SECTION_GAP))
+                        .gap(px(SPACE_2))
                         .pb_5()
                         .child(basics)
                         .child(div().h(px(4.0)))
-                        .child(compact_section_label(tr("TEXT PROCESSING")))
+                        .child(section_label(tr("Text processing")))
                         .child(replacements)
                         .child(processing)
                         .child(transformations)
@@ -3466,11 +3393,11 @@ impl WindowsApp {
                         .max_w(px(700.0))
                         .flex()
                         .flex_col()
-                        .gap(px(SECTION_GAP))
+                        .gap(px(SPACE_2))
                         .pb_5()
                         .child(basics)
                         .child(div().h(px(4.0)))
-                        .child(compact_section_label(tr("TEXT PROCESSING")))
+                        .child(section_label(tr("Text processing")))
                         .child(corrections)
                         .child(processing)
                         .child(transformations)
@@ -3479,7 +3406,7 @@ impl WindowsApp {
             });
         if let Some(error) = self.host.settings_error.clone() {
             detail = detail.child(error_message(
-                "Text replacements could not be saved.",
+                tr("Text replacements could not be saved."),
                 error,
             ));
         }
@@ -3489,7 +3416,7 @@ impl WindowsApp {
     fn mode_post_processing(
         &self,
         target: ModeTarget,
-    ) -> Option<&crate::dictation_processing::PostProcessingSettings> {
+    ) -> Option<&crate::dictation_processor::PostProcessingSettings> {
         match target {
             ModeTarget::Global => Some(&self.host.settings.dictation_post_processing),
             ModeTarget::Mode(index) => self
@@ -3692,7 +3619,7 @@ impl WindowsApp {
     fn set_opencode_model(
         &mut self,
         target: OpenCodeModelTarget,
-        model: Option<crate::opencode::Model>,
+        model: Option<crate::dictation_processor::Model>,
     ) {
         match target {
             OpenCodeModelTarget::VoiceAction => self.host.set_voice_action_model(model),
@@ -3731,7 +3658,7 @@ impl WindowsApp {
         let Some(settings) = self.mode_post_processing(target).cloned() else {
             return div().into_any_element();
         };
-        let installed = crate::opencode::opencode_installed();
+        let installed = crate::dictation_processor::opencode_installed();
         let compact = window.viewport_size().width < px(980.0);
         let settings_view = if settings.enabled {
             let model_control =
@@ -3773,8 +3700,8 @@ impl WindowsApp {
                             .when(compact, |row| row.flex_col().items_start().gap_3())
                             .when(!compact, |row| row.items_center().justify_between().gap_4())
                             .child(div().flex_1().min_w(px(0.0)).child(settings_copy(
-                                "Model",
-                                "Rewrites each completed dictation through OpenCode",
+                                tr("Model"),
+                                tr("Rewrites each completed dictation through OpenCode"),
                             )))
                             .child(
                                 div()
@@ -3789,8 +3716,8 @@ impl WindowsApp {
                             .when(compact, |row| row.flex_col().items_start().gap_3())
                             .when(!compact, |row| row.items_center().justify_between().gap_4())
                             .child(div().flex_1().min_w(px(0.0)).child(settings_copy(
-                                "Deadline",
-                                "Maximum time OpenCode may spend on one rewrite",
+                                tr("Deadline"),
+                                tr("Maximum time OpenCode may spend on one rewrite"),
                             )))
                             .child(
                                 div()
@@ -3806,8 +3733,8 @@ impl WindowsApp {
                                 .when(compact, |row| row.flex_col().items_start().gap_3())
                                 .when(!compact, |row| row.items_start().justify_between().gap_4())
                                 .child(div().flex_1().min_w(px(0.0)).child(settings_copy(
-                                    "Thinking",
-                                    "Choose how much reasoning the model should use",
+                                    tr("Thinking"),
+                                    tr("Choose how much reasoning the model should use"),
                                 )))
                                 .child(variant_control),
                         )
@@ -3818,8 +3745,8 @@ impl WindowsApp {
                             .flex_col()
                             .gap_2()
                             .child(settings_copy(
-                                "Instructions",
-                                "Tell OpenCode exactly how to transform the dictated text",
+                                tr("Instructions"),
+                                tr("Tell OpenCode exactly how to transform the dictated text"),
                             ))
                             .child(prompt),
                     )
@@ -3865,7 +3792,7 @@ impl WindowsApp {
     /// shortcut, and the OpenCode processing status.
     fn render_voice_action(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let enabled = self.host.settings.voice_action_hotkey.is_some();
-        let opencode_installed = crate::windows_voice_action::opencode_installed();
+        let opencode_installed = crate::dictation_processor::opencode_installed();
         let capturing_voice_action =
             matches!(self.hotkey_capture, Some((HotkeyTarget::VoiceAction, _)));
         let shortcut_control = div()
@@ -3899,14 +3826,7 @@ impl WindowsApp {
                                     .map(crate::windows_settings::WindowsHotkey::keycaps),
                                 |control, keycaps| control.child(hotkey_keycaps(keycaps, 1.0)),
                             )
-                            .when(!enabled, |control| {
-                                control.child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(FAINT))
-                                        .child(tr("Disabled")),
-                                )
-                            })
+                            .when(!enabled, |control| control.opacity(DISABLED_OPACITY))
                             .into_any_element()
                     }),
             )
@@ -3925,11 +3845,11 @@ impl WindowsApp {
         let model_control =
             self.render_opencode_model_control(OpenCodeModelTarget::VoiceAction, cx);
         let opencode_status = div()
-            .text_size(px(12.0))
+            .text_footnote()
             .text_color(if opencode_installed {
-                rgb(crate::windows_ui::SUCCESS)
+                rgb(SUCCESS)
             } else {
-                rgb(crate::windows_ui::CRITICAL)
+                rgb(DANGER)
             })
             .child(if opencode_installed {
                 tr("Installed")
@@ -4029,7 +3949,10 @@ impl WindowsApp {
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .children(items)
                     .when_some(error, |list, error| {
-                        list.child(error_message("Microphones could not be enumerated.", error))
+                        list.child(error_message(
+                            tr("Microphones could not be enumerated."),
+                            error,
+                        ))
                     }),
             )
             .into_any_element()
@@ -4230,8 +4153,8 @@ impl WindowsApp {
                             div()
                                 .px_3()
                                 .py_2()
-                                .text_size(px(12.0))
-                                .text_color(rgb(MUTED))
+                                .text_footnote()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .child(message),
                         ),
                 )
@@ -4418,11 +4341,11 @@ impl crate::desktop_model_catalog::ModelCatalogDelegate for WindowsApp {
     }
 
     fn uninstall_control() -> AnyElement {
-        crate::windows_ui::fluent_icon("\u{E74D}", 12.0, TEXT)
+        crate::windows_ui::fluent_icon("\u{E74D}", 12.0, TEXT_PRIMARY)
     }
 
     fn close_control() -> AnyElement {
-        crate::windows_ui::fluent_icon("\u{E8BB}", 12.0, TEXT)
+        crate::windows_ui::fluent_icon("\u{E8BB}", 12.0, TEXT_PRIMARY)
     }
 }
 
@@ -4602,11 +4525,7 @@ impl VoiceActionPaneDelegate for WindowsApp {
         match action {
             VoiceActionPaneAction::RetryOpenCode => self.host.request_opencode_catalog(),
             VoiceActionPaneAction::OpenOpenCodeSetup => {
-                if let Err(error) = crate::commands_engine::execute(
-                    crate::commands_engine::Action::OpenUrl(OPENCODE_SETUP_URL.into()),
-                ) {
-                    tracing::error!(%error, "could not open the OpenCode beta documentation");
-                }
+                cx.open_url(OPENCODE_SETUP_URL);
             }
         }
         cx.notify();
@@ -4716,11 +4635,7 @@ impl ModeProcessingDelegate for WindowsApp {
             }
             ModeProcessingAction::RetryOpenCode => self.host.request_opencode_catalog(),
             ModeProcessingAction::OpenOpenCodeSetup => {
-                if let Err(error) = crate::commands_engine::execute(
-                    crate::commands_engine::Action::OpenUrl(OPENCODE_SETUP_URL.into()),
-                ) {
-                    tracing::error!(%error, "could not open the OpenCode beta documentation");
-                }
+                cx.open_url(OPENCODE_SETUP_URL);
             }
         }
         cx.notify();
@@ -4799,16 +4714,23 @@ impl Render for WindowsApp {
             .ui_language_dropdown_open
             .then(|| self.render_ui_language_dropdown(viewport.height, cx));
         window_frame()
-            .flex_col()
-            .child(caption_bar(window))
+            .font_family(crate::windows_ui::FONT_UI)
+            .child(self.render_navigation(cx))
             .child(
                 div()
                     .flex_1()
-                    .min_h(px(0.0))
-                    .w_full()
+                    .min_w(px(0.0))
+                    .h_full()
                     .flex()
-                    .child(self.render_navigation(cx))
-                    .child(div().flex_1().h_full().overflow_hidden().child(content)),
+                    .flex_col()
+                    .child(caption_controls(window))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .overflow_hidden()
+                            .child(content),
+                    ),
             )
             .children(model_picker)
             .children(model_catalog_language_dropdown)

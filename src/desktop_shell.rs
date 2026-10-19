@@ -3,8 +3,8 @@
 
 use gpui::{AnyElement, Context, IntoElement, prelude::*};
 
-use crate::desktop_host::DesktopCapabilities;
 use crate::desktop_ui::{NavigationIcon, navigation_item};
+use crate::windows_desktop_host::DesktopCapabilities;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DesktopPane {
@@ -140,26 +140,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn linux_navigation_contains_only_panes_with_renderers() {
-        let mut expected = vec![
-            DesktopPane::Settings,
-            DesktopPane::Modes,
-            DesktopPane::VoiceAction,
-            DesktopPane::History,
-        ];
-        if crate::DEVELOPER_FEATURES_ENABLED {
-            expected.push(DesktopPane::HudLab);
-        }
-        expected.push(DesktopPane::Activity);
-
-        assert_eq!(
-            DesktopPane::available(DesktopCapabilities::linux_x11()),
-            expected
-        );
-    }
-
-    #[cfg(target_os = "windows")]
     #[test]
     fn windows_navigation_is_the_capability_filtered_product_order() {
         let mut expected = vec![

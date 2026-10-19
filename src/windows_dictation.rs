@@ -60,7 +60,7 @@ struct JobResult {
 /// deadline-bounded OpenCode call, so settings writes never wait on inference.
 #[derive(Clone)]
 pub struct WindowsModeRuntime {
-    default: crate::dictation_processing::PostProcessingSettings,
+    default: crate::dictation_processor::PostProcessingSettings,
     default_transformations: Vec<String>,
     modes: Vec<crate::windows_settings::WindowsMode>,
 }
@@ -93,7 +93,7 @@ pub struct WindowsDictationConfig {
     pub replacements: Arc<RwLock<crate::text_replacements::ReplacementSet>>,
     pub mode_runtime: Arc<RwLock<WindowsModeRuntime>>,
     pub transformations: Arc<crate::personal_commands::TransformationClient>,
-    pub voice_action_model: Arc<RwLock<Option<crate::opencode::Model>>>,
+    pub voice_action_model: Arc<RwLock<Option<crate::dictation_processor::Model>>>,
     pub fallback_to_default_device: bool,
 }
 
@@ -231,7 +231,7 @@ pub fn run_with_transcriber(
     })?;
     emit_state(&mut events, VoiceState::Listening, &device_label)?;
     println!(
-        "HEX is ready on {}. Hold {} to dictate, release to paste; Escape cancels; Ctrl-C stops.",
+        "Hex is ready on {}. Hold {} to dictate, release to paste; Escape cancels; Ctrl-C stops.",
         device_label, hotkey_label
     );
 
@@ -806,10 +806,10 @@ fn process_dictation_job(
 
 fn process_mode_text(
     text: &str,
-    context: &crate::command_context::ContextSnapshot,
+    context: &crate::context::ContextSnapshot,
     runtime: &WindowsModeRuntime,
     transformations: &crate::personal_commands::TransformationClient,
-) -> crate::dictation_processing::Processed {
+) -> crate::dictation_processor::Processed {
     let mode = crate::windows_settings::mode_for_context(
         &runtime.modes,
         context.application.as_deref(),
@@ -817,7 +817,7 @@ fn process_mode_text(
     );
     let profile = mode.map_or_else(
         || {
-            crate::dictation_processing::Profile::configured(
+            crate::dictation_processor::Profile::configured(
                 "Global",
                 crate::text_replacements::ReplacementSet::default(),
                 runtime.default_transformations.clone(),
@@ -830,7 +830,7 @@ fn process_mode_text(
             } else {
                 &mode.name
             };
-            crate::dictation_processing::Profile::configured(
+            crate::dictation_processor::Profile::configured(
                 name,
                 crate::text_replacements::ReplacementSet::new(&mode.corrections),
                 mode.transformations.clone(),
@@ -838,20 +838,22 @@ fn process_mode_text(
             )
         },
     );
-    crate::dictation_processing::Profiles::new(profile).process_cancellable(
-        text,
-        context,
-        Some(transformations),
-        &AtomicBool::new(false),
-    )
+    let cancelled = AtomicBool::new(false);
+    let mut processed = crate::dictation_processor::Profiles::new(profile)
+        .process_cancellable(text, context, &cancelled);
+    processed.apply_transformations(transformations, context, &cancelled);
+    processed
 }
+
+/// Voice Action replies may take longer than a dictation rewrite.
+const VOICE_ACTION_DEADLINE: Duration = Duration::from_secs(45);
 
 /// Transcribe the held instruction, pair it with the focused application's
 /// selection, ask OpenCode, and paste the reply.
 fn process_voice_action_job(
     job: Job,
     paster: &mut Result<WindowsPaster>,
-    voice_action_model: &RwLock<Option<crate::opencode::Model>>,
+    voice_action_model: &RwLock<Option<crate::dictation_processor::Model>>,
 ) -> JobResult {
     let started = Instant::now();
     // The context read starts now so the UIA walk overlaps inference.
@@ -871,14 +873,22 @@ fn process_voice_action_job(
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let reply = crate::windows_voice_action::fulfil(
+        let processed = crate::dictation_processor::process_voice_action(
             &instruction,
-            context.application.as_deref(),
-            context.browser_host(),
             selected.as_deref(),
+            &context,
             model.as_ref(),
-        )
-        .map_err(|error| format!("{error:#}"))?;
+            VOICE_ACTION_DEADLINE,
+            &AtomicBool::new(false),
+            Instant::now(),
+        );
+        if let Some(error) = processed
+            .observation
+            .and_then(|observation| observation.fallback)
+        {
+            return Err(error);
+        }
+        let reply = processed.text;
         paster.paste(&reply).map_err(|error| format!("{error:#}"))?;
         Ok(reply)
     });
@@ -1117,13 +1127,13 @@ mod tests {
             }],
             ..crate::windows_settings::WindowsMode::default()
         }];
-        let context = crate::command_context::ContextSnapshot {
+        let context = crate::context::ContextSnapshot {
             application: Some("Visual Studio Code".into()),
-            ..crate::command_context::ContextSnapshot::default()
+            ..crate::context::ContextSnapshot::default()
         };
 
         let runtime = WindowsModeRuntime {
-            default: crate::dictation_processing::PostProcessingSettings::default(),
+            default: crate::dictation_processor::PostProcessingSettings::default(),
             default_transformations: Vec::new(),
             modes,
         };
@@ -1137,7 +1147,7 @@ mod tests {
     #[test]
     fn windows_modes_execute_selected_transformations_after_corrections() {
         let runtime = WindowsModeRuntime {
-            default: crate::dictation_processing::PostProcessingSettings::default(),
+            default: crate::dictation_processor::PostProcessingSettings::default(),
             default_transformations: vec!["lowercase".into()],
             modes: Vec::new(),
         };
@@ -1145,7 +1155,7 @@ mod tests {
 
         let processed = process_mode_text(
             "Keep OpenCode Exact.",
-            &crate::command_context::ContextSnapshot::default(),
+            &crate::context::ContextSnapshot::default(),
             &runtime,
             &transformations,
         );

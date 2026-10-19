@@ -6,20 +6,19 @@
 
 use std::sync::Arc;
 
+use crate::design_tokens::*;
+use crate::desktop_i18n::tr;
+use crate::desktop_ui::{Icon, Tone, icon, list_row, list_row_meta, list_row_title, panel, tag};
 use gpui::{
     AnyElement, Context, FontWeight, Image, MouseButton, MouseDownEvent, Pixels, Point,
     SharedString, Window, div, img, prelude::*, px, rgb,
 };
 
 pub(crate) use crate::desktop_mode_target::ModeTarget;
-use crate::desktop_ui::{
-    FAINT, MUTED, SURFACE_HOVER, SURFACE_SELECTED, TEXT, TEXT_SOFT, compact_panel, tr,
-};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ModeActivationKind {
     Application,
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Website,
 }
 
@@ -39,7 +38,6 @@ impl ModeActivation {
         }
     }
 
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(crate) fn website(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
@@ -119,7 +117,7 @@ pub(crate) fn render_mode_list<T: ModeListDelegate>(
         })
         .collect::<Vec<_>>();
 
-    compact_panel()
+    panel()
         .id("mode-list-card")
         .h_full()
         .overflow_y_scroll()
@@ -129,69 +127,42 @@ pub(crate) fn render_mode_list<T: ModeListDelegate>(
 
 fn mode_row(entry: ModeListEntry, selected: bool) -> gpui::Div {
     let has_activations = !entry.activations.is_empty();
-    div()
-        .w_full()
-        .min_h(px(52.0))
-        .px_3()
-        .py_2()
-        .flex()
-        .flex_col()
-        .items_start()
-        .justify_center()
+    list_row(selected)
         .gap_1()
-        .rounded(px(6.0))
-        .when(selected, |row| {
-            row.bg(rgb(SURFACE_SELECTED))
-                .hover(|row| row.bg(rgb(SURFACE_HOVER)))
-        })
-        .when(!selected, |row| row.hover(|row| row.bg(rgb(SURFACE_HOVER))))
-        .child(
-            div()
-                .w_full()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT))
-                .truncate()
-                .child(entry.title),
-        )
+        .child(list_row_title(entry.title, selected))
         .when(has_activations, |row| {
             row.child(mode_activation_icons(&entry.activations))
         })
         .when(!has_activations, |row| {
-            row.child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(rgb(if selected { TEXT_SOFT } else { FAINT }))
-                    .truncate()
-                    .child(tr(entry.empty_subtitle)),
-            )
+            row.child(list_row_meta(tr(entry.empty_subtitle), selected))
         })
 }
+
+const ACTIVATION_ICON_SIZE: f32 = 18.0;
 
 fn mode_activation_icons(activations: &[ModeActivation]) -> AnyElement {
     let visible = activations.len().min(5);
     let mut icons = activations
         .iter()
         .take(visible)
-        .map(mode_activation_icon)
+        .map(|activation| match activation.kind {
+            ModeActivationKind::Application => render_application_icon(
+                activation.icon.clone(),
+                &activation.label,
+                ACTIVATION_ICON_SIZE,
+            ),
+            ModeActivationKind::Website => icon_tile(ACTIVATION_ICON_SIZE)
+                .child(icon(Icon::Globe, TEXT_SECONDARY))
+                .into_any_element(),
+        })
         .collect::<Vec<_>>();
     if activations.len() > visible {
         icons.push(
-            div()
-                .h(px(18.0))
-                .px_1()
-                .flex()
-                .items_center()
-                .rounded(px(4.0))
-                .bg(rgb(0x303030))
-                .text_size(px(8.0))
-                .text_color(rgb(MUTED))
-                .child(format!("+{}", activations.len() - visible))
-                .into_any_element(),
+            tag(Tone::Neutral, format!("+{}", activations.len() - visible)).into_any_element(),
         );
     }
     div()
-        .h(px(18.0))
+        .h(px(ACTIVATION_ICON_SIZE))
         .flex()
         .items_center()
         .gap_1()
@@ -199,33 +170,7 @@ fn mode_activation_icons(activations: &[ModeActivation]) -> AnyElement {
         .into_any_element()
 }
 
-fn mode_activation_icon(activation: &ModeActivation) -> AnyElement {
-    if activation.kind == ModeActivationKind::Application {
-        return render_application_icon(activation.icon.clone(), &activation.label, 18.0);
-    }
-    let initial = activation
-        .label
-        .chars()
-        .find(|character| character.is_alphanumeric())
-        .map(|character| character.to_uppercase().to_string())
-        .unwrap_or_else(|| "?".into());
-    div()
-        .size(px(18.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(rgb(0x444444))
-        .bg(rgb(0xeeeeee))
-        .text_color(rgb(0x202020))
-        .text_size(px(8.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(initial)
-        .into_any_element()
-}
-
+/// An application's icon, or a monogram tile when its icon could not be read.
 pub(crate) fn render_application_icon(
     icon: Option<Arc<Image>>,
     fallback_name: &str,
@@ -234,7 +179,7 @@ pub(crate) fn render_application_icon(
     if let Some(icon) = icon {
         return img(icon)
             .size(px(size))
-            .rounded(px(size * 0.22))
+            .rounded(icon_radius(size))
             .into_any_element();
     }
     let initial = fallback_name
@@ -242,17 +187,27 @@ pub(crate) fn render_application_icon(
         .find(|character| character.is_alphanumeric())
         .map(|character| character.to_uppercase().to_string())
         .unwrap_or_else(|| "?".into());
+    icon_tile(size)
+        .map(|monogram| {
+            if size >= CONTROL_HEIGHT {
+                monogram.text_body()
+            } else {
+                monogram.text_caption()
+            }
+        })
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(TEXT_SECONDARY))
+        .child(initial)
+        .into_any_element()
+}
+
+fn icon_tile(size: f32) -> gpui::Div {
     div()
         .size(px(size))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(size * 0.22))
-        .bg(rgb(0x343434))
-        .text_size(px(size * 0.42))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(TEXT_SOFT))
-        .child(initial)
-        .into_any_element()
+        .rounded(icon_radius(size))
+        .bg(rgb(SURFACE_SELECTED))
 }

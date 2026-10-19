@@ -5,12 +5,13 @@
 
 use gpui::{AnyElement, div, prelude::*, px, rgb};
 
-use crate::desktop_host::DesktopSnapshot;
-use crate::desktop_i18n::{tr, tr_fill};
+use crate::design_tokens::*;
+use crate::desktop_i18n::{event_age, tr, tr_fill};
 use crate::desktop_ui::{
-    CRITICAL, FAINT, MUTED, SUCCESS, TEXT, TEXT_SOFT, empty_message, event_age, pane_content,
-    pane_header, settings_panel, settings_row, settings_section_label,
+    empty_state, pane_content, pane_header, pane_scroll_body, panel, settings_row,
+    settings_section_label,
 };
+use crate::windows_desktop_host::DesktopSnapshot;
 
 /// A right-hand row value capped at 240 px. The text shrinks inside a flex
 /// row so GPUI lays it out at the capped width and draws an ellipsis.
@@ -41,143 +42,120 @@ pub(crate) fn render_activity_pane(snapshot: &DesktopSnapshot) -> AnyElement {
         .clone()
         .unwrap_or_else(|| tr("Automatic microphone").into());
     let session_age = snapshot.activity.session_started_at.map(event_age);
-    let transcripts = snapshot.activity.transcripts.clone();
+    let transcripts = snapshot.transcripts.clone();
 
     div()
         .size_full()
         .flex()
         .flex_col()
-        .child(pane_header("Activity"))
-        .child(
-            div()
-                .id("activity-scroll")
-                .flex_1()
-                .overflow_y_scroll()
-                .px_8()
-                .pt_1()
-                .pb_7()
+        .child(pane_header(tr("Activity")))
+        .child(pane_scroll_body(
+            "activity-scroll",
+            pane_content()
                 .child(
-                    div().w_full().flex().justify_center().child(
-                        pane_content()
-                            .child(div().pt(px(20.0)).child(settings_section_label("Session")))
-                            .child(
-                                settings_panel()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .min_h(px(56.0))
-                                            .px_4()
-                                            .py_3()
-                                            .flex()
-                                            .items_center()
-                                            .gap_3()
-                                            .child(
-                                                div().size(px(10.0)).flex_none().rounded_full().bg(
-                                                    if running { rgb(SUCCESS) } else { rgb(FAINT) },
-                                                ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .min_w(px(0.0))
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(2.0))
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(14.0))
-                                                            .text_color(rgb(TEXT))
-                                                            .child(state),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(12.0))
-                                                            .text_color(rgb(MUTED))
-                                                            .truncate()
-                                                            .child(match &session_age {
-                                                                Some(age) => tr_fill(
-                                                                    "Session started {}",
-                                                                    age,
-                                                                ),
-                                                                None => {
-                                                                    tr("No session recorded yet")
-                                                                        .to_string()
-                                                                }
-                                                            }),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(
-                                        settings_row(
-                                            "Microphone",
-                                            "The device the active session captures from",
-                                            truncated_value(device, 12.0, MUTED),
-                                        )
-                                        .border_b_0(),
-                                    )
-                                    .when_some(
-                                        snapshot.activity.last_failure.clone(),
-                                        |panel, failure| {
-                                            panel.child(
-                                                div()
-                                                    .w_full()
-                                                    .px_4()
-                                                    .pb_3()
-                                                    .text_size(px(12.0))
-                                                    .text_color(rgb(CRITICAL))
-                                                    .child(tr_fill(
-                                                        "Last dictation failed: {}",
-                                                        &failure,
-                                                    )),
-                                            )
-                                        },
-                                    ),
-                            )
-                            .child(settings_section_label("Recent transcripts"))
-                            .child(if transcripts.is_empty() {
-                                settings_panel()
-                                    .child(empty_message(tr(
-                                        "Nothing transcribed this session yet.",
-                                    )))
-                                    .into_any_element()
-                            } else {
-                                settings_panel()
-                                    .children(transcripts.iter().enumerate().map(
-                                        |(index, transcript)| {
-                                            let last = index + 1 == transcripts.len();
+                    div()
+                        .pt(px(20.0))
+                        .child(settings_section_label(tr("Session"))),
+                )
+                .child(
+                    panel()
+                        .child(
+                            div()
+                                .w_full()
+                                .min_h(px(56.0))
+                                .px_4()
+                                .py_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(div().size(px(10.0)).flex_none().rounded_full().bg(
+                                    if running {
+                                        rgb(SUCCESS)
+                                    } else {
+                                        rgb(TEXT_TERTIARY)
+                                    },
+                                ))
+                                .child(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
                                             div()
-                                                .w_full()
-                                                .px_4()
-                                                .py_3()
-                                                .when(!last, |row| {
-                                                    row.border_b_1().border_color(rgb(
-                                                        crate::desktop_ui::DIVIDER,
-                                                    ))
-                                                })
-                                                .text_size(px(12.0))
-                                                .line_height(px(19.0))
-                                                .text_color(rgb(TEXT_SOFT))
-                                                .child(transcript.clone())
-                                        },
-                                    ))
-                                    .into_any_element()
-                            })
-                            .child(settings_section_label("Observations"))
-                            .child(
-                                settings_panel().child(
-                                    settings_row(
-                                        "Event log",
-                                        "Newest-first session observations on this disk",
-                                        truncated_value(
-                                            snapshot.observations_path.clone(),
-                                            11.0,
-                                            FAINT,
+                                                .text_body()
+                                                .text_color(rgb(TEXT_PRIMARY))
+                                                .child(state),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_footnote()
+                                                .text_color(rgb(TEXT_TERTIARY))
+                                                .truncate()
+                                                .child(match &session_age {
+                                                    Some(age) => tr_fill("Session started {}", age),
+                                                    None => {
+                                                        tr("No session recorded yet").to_string()
+                                                    }
+                                                }),
                                         ),
-                                    )
-                                    .border_b_0(),
                                 ),
+                        )
+                        .child(
+                            settings_row(
+                                tr("Microphone"),
+                                tr("The device the active session captures from"),
+                                truncated_value(device, 12.0, TEXT_TERTIARY),
+                            )
+                            .border_b_0(),
+                        )
+                        .when_some(snapshot.last_failure.clone(), |panel, failure| {
+                            panel.child(
+                                div()
+                                    .w_full()
+                                    .px_4()
+                                    .pb_3()
+                                    .text_footnote()
+                                    .text_color(rgb(DANGER))
+                                    .child(tr_fill("Last dictation failed: {}", &failure)),
+                            )
+                        }),
+                )
+                .child(settings_section_label(tr("Recent transcripts")))
+                .child(if transcripts.is_empty() {
+                    panel()
+                        .child(empty_state(tr("Nothing transcribed this session yet.")))
+                        .into_any_element()
+                } else {
+                    panel()
+                        .children(transcripts.iter().enumerate().map(|(index, transcript)| {
+                            let last = index + 1 == transcripts.len();
+                            div()
+                                .w_full()
+                                .px_4()
+                                .py_3()
+                                .when(!last, |row| row.border_b_1().border_color(rgb(LINE)))
+                                .text_footnote()
+                                .text_color(rgb(TEXT_SECONDARY))
+                                .child(transcript.clone())
+                        }))
+                        .into_any_element()
+                })
+                .child(settings_section_label(tr("Observations")))
+                .child(
+                    panel().child(
+                        settings_row(
+                            tr("Event log"),
+                            tr("Newest-first session observations on this disk"),
+                            truncated_value(
+                                snapshot.observations_path.clone(),
+                                11.0,
+                                TEXT_TERTIARY,
                             ),
+                        )
+                        .border_b_0(),
                     ),
                 ),
-        )
+        ))
         .into_any_element()
 }

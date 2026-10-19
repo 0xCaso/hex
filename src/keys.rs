@@ -1,13 +1,7 @@
 //! Platform-neutral key and modifier types for the command taxonomy.
-//! Actions describe keystrokes with these; each platform's executor maps
-//! them to its own synthesis API (CoreGraphics on macOS, XTest on X11).
-//! `COMMAND` is the platform primary shortcut modifier: ⌘ on macOS and
-//! Ctrl elsewhere, so one taxonomy drives the same app shortcuts
-//! everywhere; `OPTION` is ⌥/Alt.
-//!
-//! This is a shared vocabulary: each shell constructs only the variants
-//! its built-ins use, so per-platform dead-code analysis stays quiet here.
-#![allow(dead_code)]
+//! Actions describe keystrokes with these; `keyboard` maps them to
+//! CoreGraphics on macOS. `COMMAND` is the platform primary shortcut
+//! modifier (Command on macOS, Control elsewhere); `OPTION` is Option/Alt.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Key {
@@ -36,7 +30,8 @@ impl Modifiers {
         Self(self.0 | other.0)
     }
 
-    pub fn contains(self, other: Self) -> bool {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn contains(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
 }

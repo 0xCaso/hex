@@ -78,20 +78,6 @@ pub fn personal_commands_sdk() -> Result<PathBuf> {
     }
 }
 
-#[cfg(target_os = "windows")]
-pub fn personal_commands_host() -> Result<PathBuf> {
-    let package = personal_commands_workspace()?.join("node_modules/@hex/commands");
-    ["dist/bin.js", "src/bin.ts"]
-        .into_iter()
-        .map(|relative| package.join(relative))
-        .find(|host| host.is_file())
-        .ok_or_else(|| {
-            eyre!(
-                "personal command SDK is not installed; initialize the personal command workspace"
-            )
-        })
-}
-
 /// A source checkout's SDK, otherwise the SDK sources embedded in this
 /// executable, written once per content hash under Application Support.
 #[cfg(target_os = "windows")]

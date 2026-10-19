@@ -4,14 +4,15 @@
 //! model selection, persistence, and execution. This module owns the common
 //! pane scaffold, explanatory copy, setting rows, and unavailable-state card.
 
+use crate::design_tokens::*;
+use crate::desktop_i18n::tr;
+use crate::desktop_ui::{
+    ButtonKind, button, error_message, error_panel, pane_body, pane_content, pane_header,
+    pane_scroll_body, panel, section_label, settings_copy,
+};
 use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px, rgb};
 
-use crate::desktop_ui::{
-    LINE, MUTED, SURFACE, TEXT, compact_panel, compact_section_label, error_message, header_button,
-    pane_body, pane_content, pane_header, settings_copy, tr,
-};
-
-const EXPLAINER: &str = "Hold the shortcut and speak an instruction. HEX sends it, along with any text you have selected, to OpenCode and pastes the reply at your cursor. If the model returns nothing, nothing is pasted.";
+const EXPLAINER: &str = "Hold the shortcut and speak an instruction. Hex sends it, along with any text you have selected, to OpenCode and pastes the reply at your cursor. If the model returns nothing, nothing is pasted.";
 pub(crate) const OPENCODE_SETUP_URL: &str = "https://v2.opencode.ai/";
 
 pub(crate) struct VoiceActionSettingRow {
@@ -110,56 +111,45 @@ fn render_ready(view: VoiceActionReadyView, window: &mut Window) -> AnyElement {
         .size_full()
         .flex()
         .flex_col()
-        .child(pane_header("Voice Action"))
-        .child(
-            pane_body().child(
-                div()
-                    .id("voice-action-scroll")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .px(if compact { px(20.0) } else { px(32.0) })
-                    .py(px(22.0))
-                    .flex()
-                    .justify_center()
-                    .child(
-                        pane_content()
-                            .gap(px(18.0))
-                            .child(
-                                div()
-                                    .px_1()
-                                    .pt_1()
-                                    .text_size(px(11.0))
-                                    .line_height(px(17.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(tr(EXPLAINER)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(compact_section_label(tr("Capture").to_uppercase()))
-                                    .child(
-                                        compact_panel().child(
-                                            render_setting_row(view.shortcut, false, compact)
-                                                .id("voice-action-hotkey-setting"),
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(compact_section_label(tr("Processing").to_uppercase()))
-                                    .child(compact_panel().children(processing)),
-                            )
-                            .when_some(view.error, |content, error| {
-                                content.child(error_message(error.title, error.detail))
-                            }),
-                    ),
-            ),
-        )
+        .child(pane_header(tr("Voice Action")))
+        .child(pane_scroll_body(
+            "voice-action-scroll",
+            pane_content()
+                .pt_5()
+                .gap_4()
+                .child(
+                    div()
+                        .px_1()
+                        .pt_1()
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
+                        .child(tr(EXPLAINER)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(section_label(tr("Capture")))
+                        .child(
+                            panel().child(
+                                render_setting_row(view.shortcut, false, compact)
+                                    .id("voice-action-hotkey-setting"),
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(section_label(tr("Processing")))
+                        .child(panel().children(processing)),
+                )
+                .when_some(view.error, |content, error| {
+                    content.child(error_message(tr(error.title), error.detail))
+                }),
+        ))
         .into_any_element()
 }
 
@@ -168,7 +158,7 @@ fn render_unavailable<T: VoiceActionPaneDelegate>(
     cx: &mut Context<T>,
 ) -> AnyElement {
     let retry = view.retry_label.map(|label| {
-        header_button(tr(label))
+        button(ButtonKind::Secondary, tr(label))
             .id("retry-opencode")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.handle_voice_action_pane_action(
@@ -179,7 +169,7 @@ fn render_unavailable<T: VoiceActionPaneDelegate>(
             }))
     });
     let setup = view.setup_label.map(|label| {
-        header_button(tr(label))
+        button(ButtonKind::Secondary, tr(label))
             .id("open-opencode-setup")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.handle_voice_action_pane_action(
@@ -194,7 +184,7 @@ fn render_unavailable<T: VoiceActionPaneDelegate>(
         .size_full()
         .flex()
         .flex_col()
-        .child(pane_header("Voice Action"))
+        .child(pane_header(tr("Voice Action")))
         .child(
             pane_body().child(
                 div()
@@ -210,21 +200,13 @@ fn render_unavailable<T: VoiceActionPaneDelegate>(
                             .w_full()
                             .max_w(px(420.0))
                             .p_5()
-                            .rounded_md()
+                            .rounded(RADIUS_CONTROL)
                             .border_1()
                             .border_color(rgb(LINE))
                             .bg(rgb(SURFACE))
-                            .child(settings_copy(view.title, view.description))
+                            .child(settings_copy(tr(view.title), tr(view.description)))
                             .when_some(view.error, |card, error| {
-                                card.child(
-                                    div()
-                                        .mt_3()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(rgb(0x613b3b))
-                                        .bg(rgb(0x271b1b))
-                                        .child(error_message(error.title, error.detail)),
-                                )
+                                card.child(error_panel(tr(error.title), error.detail).mt_3())
                             })
                             .when(show_actions, |card| {
                                 card.child(
@@ -256,16 +238,15 @@ fn render_setting_row(row: VoiceActionSettingRow, divider: bool, compact: bool) 
                 .gap_1()
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_footnote()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(TEXT_PRIMARY))
                         .child(tr(row.title)),
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .line_height(px(14.0))
-                        .text_color(rgb(MUTED))
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child(row.description),
                 ),
         )

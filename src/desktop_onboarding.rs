@@ -9,13 +9,12 @@ use gpui::{
     rgba,
 };
 
-use crate::desktop_host::DesktopTranscriptionSnapshot;
-use crate::desktop_ui::{
-    CANVAS, DIALOG_STROKE, FAINT, MUTED, OVERLAY_PANEL, OVERLAY_SMOKE, TEXT, TEXT_ON_ACCENT,
-    accent_color, disclosure_button, dropdown_backdrop, dropdown_item, dropdown_panel_with_width,
-    error_message, header_button, hotkey_keycaps, tr, tr_fill,
-};
+use crate::design_tokens::*;
+use crate::desktop_i18n::{tr, tr_fill};
+use crate::desktop_ui::{ButtonKind, button, disclosure_button, error_message, hotkey_keycaps};
 use crate::transcription_models::TranscriptionSelection;
+use crate::windows_desktop_host::DesktopTranscriptionSnapshot;
+use crate::windows_ui::{dropdown_backdrop, dropdown_item, dropdown_panel_with_width};
 
 /// The onboarding dialog's per-shell state: the pending selection (not
 /// persisted until a download begins), the language dropdown, and what
@@ -154,12 +153,12 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
                     .justify_between()
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(MUTED))
+                            .text_footnote()
+                            .text_color(rgb(TEXT_TERTIARY))
                             .child(label),
                     )
                     .child(
-                        header_button(tr("Cancel"))
+                        button(ButtonKind::Secondary, tr("Cancel"))
                             .id("onboarding-cancel-download")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
@@ -179,7 +178,7 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
                             .h_full()
                             .w(relative(fraction.max(0.02)))
                             .rounded_full()
-                            .bg(rgb(accent_color())),
+                            .bg(rgb(ACCENT)),
                     ),
             )
             .into_any_element()
@@ -197,11 +196,11 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
             .px_5()
             .flex()
             .items_center()
-            .rounded(px(4.0))
-            .bg(rgb(accent_color()))
-            .text_size(px(13.0))
+            .rounded(RADIUS_SMALL)
+            .bg(rgb(ACCENT))
+            .text_body()
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_ON_ACCENT))
+            .text_color(rgb(TEXT_PRIMARY))
             .cursor_pointer()
             .child(tr("Start dictating"))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -215,11 +214,11 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
             .px_5()
             .flex()
             .items_center()
-            .rounded(px(4.0))
-            .bg(rgb(accent_color()))
-            .text_size(px(13.0))
+            .rounded(RADIUS_SMALL)
+            .bg(rgb(ACCENT))
+            .text_body()
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_ON_ACCENT))
+            .text_color(rgb(TEXT_PRIMARY))
             .cursor_pointer()
             .child(tr_fill("Download {}", definition.name))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -240,7 +239,7 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgba(OVERLAY_SMOKE))
+        .bg(rgba(SCRIM))
         .child(
             div()
                 .id("onboarding-dialog")
@@ -249,24 +248,23 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
                 .flex_col()
                 .gap_4()
                 .p_6()
-                .rounded(px(8.0))
+                .rounded(RADIUS_PANEL)
                 .border_1()
-                .border_color(rgb(DIALOG_STROKE))
-                .bg(rgb(OVERLAY_PANEL))
+                .border_color(rgb(LINE_STRONG))
+                .bg(rgb(SURFACE))
                 .shadow_2xl()
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(
                     div()
-                        .text_size(px(18.0))
+                        .text_headline()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT))
-                        .child(tr("Welcome to HEX")),
+                        .text_color(rgb(TEXT_PRIMARY))
+                        .child(tr("Welcome to Hex")),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
-                        .line_height(px(19.0))
-                        .text_color(rgb(MUTED))
+                        .text_footnote()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child(tr(
                             "Dictate into any application. Audio never leaves this computer; one speech model download is all it takes.",
                         )),
@@ -284,14 +282,14 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_size(px(13.0))
-                                        .text_color(rgb(TEXT))
+                                        .text_body()
+                                        .text_color(rgb(TEXT_PRIMARY))
                                         .child(tr("Dictation language")),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(FAINT))
+                                        .text_caption()
+                                        .text_color(rgb(TEXT_TERTIARY))
                                         .child(format!(
                                             "{} · {}",
                                             definition.name,
@@ -333,7 +331,7 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
                 )
                 .children(progress)
                 .when_some(transcription.error.clone(), |dialog, error| {
-                    dialog.child(error_message("Model could not be installed.", error))
+                    dialog.child(error_message(tr("Model could not be installed."), error))
                 })
                 .child(
                     div()
@@ -347,15 +345,15 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
                                 .gap_2()
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(FAINT))
+                                        .text_caption()
+                                        .text_color(rgb(TEXT_TERTIARY))
                                         .child(tr("Hold")),
                                 )
                                 .child(hotkey_keycaps(shortcut, 0.9))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(FAINT))
+                                        .text_caption()
+                                        .text_color(rgb(TEXT_TERTIARY))
                                         .child(tr("to dictate")),
                                 ),
                         )
@@ -368,10 +366,10 @@ pub(crate) fn render_onboarding<D: OnboardingDelegate>(
                                 .child(
                                     div()
                                         .id("onboarding-skip")
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(FAINT))
+                                        .text_footnote()
+                                        .text_color(rgb(TEXT_TERTIARY))
                                         .cursor_pointer()
-                                        .hover(|link| link.text_color(rgb(MUTED)))
+                                        .hover(|link| link.text_color(rgb(TEXT_TERTIARY)))
                                         .child(tr("Set up later"))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.finish_onboarding(cx);

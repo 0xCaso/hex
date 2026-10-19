@@ -6,11 +6,10 @@
 
 use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px, rgb};
 
+use crate::design_tokens::*;
+use crate::desktop_i18n::tr;
 use crate::desktop_mode_list::ModeTarget;
-use crate::desktop_ui::{
-    FAINT, LINE, NEGATIVE, SURFACE, SURFACE_HOVER, SURFACE_SELECTED, TEXT, TEXT_SOFT,
-    compact_panel, compact_panel_header, disclosure_button, header_button, toggle, tr,
-};
+use crate::desktop_ui::{ButtonKind, button, disclosure_button, panel, panel_header, toggle};
 
 pub(crate) struct ModeProcessingUnavailableView {
     pub(crate) title: &'static str,
@@ -75,7 +74,7 @@ pub(crate) fn render_mode_variant_picker<T: ModeProcessingDelegate>(
         div()
             .mt_1()
             .p_1()
-            .rounded_sm()
+            .rounded(RADIUS_SMALL)
             .border_1()
             .border_color(rgb(LINE))
             .bg(rgb(SURFACE))
@@ -89,9 +88,13 @@ pub(crate) fn render_mode_variant_picker<T: ModeProcessingDelegate>(
                     .px_2()
                     .flex()
                     .items_center()
-                    .rounded_sm()
-                    .text_size(px(11.0))
-                    .text_color(rgb(if selected { TEXT } else { TEXT_SOFT }))
+                    .rounded(RADIUS_SMALL)
+                    .text_caption()
+                    .text_color(rgb(if selected {
+                        TEXT_PRIMARY
+                    } else {
+                        TEXT_SECONDARY
+                    }))
                     .when(selected, |row| row.bg(rgb(SURFACE_SELECTED)))
                     .hover(|row| row.bg(rgb(SURFACE_HOVER)))
                     .child(label)
@@ -162,9 +165,9 @@ pub(crate) fn render_mode_processing<T: ModeProcessingDelegate>(
         .unavailable
         .map(|unavailable| render_unavailable(unavailable, cx));
 
-    compact_panel()
+    panel()
         .child(
-            compact_panel_header(tr("OpenCode transformation"), Some(toggle_control))
+            panel_header(tr("OpenCode transformation"), Some(toggle_control))
                 .when(!view.enabled && unavailable.is_none(), |header| {
                     header.border_b_0()
                 }),
@@ -181,14 +184,14 @@ fn render_unavailable<T: ModeProcessingDelegate>(
     cx: &mut Context<T>,
 ) -> AnyElement {
     let retry = view.retry_label.map(|label| {
-        header_button(tr(label))
+        button(ButtonKind::Secondary, tr(label))
             .id("retry-mode-opencode")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.handle_mode_processing_action(ModeProcessingAction::RetryOpenCode, window, cx);
             }))
     });
     let setup = view.setup_label.map(|label| {
-        header_button(tr(label))
+        button(ButtonKind::Secondary, tr(label))
             .id("open-mode-opencode-setup")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.handle_mode_processing_action(
@@ -222,16 +225,15 @@ fn render_unavailable<T: ModeProcessingDelegate>(
                 .gap_1()
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_caption()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_SOFT))
+                        .text_color(rgb(TEXT_SECONDARY))
                         .child(tr(view.title)),
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .line_height(px(16.0))
-                        .text_color(rgb(if is_error { NEGATIVE } else { FAINT }))
+                        .text_caption()
+                        .text_color(rgb(if is_error { DANGER } else { TEXT_TERTIARY }))
                         .child(message),
                 ),
         )

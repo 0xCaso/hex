@@ -1,12 +1,12 @@
-//! Windows 11 Fluent visual layer: the user's system accent color, Segoe
-//! Fluent Icons glyphs, and the custom caption bar drawn into gpui's
-//! frameless titlebar area.
+//! Windows window chrome on the shared design system: Segoe Fluent Icons
+//! glyphs, the custom caption bar drawn into gpui's frameless titlebar area,
+//! the window and tray icons, and the HUD popup's DWM attributes.
 
 use std::sync::{Arc, OnceLock};
 
 use gpui::{
-    AnyElement, Div, FontWeight, Image, ImageFormat, Window, WindowControlArea, div, img,
-    prelude::*, px, rgb,
+    AnyElement, Bounds, Div, ElementId, FontWeight, Image, ImageFormat, Pixels, Stateful, Window,
+    WindowControlArea, div, img, prelude::*, px, rgb,
 };
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -15,7 +15,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_SETICON,
 };
 use winreg::RegKey;
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+use winreg::enums::HKEY_LOCAL_MACHINE;
+
+use crate::design_tokens::{
+    CAPTION, FOOTNOTE, MENU_ITEM_HEIGHT, MENU_OFFSET, SURFACE_HOVER, SURFACE_SELECTED,
+    TEXT_PRIMARY, TEXT_SECONDARY, Typography,
+};
+use crate::desktop_ui::{menu, menu_item, truncated_line};
 
 pub(crate) const FONT_UI: &str = "Segoe UI Variable Text";
 
@@ -41,31 +47,9 @@ pub(crate) fn icon_font() -> &'static str {
 pub(crate) const CAPTION_HEIGHT: f32 = 40.0;
 const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 
-// Fluent dark control fills live in the shared token set; re-exported so
-// Windows-only code keeps its historical paths.
-pub(crate) use crate::desktop_ui::{
-    CONTROL_FILL, CONTROL_FILL_PRESSED, CONTROL_STROKE, CRITICAL, SUCCESS,
-};
+// The system caption close button's hover and pressed reds.
 const CLOSE_HOVER: u32 = 0xc42b1c;
 const CLOSE_PRESSED: u32 = 0xb2271a;
-
-/// The user's dark-theme accent (`light2` palette slot), read once from the
-/// registry. Windows precomputes the lightened dark-theme variant, so no color
-/// math is required. Falls back to the Windows 11 default accent.
-pub(crate) fn accent() -> u32 {
-    static ACCENT: OnceLock<u32> = OnceLock::new();
-    *ACCENT.get_or_init(|| read_accent_light2().unwrap_or(0x4cc2ff))
-}
-
-fn read_accent_light2() -> Option<u32> {
-    let palette = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent")
-        .ok()?
-        .get_raw_value("AccentPalette")
-        .ok()?;
-    let light2 = palette.bytes.get(4..7)?;
-    Some(u32::from(light2[0]) << 16 | u32::from(light2[1]) << 8 | u32::from(light2[2]))
-}
 
 /// Gives the main window the executable's embedded icon (resource 1, see
 /// build.rs) for the taskbar, Alt-Tab, and the caption, so they match the
@@ -198,47 +182,52 @@ pub(crate) fn fluent_icon(glyph: &'static str, size: f32, color: u32) -> AnyElem
         .into_any_element()
 }
 
-pub(crate) use crate::desktop_ui::selection_pill;
-
-/// The custom caption bar: brand at the left, one OS drag region across, and
-/// native-behaving minimize/maximize/close buttons. gpui routes the buttons
+/// The caption row is split to match the columns below it, so the sidebar
+/// runs the full window height as it does on macOS. Both halves are OS drag
+/// regions (double-click maximizes), and gpui routes the window buttons
 /// through WM_NCHITTEST, so hover states, Snap Layouts on the maximize
 /// button, and click behavior all come from Windows itself.
-pub(crate) fn caption_bar(window: &Window) -> Div {
+///
+/// This is the sidebar half: the brand, aligned with the navigation icons.
+pub(crate) fn caption_brand() -> impl IntoElement {
+    caption_row().child(
+        div()
+            .id("caption-brand")
+            .window_control_area(WindowControlArea::Drag)
+            .h_full()
+            .flex_1()
+            .min_w(px(0.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .pl_3()
+            .child(brand_logo())
+            .child(
+                div()
+                    .text_step(CAPTION)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT_SECONDARY))
+                    .child("Hex"),
+            ),
+    )
+}
+
+/// The content half of the caption row: a drag region and the window
+/// buttons at the far right.
+pub(crate) fn caption_controls(window: &Window) -> impl IntoElement {
     let maximize_glyph = if window.is_maximized() {
         "\u{E923}"
     } else {
         "\u{E922}"
     };
-    div()
-        .w_full()
-        .h(px(CAPTION_HEIGHT))
-        // Leave a thin non-interactive strip at the very top so the OS
-        // top-edge resize hit test stays reachable above the drag and
-        // caption-button hitboxes.
-        .pt(px(3.0))
-        .flex_none()
-        .flex()
-        .items_center()
+    caption_row()
         .child(
             div()
                 .id("caption-drag")
                 .window_control_area(WindowControlArea::Drag)
                 .h_full()
                 .flex_1()
-                .min_w(px(0.0))
-                .flex()
-                .items_center()
-                .gap_2()
-                .pl(px(18.0))
-                .child(brand_logo())
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0xcfcfcf))
-                        .child("HEX"),
-                ),
+                .min_w(px(0.0)),
         )
         .child(caption_button(
             "caption-minimize",
@@ -261,11 +250,24 @@ pub(crate) fn caption_bar(window: &Window) -> Div {
                 .justify_center()
                 .font_family(icon_font())
                 .text_size(px(10.0))
-                .text_color(rgb(0xcfcfcf))
-                .hover(|button| button.bg(rgb(CLOSE_HOVER)).text_color(rgb(0xffffff)))
-                .active(|button| button.bg(rgb(CLOSE_PRESSED)).text_color(rgb(0xffffff)))
+                .text_color(rgb(TEXT_SECONDARY))
+                .hover(|button| button.bg(rgb(CLOSE_HOVER)).text_color(rgb(TEXT_PRIMARY)))
+                .active(|button| button.bg(rgb(CLOSE_PRESSED)).text_color(rgb(TEXT_PRIMARY)))
                 .child("\u{E8BB}"),
         )
+}
+
+fn caption_row() -> Div {
+    div()
+        .w_full()
+        .h(px(CAPTION_HEIGHT))
+        // Leave a thin non-interactive strip at the very top so the OS
+        // top-edge resize hit test stays reachable above the drag and
+        // caption-button hitboxes.
+        .pt(px(3.0))
+        .flex_none()
+        .flex()
+        .items_center()
 }
 
 /// The branded logo at 16 points, rendered from the 64px raster for crisp
@@ -296,8 +298,145 @@ fn caption_button(
         .justify_center()
         .font_family(icon_font())
         .text_size(px(10.0))
-        .text_color(rgb(0xcfcfcf))
-        .hover(|button| button.bg(rgb(CONTROL_FILL)).text_color(rgb(0xffffff)))
-        .active(|button| button.bg(rgb(CONTROL_FILL_PRESSED)))
+        .text_color(rgb(TEXT_SECONDARY))
+        .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_PRIMARY)))
+        .active(|button| button.bg(rgb(SURFACE_SELECTED)))
         .child(glyph)
+}
+
+// Anchored dropdowns. Windows dropdowns open as window-level overlays so a
+// long list can flip above its trigger and scroll inside the window. Callers
+// capture the trigger's bounds with a zero-size canvas; the panel and rows
+// are the shared `menu` and `menu_item` components.
+
+const DROPDOWN_MARGIN: f32 = 8.0;
+const DROPDOWN_MAX_HEIGHT: f32 = 360.0;
+/// `menu`'s `p_1` inset plus its border, on each side.
+const DROPDOWN_PADDING: f32 = 5.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DropdownLayout {
+    height: Pixels,
+    top: Pixels,
+}
+
+fn dropdown_rows_height(rows: usize) -> Pixels {
+    px(DROPDOWN_PADDING * 2.0) + px(MENU_ITEM_HEIGHT) * rows
+}
+
+/// The tallest whole-row height that fits `available`, so a clamped panel
+/// never slices a row in half at its scroll edge.
+fn dropdown_fit_height(row_count: usize, available: Pixels) -> Pixels {
+    let content = dropdown_rows_height(row_count);
+    if content <= available {
+        return content;
+    }
+    let usable = f32::from(available) - DROPDOWN_PADDING * 2.0;
+    let rows = (usable / MENU_ITEM_HEIGHT).floor().max(1.0) as usize;
+    dropdown_rows_height(rows.min(row_count))
+}
+
+fn dropdown_layout(
+    anchor_top: Pixels,
+    anchor_bottom: Pixels,
+    viewport_height: Pixels,
+    row_count: usize,
+) -> DropdownLayout {
+    let row_count = row_count.max(1);
+    let max_height = px(DROPDOWN_MAX_HEIGHT);
+    let gap = px(MENU_OFFSET);
+    let margin = px(DROPDOWN_MARGIN);
+    let downward_top = anchor_bottom + gap;
+    let below = (viewport_height - margin - downward_top).max(Pixels::ZERO);
+    // Keep the panel below the caption bar so the window stays draggable.
+    let above = (anchor_top - gap - px(CAPTION_HEIGHT) - margin).max(Pixels::ZERO);
+    if below >= dropdown_fit_height(row_count, max_height) || below >= above {
+        DropdownLayout {
+            height: dropdown_fit_height(row_count, below.min(max_height)),
+            top: downward_top,
+        }
+    } else {
+        let height = dropdown_fit_height(row_count, above.min(max_height));
+        DropdownLayout {
+            height,
+            top: anchor_top - gap - height,
+        }
+    }
+}
+
+/// The full-window layer behind an open dropdown; clicking it dismisses.
+pub(crate) fn dropdown_backdrop(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .occlude()
+}
+
+pub(crate) fn dropdown_panel(
+    bounds: Bounds<Pixels>,
+    viewport_height: Pixels,
+    row_count: usize,
+) -> Div {
+    dropdown_panel_with_width(bounds, viewport_height, row_count, bounds.size.width)
+}
+
+/// A dropdown wider than its trigger; the extra width grows leftward so
+/// right-edge triggers keep the panel inside the window.
+pub(crate) fn dropdown_panel_with_width(
+    bounds: Bounds<Pixels>,
+    viewport_height: Pixels,
+    row_count: usize,
+    width: Pixels,
+) -> Div {
+    let width = width.max(bounds.size.width);
+    let layout = dropdown_layout(bounds.top(), bounds.bottom(), viewport_height, row_count);
+    menu()
+        .absolute()
+        .left(bounds.right() - width)
+        .top(layout.top)
+        .w(width)
+        .h(layout.height)
+}
+
+pub(crate) fn dropdown_item(
+    id: impl Into<ElementId>,
+    label: String,
+    selected: bool,
+) -> Stateful<Div> {
+    menu_item(selected)
+        .id(id)
+        .child(truncated_line(FOOTNOTE, label).flex_1())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_dropdown_flips_up_and_stays_inside_the_viewport() {
+        let viewport_height = px(700.0);
+        let layout = dropdown_layout(px(500.0), px(530.0), viewport_height, 20);
+
+        assert!(layout.top < px(500.0));
+        assert_eq!(
+            layout.height,
+            dropdown_fit_height(20, px(DROPDOWN_MAX_HEIGHT))
+        );
+        assert!(layout.height <= px(DROPDOWN_MAX_HEIGHT));
+        let rows = f32::from(layout.height) - DROPDOWN_PADDING * 2.0;
+        assert_eq!(rows % MENU_ITEM_HEIGHT, 0.0);
+        assert!(layout.top >= px(CAPTION_HEIGHT) + px(DROPDOWN_MARGIN));
+        assert!(layout.top + layout.height <= viewport_height - px(DROPDOWN_MARGIN));
+    }
+
+    #[test]
+    fn short_dropdown_opens_below_its_trigger_at_content_height() {
+        let layout = dropdown_layout(px(100.0), px(130.0), px(700.0), 3);
+
+        assert_eq!(layout.top, px(130.0) + px(MENU_OFFSET));
+        assert_eq!(layout.height, dropdown_rows_height(3));
+    }
 }

@@ -1,8 +1,8 @@
-//! The signed self-update core both port shells share: an ed25519-signed
-//! feed names one content-addressed artifact per platform, and every
-//! byte is verified against the signed manifest before activation. The
-//! platform updaters own installation layout and relaunch; this module
-//! owns trust.
+//! The signed self-update core the Linux and Windows updaters share: an
+//! ed25519-signed feed names one content-addressed artifact per platform, and
+//! every byte is verified against the signed manifest before activation. The
+//! platform updaters own installation layout and relaunch; this module owns
+//! trust.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
@@ -14,10 +14,10 @@ use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use ed25519_dalek::{Signature, VerifyingKey};
 use semver::Version;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 /// The release origin shared with Linux and macOS: the `hex-releases` R2
 /// bucket behind its custom domain.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub const RELEASE_BASE: &str = "https://downloads.hex.kitlangton.dev";
 pub const MAX_FEED_BYTES: u64 = 64 * 1024;
 pub const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -203,31 +203,11 @@ pub fn verify_artifact(path: &Path, manifest: &Manifest) -> Result<()> {
             manifest.bytes
         );
     }
-    let actual = sha256(path)?;
+    let actual = crate::transcription_models::sha256_hex(path, None)?;
     if actual != manifest.sha256 {
         bail!("update checksum verification failed");
     }
     Ok(())
-}
-
-pub fn sha256(path: &Path) -> Result<String> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut result = String::with_capacity(64);
-    for &byte in hasher.finalize().iter() {
-        result.push(HEX[usize::from(byte >> 4)] as char);
-        result.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -338,7 +318,7 @@ mod tests {
         ));
         fs::write(&path, b"new").unwrap();
         let mut manifest = Manifest {
-            sha256: sha256(&path).unwrap(),
+            sha256: crate::transcription_models::sha256_hex(&path, None).unwrap(),
             ..manifest(&LINUX)
         };
         assert!(verify_artifact(&path, &manifest).is_ok());

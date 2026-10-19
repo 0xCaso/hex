@@ -58,14 +58,16 @@ substitute for source inspection or a second roadmap.
   disposable bounded command audio projection.
 - `recording_environment`: serialized RAII ownership of idle-sleep prevention,
   output muting, and supported media-player pause/resume behavior.
-- `dictation_processor`: context-selected corrections and deadline-bounded
-  OpenCode rewrite profiles with corrected-transcript fallback. The macOS app
-  discovers the `opencode2` beta executable, links missing installs to
-  `https://v2.opencode.ai/`, and uses
-  `opencode2 api get` to discover or start its managed service. Generation uses
-  CLI-managed discovery with the matching owner-only service registration and
-  authenticated loopback HTTP through the system curl; request bodies and
-  credentials use stdin, never argv or new temporary files.
+- `dictation_processor`: the one OpenCode client and ordered processing policy
+  for macOS and Windows: context-selected corrections, deadline-bounded
+  OpenCode rewrite profiles with corrected-transcript fallback, the ranked
+  model catalog, Voice Action generation, and the transformation stage. Both
+  apps discover the `opencode2` beta executable and link missing installs to
+  `https://v2.opencode.ai/`. On macOS, `opencode2 api get` discovers or starts
+  the managed service, and generation uses the matching owner-only service
+  registration and authenticated loopback HTTP through the system curl; request
+  bodies and credentials use stdin, never argv or new temporary files. Windows
+  sends the same requests through the `opencode2 api` CLI inside a job object.
 - `parakeet`: the strict-Metal `transcribe.cpp` adapter plus bounded inference,
   processing, ordered output, paste, last-result, and meeting-delta workers.
 - `apple_speech`: the Swift `SpeechAnalyzer` bridge with per-locale support
@@ -103,17 +105,22 @@ substitute for source inspection or a second roadmap.
   authoritative microphone timeline.
 - `command_grammar`: typed command patterns, captures, overlap detection, and
   command catalog metadata.
-- `commands`: pure contextual resolution plus bounded asynchronous macOS action
-  execution.
+- `keys`: the platform-neutral key and modifier vocabulary of command actions.
+- `commands`: pure contextual resolution plus bounded asynchronous action
+  execution (`open` and CoreGraphics keystrokes on macOS; shell-opened URLs,
+  paths, and applications on Windows).
 - `personal_commands`: the Bun-hosted `@hex/commands` TypeScript workspace:
-  managed SDK provisioning, the watch-reloaded user command and transformation
-  host, bounded invocation dispatch, and status snapshots.
+  managed SDK provisioning (built `dist` on macOS, the embedded TypeScript
+  `src` on Windows), the watch-reloaded user command and transformation host,
+  bounded invocation dispatch, and status snapshots. macOS and Windows share
+  it; Windows hosts transformations only.
 - `text_replacements`: phrase-boundary-aware compilation of configured text
   replacements applied longest-match-first to transcripts.
 - `config`: compiled commands, preferred input devices, and dictation profiles.
-- `context`: native foreground application and window context capture plus
-  browser context. Browser host is the domain concept; Brave AppleScript is only
-  the first adapter.
+- `context`: the foreground context snapshot and selectors shared by commands
+  and modes, plus native macOS capture. Browser host is the domain concept;
+  Brave AppleScript is the first macOS adapter and `windows_context` reads any
+  browser through UI Automation.
 - `application_catalog`: cached installed-application discovery with normalized
   bundle identity and rendered icons for the UI.
 - `app_settings`: persisted settings and live runtime projection for commands,
@@ -137,22 +144,30 @@ substitute for source inspection or a second roadmap.
 - `linux_desktop`: the service-owned GTK thread for the focus-free, click-through
   Wayland recording/processing HUD. Settings never owns its lifecycle; Linux has
   no tray icon.
-- `linux_updater`: signed direct-install updates, bounded downloads, atomic
-  version activation, and restart handoff for user-local Linux installs.
+- `self_update`: the signed-feed core the Linux and Windows updaters share:
+  ed25519 feed verification, per-target manifest validation, bounded HTTPS
+  downloads, and size and checksum verification.
+- `linux_updater`: signed direct-install updates, atomic version activation,
+  and restart handoff for user-local Linux installs.
 - `windows`, `windows_app`, `windows_dictation`, `windows_input`,
   `windows_paste`, `windows_settings`, `windows_indicator`, `windows_updater`,
-  `windows_context`, `windows_audio_control`, `windows_login_item`,
-  `windows_voice_action`, `windows_ui`: the Windows beta CLI, GPUI shell and
-  tray, WASAPI dictation loop, low-level keyboard hook, clipboard paste,
-  settings, HUD, signed self-update, UI Automation context, audio ducking,
-  login item, and Voice Action. Windows builds alias `desktop_ui`,
-  `desktop_host`, `desktop_activity`, `text_input`, and
-  `desktop_transcription_picker` to their `windows_*` files with `#[path]`, and
-  add the shared `desktop_*` panes, `dictation_processing`, `opencode`,
-  `self_update`, `command_context`, `commands_engine`, and
-  `windows_personal_commands` from the `windows-shell` port. Converge them with
-  the macOS and Linux versions under the shared-desktop-UI plan rather than
-  adding a third copy.
+  `windows_context`, `windows_audio_control`, `windows_login_item`: the
+  Windows beta CLI, GPUI shell and tray, WASAPI dictation loop, low-level
+  keyboard hook, clipboard paste, settings, HUD, signed self-update, UI
+  Automation context, audio ducking, and login item. Windows uses the shared
+  `design_tokens`, `desktop_ui`, `text_input`, `desktop_activity`,
+  `dictation_processor`, `personal_commands`, and `commands` modules.
+- `windows_ui`: Windows window chrome on the shared design system: the split
+  caption row (brand over the full-height sidebar, window buttons over the
+  content), Segoe Fluent Icons glyphs, anchored dropdowns, and window, tray,
+  and HUD-popup integration.
+- `windows_desktop_host`: the Windows Settings window's snapshot-and-action
+  contract and its pane capabilities.
+- `desktop_shell`, `desktop_i18n`, and the `desktop_*` panes (Activity,
+  History, HUD Lab, mode list/basics/processing/transformations, replacement
+  editor, model catalog, onboarding, Voice Action): the Windows panes from the
+  `windows-shell` port, built from `desktop_ui` components. Converge them with
+  the macOS panes under the shared-desktop-UI plan rather than adding a copy.
 - `history`: the owner-only bounded retained-dictation store: retention
   windows with hard entry and byte caps, atomic crash-safe persistence, and
   search. Text and bounded metadata only, never audio.

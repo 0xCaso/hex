@@ -6,11 +6,10 @@
 
 use gpui::{AnyElement, Context, Pixels, Point, Render, Window, div, prelude::*, px, rgb};
 
+use crate::design_tokens::*;
+use crate::desktop_i18n::tr;
 use crate::desktop_mode_list::ModeTarget;
-use crate::desktop_ui::{
-    FAINT, LINE, MUTED, SURFACE_HOVER, SURFACE_SELECTED, TEXT, TEXT_SOFT, compact_button,
-    compact_header_plus_button, compact_panel, compact_panel_header, tr,
-};
+use crate::desktop_ui::{ButtonKind, Icon, icon_button, panel, panel_header, small_button};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TransformationCatalogEntry {
@@ -95,12 +94,12 @@ impl Render for TransformationDrag {
                     .px_3()
                     .flex()
                     .items_center()
-                    .rounded(px(6.0))
+                    .rounded(RADIUS_CONTROL)
                     .border_1()
-                    .border_color(rgb(0x505050))
+                    .border_color(rgb(LINE_STRONG))
                     .bg(rgb(SURFACE_SELECTED))
-                    .text_size(px(11.0))
-                    .text_color(rgb(TEXT))
+                    .text_caption()
+                    .text_color(rgb(TEXT_PRIMARY))
                     .child(self.name.clone()),
             )
     }
@@ -166,8 +165,8 @@ pub(crate) fn render_mode_transformations<T: ModeTransformationsDelegate>(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(12.0))
-                        .text_color(rgb(FAINT))
+                        .text_footnote()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child("⠿")
                         .on_drag(drag, |drag, position, _, cx| {
                             cx.new(|_| drag.clone().at(position))
@@ -177,19 +176,19 @@ pub(crate) fn render_mode_transformations<T: ModeTransformationsDelegate>(
                     div()
                         .flex_1()
                         .min_w(px(0.0))
-                        .text_size(px(11.0))
-                        .text_color(rgb(TEXT_SOFT))
+                        .text_caption()
+                        .text_color(rgb(TEXT_SECONDARY))
                         .truncate()
                         .child(name),
                 )
                 .child(
-                    compact_button("×")
+                    icon_button(ButtonKind::Ghost, Icon::Close)
                         .id(("remove-mode-transformation", target_index))
                         .size(px(28.0))
                         .px_0()
                         .justify_center()
-                        .text_size(px(14.0))
-                        .text_color(rgb(MUTED))
+                        .text_body()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.handle_mode_transformations_action(
                                 ModeTransformationsAction::Remove {
@@ -231,25 +230,25 @@ pub(crate) fn render_mode_transformations<T: ModeTransformationsDelegate>(
                             .min_w(px(0.0))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_caption()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT_SOFT))
+                                    .text_color(rgb(TEXT_SECONDARY))
                                     .child(name),
                             )
                             .when_some(description, |copy, description| {
                                 copy.child(
                                     div()
                                         .pt_1()
-                                        .text_size(px(10.0))
-                                        .text_color(rgb(FAINT))
+                                        .text_caption()
+                                        .text_color(rgb(TEXT_TERTIARY))
                                         .child(description),
                                 )
                             }),
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
-                            .text_color(rgb(TEXT_SOFT))
+                            .text_caption()
+                            .text_color(rgb(TEXT_SECONDARY))
                             .child(tr("Add")),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -271,12 +270,12 @@ pub(crate) fn render_mode_transformations<T: ModeTransformationsDelegate>(
     let catalog_empty = view.catalog.is_empty();
     let add = (!catalog_empty).then(|| {
         let button = if view.picker_open {
-            compact_button(tr("Done"))
+            small_button(ButtonKind::Secondary, tr("Done"))
                 .h(px(28.0))
                 .mr(px(-7.0))
-                .text_size(px(10.0))
+                .text_caption()
         } else {
-            compact_header_plus_button()
+            icon_button(ButtonKind::Ghost, Icon::Plus)
         };
         button
             .id("toggle-transformation-picker")
@@ -289,9 +288,9 @@ pub(crate) fn render_mode_transformations<T: ModeTransformationsDelegate>(
             .into_any_element()
     });
 
-    compact_panel()
+    panel()
         .child(
-            compact_panel_header(tr("Transformations"), add)
+            panel_header(tr("Transformations"), add)
                 .when(selected.is_empty() && !view.picker_open, |header| {
                     header.border_b_0()
                 }),
@@ -306,8 +305,8 @@ pub(crate) fn render_mode_transformations<T: ModeTransformationsDelegate>(
                             .border_color(rgb(LINE))
                             .px_3()
                             .py_3()
-                            .text_size(px(10.0))
-                            .text_color(rgb(MUTED))
+                            .text_caption()
+                            .text_color(rgb(TEXT_TERTIARY))
                             .child(tr("Every registered transformation is already included.")),
                     )
                 })
@@ -316,7 +315,7 @@ pub(crate) fn render_mode_transformations<T: ModeTransformationsDelegate>(
         .when_some(workspace, |panel, workspace| {
             let action = workspace.action_label.map(|label| {
                 let action = workspace.action;
-                compact_button(tr(label))
+                small_button(ButtonKind::Secondary, tr(label))
                     .id("mode-transformations-workspace-action")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.handle_mode_transformations_action(
@@ -348,20 +347,15 @@ pub(crate) fn render_mode_transformations<T: ModeTransformationsDelegate>(
                             .gap_1()
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_caption()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT_SOFT))
+                                    .text_color(rgb(TEXT_SECONDARY))
                                     .child(tr(workspace.title)),
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
-                                    .line_height(px(16.0))
-                                    .text_color(rgb(if is_error {
-                                        crate::desktop_ui::NEGATIVE
-                                    } else {
-                                        FAINT
-                                    }))
+                                    .text_caption()
+                                    .text_color(rgb(if is_error { DANGER } else { TEXT_TERTIARY }))
                                     .child(message),
                             ),
                     )

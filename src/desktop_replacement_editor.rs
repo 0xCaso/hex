@@ -9,11 +9,10 @@ use gpui::{
     Subscription, Window, div, prelude::*, px, rgb,
 };
 
+use crate::design_tokens::*;
+use crate::desktop_i18n::tr;
 use crate::desktop_mode_target::ModeTarget;
-use crate::desktop_ui::{
-    FAINT, LINE, MUTED, SURFACE_HOVER, TEXT_SOFT, compact_button, compact_header_plus_button,
-    compact_panel, compact_panel_header, tr,
-};
+use crate::desktop_ui::{ButtonKind, Icon, icon_button, panel, panel_header};
 use crate::text_input::{Changed as TextChanged, TextInput};
 use crate::text_replacements::TextReplacement;
 
@@ -115,21 +114,25 @@ pub(crate) fn render_replacement_editor<T: ReplacementEditorDelegate>(
                         .h(px(34.0))
                         .flex()
                         .items_center()
-                        .text_size(px(11.0))
-                        .text_color(rgb(FAINT))
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child("→"),
                 )
                 .child(compact_field(tr("Output"), inputs.output.clone()))
                 .child(
-                    compact_button("×")
+                    icon_button(ButtonKind::Ghost, Icon::Close)
                         .id(remove_id)
                         .size(px(34.0))
                         .px_0()
                         .justify_center()
                         .flex_none()
-                        .text_size(px(14.0))
-                        .text_color(rgb(MUTED))
-                        .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_SOFT)))
+                        .text_body()
+                        .text_color(rgb(TEXT_TERTIARY))
+                        .hover(|button| {
+                            button
+                                .bg(rgb(SURFACE_HOVER))
+                                .text_color(rgb(TEXT_SECONDARY))
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.handle_replacement_editor_action(
                                 ReplacementEditorAction::Remove { target, index },
@@ -142,22 +145,22 @@ pub(crate) fn render_replacement_editor<T: ReplacementEditorDelegate>(
         .collect::<Vec<_>>();
 
     let add_id = SharedString::from(format!("add-replacement-{target_id}"));
-    let add = compact_header_plus_button()
+    let add = icon_button(ButtonKind::Ghost, Icon::Plus)
         .id(add_id)
         .on_click(cx.listener(move |this, _, window, cx| {
             this.handle_replacement_editor_action(ReplacementEditorAction::Add(target), window, cx);
         }))
         .into_any_element();
 
-    compact_panel()
-        .child(compact_panel_header(tr(view.title), Some(add)))
+    panel()
+        .child(panel_header(tr(view.title), Some(add)))
         .when(row_count == 0, |panel| {
             panel.child(
                 div()
                     .px_3()
                     .py_3()
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
+                    .text_caption()
+                    .text_color(rgb(TEXT_TERTIARY))
                     .child(tr(view.empty_message)),
             )
         })
@@ -172,6 +175,11 @@ fn compact_field(label: &'static str, control: impl IntoElement) -> Div {
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_size(px(9.0)).text_color(rgb(FAINT)).child(label))
+        .child(
+            div()
+                .text_caption()
+                .text_color(rgb(TEXT_TERTIARY))
+                .child(label),
+        )
         .child(control)
 }

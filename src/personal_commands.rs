@@ -18,7 +18,7 @@ use crate::commands::{
 };
 use crate::context::ContextSnapshot;
 use crate::dictation::DictationProtocol;
-use crate::keyboard::{Key, Modifiers};
+use crate::keys::{Key, Modifiers};
 
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 const MAX_INPUT_FRAME_BYTES: usize = 64 * 1024;
@@ -332,6 +332,12 @@ pub fn initialize_workspace() -> Result<PathBuf> {
     Ok(workspace)
 }
 
+/// Whether the personal command workspace has a config to host.
+pub fn workspace_configured() -> bool {
+    crate::app_paths::personal_commands_workspace()
+        .is_ok_and(|workspace| workspace.join("hex.config.ts").is_file())
+}
+
 pub fn initialize_workspace_at(workspace: &Path, sdk: &Path) -> Result<bool> {
     let template = sdk.join("workspace-template");
     if !template.is_dir() {
@@ -463,10 +469,49 @@ fn workspace_effect_update(workspace: &Path, sdk: &Path) -> Result<Option<Vec<u8
     Ok(Some(encoded))
 }
 
-fn refresh_managed_sdk_at(workspace: &Path, sdk: &Path) -> Result<bool> {
-    if !sdk.join("package.json").is_file() || !sdk.join("dist/bin.js").is_file() {
-        return Err(eyre!("personal command SDK resources are incomplete"));
+/// The SDK's code: the built `dist` in the macOS bundle and source checkouts,
+/// or the TypeScript `src` the Windows executable embeds (Bun runs it as is).
+fn sdk_code_directory(sdk: &Path) -> Option<&'static str> {
+    if sdk.join("dist/bin.js").is_file() {
+        Some("dist")
+    } else if sdk.join("src/bin.ts").is_file() {
+        Some("src")
+    } else {
+        None
     }
+}
+
+/// Points a staged source SDK's package exports at its TypeScript entry points.
+fn write_source_sdk_manifest(path: &Path) -> Result<()> {
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+    manifest["exports"]["."]["types"] = "./src/index.ts".into();
+    manifest["exports"]["."]["import"] = "./src/index.ts".into();
+    manifest["exports"]["./effect"]["types"] = "./src/effect.ts".into();
+    manifest["exports"]["./effect"]["import"] = "./src/effect.ts".into();
+    manifest["bin"]["hex-commands-host"] = "./src/bin.ts".into();
+    manifest["files"] = serde_json::json!(["src"]);
+    let mut encoded = serde_json::to_vec_pretty(&manifest)?;
+    encoded.push(b'\n');
+    fs::write(path, encoded)?;
+    Ok(())
+}
+
+/// The installed managed host entry point for the SDK's code layout.
+fn managed_host_entrypoint(workspace: &Path) -> PathBuf {
+    let package = workspace.join("node_modules/@hex/commands");
+    let source = package.join("src/bin.ts");
+    if source.is_file() {
+        source
+    } else {
+        package.join("dist/bin.js")
+    }
+}
+
+fn refresh_managed_sdk_at(workspace: &Path, sdk: &Path) -> Result<bool> {
+    let code = sdk_code_directory(sdk);
+    let Some(code) = code.filter(|_| sdk.join("package.json").is_file()) else {
+        return Err(eyre!("personal command SDK resources are incomplete"));
+    };
     // Validate both manifests before touching the installed SDK or user files.
     let manifest_update = workspace_effect_update(workspace, sdk)?;
     fs::create_dir_all(workspace)?;
@@ -477,7 +522,10 @@ fn refresh_managed_sdk_at(workspace: &Path, sdk: &Path) -> Result<bool> {
     }
     fs::create_dir(&staged_sdk)?;
     fs::copy(sdk.join("package.json"), staged_sdk.join("package.json"))?;
-    copy_directory(&sdk.join("dist"), &staged_sdk.join("dist"), true)?;
+    copy_directory(&sdk.join(code), &staged_sdk.join(code), true)?;
+    if code == "src" {
+        write_source_sdk_manifest(&staged_sdk.join("package.json"))?;
+    }
     let sdk_changed = directory_manifest(&staged_sdk)? != directory_manifest(&installed_sdk)?;
     if !sdk_changed {
         fs::remove_dir_all(staged_sdk)?;
@@ -1504,7 +1552,7 @@ fn prepare_host() -> Result<Option<HostPaths>> {
         .wrap_err("personal command SDK is unavailable")?;
     let workspace_changed = refresh_managed_sdk_at(&workspace, &sdk)
         .wrap_err("could not refresh the managed personal command SDK")?;
-    let managed_host = workspace.join("node_modules/@hex/commands/dist/bin.js");
+    let mut managed_host = managed_host_entrypoint(&workspace);
     if workspace_changed || !managed_host.is_file() {
         if workspace_changed {
             remove_installed_managed_sdk(&workspace)
@@ -1516,6 +1564,7 @@ fn prepare_host() -> Result<Option<HostPaths>> {
             workspace_changed,
             "refreshed the managed personal command SDK"
         );
+        managed_host = managed_host_entrypoint(&workspace);
     }
     if !managed_host.is_file() {
         return Err(eyre!(
@@ -2491,6 +2540,7 @@ fn workspace_fingerprint(root: &Path) -> u64 {
     hash
 }
 
+#[cfg(not(target_os = "windows"))]
 fn find_bun() -> Option<PathBuf> {
     let candidates = std::env::var_os("PATH")
         .into_iter()
@@ -2501,6 +2551,18 @@ fn find_bun() -> Option<PathBuf> {
             PathBuf::from("/opt/homebrew/bin/bun"),
             PathBuf::from("/usr/local/bin/bun"),
         ]);
+    find_bun_candidate(candidates)
+}
+
+#[cfg(target_os = "windows")]
+fn find_bun() -> Option<PathBuf> {
+    let candidates = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|path| path.join("bun.exe"))
+        .chain([dirs::home_dir()
+            .unwrap_or_default()
+            .join(".bun/bin/bun.exe")]);
     find_bun_candidate(candidates)
 }
 
@@ -3545,6 +3607,7 @@ mod tests {
         assert!(backoff.retry_at.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_fingerprint_does_not_follow_symlinks_or_excessive_depth() {
         let unique = SystemTime::now()
@@ -3593,6 +3656,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_children_are_reaped() {
         let mut child = Command::new("/bin/sh")
@@ -3825,6 +3889,7 @@ mod tests {
         fs::remove_dir_all(workspace.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_only_rejects_manifest_symlinks_that_need_migration() {
         let (workspace, sdk) = workspace_upgrade_fixture();
@@ -3876,6 +3941,7 @@ mod tests {
         fs::remove_dir_all(workspace.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_effect_migration_preserves_manifest_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -4012,9 +4078,14 @@ mod tests {
             .as_nanos();
         let workspace = std::env::temp_dir().join(format!("hex-workspace-{unique}"));
         let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sdk/commands");
+        // A built checkout installs `dist`; an unbuilt one installs `src`.
+        let (bin, index) = match sdk_code_directory(&sdk).unwrap() {
+            "dist" => ("dist/bin.js", "dist/index.js"),
+            _ => ("src/bin.ts", "src/index.ts"),
+        };
 
         assert!(initialize_workspace_at(&workspace, &sdk).unwrap());
-        assert!(workspace.join(".hex-sdk/dist/bin.js").is_file());
+        assert!(workspace.join(".hex-sdk").join(bin).is_file());
         assert!(workspace.join("package.json").is_file());
         assert!(workspace.join("tsconfig.json").is_file());
         assert!(workspace.join("AGENTS.md").is_file());
@@ -4029,11 +4100,11 @@ mod tests {
             fs::read_to_string(workspace.join("hex.config.ts")).unwrap(),
             "// user config\n"
         );
-        fs::write(workspace.join(".hex-sdk/dist/index.js"), "stale SDK\n").unwrap();
+        fs::write(workspace.join(".hex-sdk").join(index), "stale SDK\n").unwrap();
         assert!(initialize_workspace_at(&workspace, &sdk).unwrap());
         assert_eq!(
-            fs::read(workspace.join(".hex-sdk/dist/index.js")).unwrap(),
-            fs::read(sdk.join("dist/index.js")).unwrap()
+            fs::read(workspace.join(".hex-sdk").join(index)).unwrap(),
+            fs::read(sdk.join(index)).unwrap()
         );
         assert_eq!(
             fs::read_to_string(workspace.join("hex.config.ts")).unwrap(),

@@ -4,12 +4,12 @@
 
 use gpui::{
     AnyElement, App, Div, ElementId, FontWeight, IntoElement, Pixels, Rgba, ShapedLine,
-    SharedString, Stateful, Window, canvas, div, prelude::*, px, rgb,
+    SharedString, Stateful, Window, canvas, div, prelude::*, px, relative, rgb,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use gpui::{Image, ImageFormat, img};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::sync::Arc;
 
 use crate::design_tokens::*;
@@ -42,7 +42,7 @@ impl NavigationIcon {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn heroicon(self) -> &'static str {
         match self {
             Self::Settings => include_str!("../assets/icons/settings.svg"),
@@ -71,7 +71,7 @@ fn navigation_icon(icon: NavigationIcon, selected: bool) -> AnyElement {
         .into_any_element()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn navigation_icon(icon: NavigationIcon, selected: bool) -> AnyElement {
     let color = format!(
         "#{:06x}",
@@ -91,7 +91,8 @@ fn navigation_icon(icon: NavigationIcon, selected: bool) -> AnyElement {
 }
 
 /// The one inline icon set. On macOS every icon is a line-weight SF Symbol at
-/// medium weight; Linux, without SF Symbols, falls back to a matching glyph.
+/// medium weight; Linux, without SF Symbols, falls back to a matching glyph,
+/// and Windows draws the matching Segoe Fluent Icons glyph.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icon {
     ArrowRight,
@@ -138,6 +139,19 @@ impl Icon {
             Self::Plus => "+",
         }
     }
+
+    #[cfg(target_os = "windows")]
+    fn fluent_glyph(self) -> &'static str {
+        match self {
+            Self::ArrowRight => "\u{E72A}",
+            Self::ChevronDown => "\u{E70D}",
+            Self::Close => "\u{E711}",
+            Self::DragHandle => "\u{E700}",
+            Self::Ellipsis => "\u{E712}",
+            Self::Globe => "\u{E774}",
+            Self::Plus => "\u{E710}",
+        }
+    }
 }
 
 /// An inline icon at [`ICON_SIZE_SMALL`] (optically matched) in `color`.
@@ -177,6 +191,24 @@ pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
         })
         .text_color(rgb(color))
         .child(icon.glyph())
+        .into_any_element()
+}
+
+/// An inline icon at [`ICON_SIZE_SMALL`] (optically matched) in `color`.
+#[cfg(target_os = "windows")]
+pub(crate) fn icon(icon: Icon, color: u32) -> AnyElement {
+    let size = icon.optical_size();
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(crate::windows_ui::fluent_icon(
+            icon.fluent_glyph(),
+            size,
+            color,
+        ))
         .into_any_element()
 }
 
@@ -1021,6 +1053,41 @@ pub(crate) fn segmented_item(selected: bool) -> Div {
         .when(!selected, |item| {
             item.hover(|item| item.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_SECONDARY)))
         })
+}
+
+/// A continuous value's track, filled to `fraction` with a round knob. Callers
+/// size it, own hit-testing, and map pointer positions to values.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn slider_track(fraction: f32) -> Div {
+    let fraction = fraction.clamp(0.0, 1.0);
+    let knob = SLIDER_KNOB_SIZE;
+    div()
+        .relative()
+        .h(px(SLIDER_TRACK_HEIGHT))
+        .rounded_full()
+        .bg(rgb(LINE_STRONG))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .h_full()
+                .w(relative(fraction))
+                .rounded_full()
+                .bg(rgb(ACCENT)),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px((SLIDER_TRACK_HEIGHT - knob) / 2.0))
+                .left(relative(fraction))
+                .ml(px(-knob / 2.0))
+                .size(px(knob))
+                .rounded_full()
+                .border_2()
+                .border_color(rgb(CANVAS))
+                .bg(rgb(ACCENT)),
+        )
 }
 
 /// A [`segmented_control`] whose selection indicator slides between items.

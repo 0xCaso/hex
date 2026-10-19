@@ -984,29 +984,7 @@ fn run_processor_worker(
                 });
             },
         );
-        if !processed.transformations.is_empty() && !job.control.is_cancelled() {
-            let started = Instant::now();
-            let transformed = transformations.transform(
-                &processed.transformations,
-                &processed.text,
-                &job.context,
-                &job.control.cancelled,
-            );
-            let observation = processed
-                .observation
-                .get_or_insert_with(|| ProcessingObservation {
-                    profile: "Custom transformations".into(),
-                    latency_ms: 0,
-                    fallback: None,
-                });
-            observation.latency_ms = observation
-                .latency_ms
-                .saturating_add(started.elapsed().as_millis() as u64);
-            match transformed {
-                Ok(text) => processed.text = text,
-                Err(error) => observation.fallback = Some(error),
-            }
-        }
+        processed.apply_transformations(transformations, &job.context, &job.control.cancelled);
         if job.control.is_cancelled() {
             let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
             continue;

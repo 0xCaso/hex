@@ -1,12 +1,14 @@
-use color_eyre::Result;
+//! The Windows Settings window's snapshot-and-action contract with the
+//! in-process runtime it drives. Linux has its own service contract in
+//! `desktop_host`; macOS commits its settings directly.
 
 use crate::desktop_activity::DesktopActivity;
 use crate::transcription_models::{
     ModelPreparationStage, TranscriptionModelId, TranscriptionSelection,
 };
 
+/// The panes the Windows shell implements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) struct DesktopCapabilities {
     pub(crate) activity: bool,
     pub(crate) commands: bool,
@@ -21,40 +23,6 @@ pub(crate) struct DesktopCapabilities {
 }
 
 impl DesktopCapabilities {
-    #[cfg(target_os = "macos")]
-    pub(crate) const fn macos(developer_features: bool) -> Self {
-        Self {
-            activity: developer_features,
-            commands: true,
-            history: true,
-            hud_lab: developer_features,
-            meetings: developer_features,
-            modes: true,
-            replacements: true,
-            listener_control: false,
-            update_restart: false,
-            voice_action: true,
-        }
-    }
-
-    #[cfg(any(target_os = "linux", test))]
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
-    pub(crate) const fn linux_x11() -> Self {
-        Self {
-            activity: true,
-            commands: false,
-            history: true,
-            hud_lab: crate::DEVELOPER_FEATURES_ENABLED,
-            meetings: false,
-            modes: true,
-            replacements: true,
-            listener_control: true,
-            update_restart: true,
-            voice_action: true,
-        }
-    }
-
-    #[cfg(target_os = "windows")]
     pub(crate) const fn windows() -> Self {
         Self {
             activity: true,
@@ -74,6 +42,10 @@ impl DesktopCapabilities {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DesktopSnapshot {
     pub(crate) activity: DesktopActivity,
+    /// The current session's completed transcripts, newest first.
+    pub(crate) transcripts: Vec<String>,
+    /// The newest dictation failure, until a later transcript completes.
+    pub(crate) last_failure: Option<String>,
     pub(crate) dictation_shortcut: Vec<String>,
     pub(crate) dictation_shortcut_label: String,
     pub(crate) double_tap_lock: bool,
@@ -111,13 +83,12 @@ pub(crate) struct DesktopListenerSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) enum DesktopUpdateStatus {
     Unavailable,
     Checking,
     Current,
     Failed,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     Available,
     ReadyToRestart,
 }
@@ -148,90 +119,101 @@ pub(crate) enum DesktopAction {
     StopListening,
 }
 
-pub(crate) trait DesktopHost {
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
-    fn capabilities(&self) -> DesktopCapabilities;
-    fn snapshot(&self) -> DesktopSnapshot;
-    fn dispatch(&mut self, action: DesktopAction) -> Result<()>;
+const TRANSCRIPT_LIMIT: usize = 8;
+
+/// The current session's completed transcripts, newest first, with their
+/// timestamps. `events` is oldest first, as `EventReader` keeps them.
+pub(crate) fn recent_transcripts<'a>(
+    events: impl DoubleEndedIterator<Item = &'a crate::events::VoiceEvent>,
+) -> Vec<(u64, String)> {
+    use crate::events::{TranscriptPhase, VoiceEvent};
+    let mut transcripts = Vec::new();
+    for event in events.rev() {
+        match event {
+            VoiceEvent::SessionStarted { .. } => break,
+            VoiceEvent::Transcript {
+                timestamp_ms,
+                phase: TranscriptPhase::Completed,
+                text,
+                ..
+            } if !text.trim().is_empty() => {
+                transcripts.push((*timestamp_ms, text.clone()));
+                if transcripts.len() == TRANSCRIPT_LIMIT {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    transcripts
+}
+
+/// The newest failure, hidden once a later transcript completed, so a silent
+/// failure still reaches the Settings window without sticking around.
+pub(crate) fn visible_failure(
+    activity: &DesktopActivity,
+    transcripts: &[(u64, String)],
+) -> Option<String> {
+    activity
+        .last_failure
+        .as_ref()
+        .filter(|(failed_at, _)| {
+            transcripts
+                .first()
+                .is_none_or(|(completed_at, _)| completed_at < failed_at)
+        })
+        .map(|(_, message)| message.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{TranscriptPhase, VoiceEvent};
 
-    fn owns_host_object(_: Box<dyn DesktopHost>) {}
-
-    struct TestHost;
-
-    impl DesktopHost for TestHost {
-        fn capabilities(&self) -> DesktopCapabilities {
-            DesktopCapabilities::linux_x11()
-        }
-
-        fn snapshot(&self) -> DesktopSnapshot {
-            DesktopSnapshot {
-                activity: DesktopActivity::default(),
-                dictation_shortcut: Vec::new(),
-                dictation_shortcut_label: String::new(),
-                double_tap_lock: false,
-                double_tap_only: false,
-                shortcut_mode: crate::dictation::ShortcutMode::Hold,
-                microphone: DesktopMicrophoneSnapshot {
-                    devices: Vec::new(),
-                    error: None,
-                    selected: None,
-                },
-                paste_last_shortcut: None,
-                listener: None,
-                operation_error: None,
-                observations_path: String::new(),
-                transcription: DesktopTranscriptionSnapshot {
-                    downloaded_bytes: 0,
-                    error: None,
-                    preparation_stage: None,
-                    selection: TranscriptionSelection::default(),
-                    preparing: None,
-                },
-                update_status: DesktopUpdateStatus::Unavailable,
-            }
-        }
-
-        fn dispatch(&mut self, _: DesktopAction) -> Result<()> {
-            Ok(())
+    fn transcript(timestamp_ms: u64, text: &str) -> VoiceEvent {
+        VoiceEvent::Transcript {
+            timestamp_ms,
+            phase: TranscriptPhase::Completed,
+            latency_ms: 10,
+            text: text.into(),
         }
     }
 
     #[test]
-    fn host_can_be_contained_by_the_shared_window() {
-        owns_host_object(Box::new(TestHost));
+    fn recent_transcripts_are_bounded_newest_first_and_session_scoped() {
+        let mut events = vec![
+            transcript(1, "Old session"),
+            VoiceEvent::SessionStarted { timestamp_ms: 2 },
+        ];
+        events.extend((0..10).map(|index| transcript(index + 3, &format!("Transcript {index}"))));
+        events.push(VoiceEvent::Transcript {
+            timestamp_ms: 14,
+            phase: TranscriptPhase::Updated,
+            latency_ms: 10,
+            text: "Partial".into(),
+        });
+
+        let transcripts = recent_transcripts(events.iter());
+
+        assert_eq!(transcripts.len(), TRANSCRIPT_LIMIT);
+        assert_eq!(transcripts[0].1, "Transcript 9");
+        assert_eq!(transcripts[7].1, "Transcript 2");
     }
 
     #[test]
-    fn linux_exposes_only_implemented_product_capabilities() {
-        // Activity shipped on Linux in the 2026-08 port wave. HUD Lab is
-        // visible only in developer builds. The command runtime prototype
-        // remains a Settings opt-in; it does not advertise the catalog pane.
-        // EWMH application context, mode processing, transformations, and
-        // PRIMARY-selection Voice Action are source-complete; physical Arch/i3
-        // validation remains separate from capability availability.
+    fn newest_failure_shows_until_a_later_transcript_completes() {
+        let activity = DesktopActivity {
+            last_failure: Some((5, "OpenCode generation failed".into())),
+            ..DesktopActivity::default()
+        };
+
         assert_eq!(
-            DesktopCapabilities::linux_x11(),
-            DesktopCapabilities {
-                activity: true,
-                commands: false,
-                history: true,
-                hud_lab: crate::DEVELOPER_FEATURES_ENABLED,
-                meetings: false,
-                modes: true,
-                replacements: true,
-                listener_control: true,
-                update_restart: true,
-                voice_action: true,
-            }
+            visible_failure(&activity, &[(4, "Earlier".into())]).as_deref(),
+            Some("OpenCode generation failed")
         );
+        assert_eq!(visible_failure(&activity, &[(6, "Recovered".into())]), None);
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn windows_exposes_the_managed_update_restart_action() {
         assert!(DesktopCapabilities::windows().update_restart);

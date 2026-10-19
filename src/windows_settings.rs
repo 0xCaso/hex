@@ -21,7 +21,7 @@ pub struct WindowsSettings {
     pub shortcut_mode: crate::dictation::ShortcutMode,
     pub paste_last_hotkey: Option<WindowsHotkey>,
     pub voice_action_hotkey: Option<WindowsHotkey>,
-    pub voice_action_model: Option<crate::opencode::Model>,
+    pub voice_action_model: Option<crate::dictation_processor::Model>,
     pub double_tap_lock: bool,
     pub double_tap_only: bool,
     pub while_dictating: WhileDictating,
@@ -32,7 +32,7 @@ pub struct WindowsSettings {
     pub history_retention: crate::history::HistoryRetention,
     pub text_replacements: Vec<crate::text_replacements::TextReplacement>,
     /// Global rewrite profile used when no contextual mode matches.
-    pub dictation_post_processing: crate::dictation_processing::PostProcessingSettings,
+    pub dictation_post_processing: crate::dictation_processor::PostProcessingSettings,
     /// Ordered final transformation IDs for the global fallback profile.
     pub dictation_transformations: Vec<String>,
     pub modes: Vec<WindowsMode>,
@@ -52,7 +52,7 @@ pub struct WindowsMode {
     /// "x.com", "github.com"); case-insensitive, trailing dots ignored.
     pub websites: Vec<String>,
     pub corrections: Vec<crate::text_replacements::TextReplacement>,
-    pub post_processing: crate::dictation_processing::PostProcessingSettings,
+    pub post_processing: crate::dictation_processor::PostProcessingSettings,
     pub transformations: Vec<String>,
 }
 
@@ -157,7 +157,7 @@ impl Default for WindowsSettings {
             history_retention: crate::history::HistoryRetention::default(),
             modes: Vec::new(),
             text_replacements: Vec::new(),
-            dictation_post_processing: crate::dictation_processing::PostProcessingSettings::default(
+            dictation_post_processing: crate::dictation_processor::PostProcessingSettings::default(
             ),
             dictation_transformations: Vec::new(),
             transcription: recommended_selection(&user_language()),
@@ -455,11 +455,11 @@ mod tests {
         assert!(!settings.dictation_post_processing.enabled);
         assert_eq!(
             settings.dictation_post_processing,
-            crate::dictation_processing::PostProcessingSettings::default()
+            crate::dictation_processor::PostProcessingSettings::default()
         );
         assert_eq!(
             settings.modes[0].post_processing,
-            crate::dictation_processing::PostProcessingSettings::default()
+            crate::dictation_processor::PostProcessingSettings::default()
         );
         assert!(settings.dictation_transformations.is_empty());
         assert!(settings.modes[0].transformations.is_empty());
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn mode_processing_round_trips_with_windows_settings() {
-        let processing = crate::dictation_processing::PostProcessingSettings {
+        let processing = crate::dictation_processor::PostProcessingSettings {
             enabled: true,
             prompt: "Keep code identifiers exact.".into(),
             model: Some("openai/gpt-5.6-sol".into()),

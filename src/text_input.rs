@@ -61,12 +61,13 @@ actions!(
 /// Emitted after keyboard, clipboard, or input-method editing changes the text.
 pub struct Changed;
 pub struct Submitted;
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct Navigate(pub i32);
 pub struct Dismissed;
 
 /// Key bindings required by [`TextInput`].
 pub fn key_bindings() -> Vec<KeyBinding> {
-    vec![
+    let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
         KeyBinding::new("delete", Delete, Some("TextInput")),
         KeyBinding::new("left", Left, Some("TextInput")),
@@ -83,14 +84,6 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-alt-right", SelectWordRight, Some("TextInput")),
         KeyBinding::new("cmd-left", LineStart, Some("TextInput")),
         KeyBinding::new("cmd-right", LineEnd, Some("TextInput")),
-        KeyBinding::new("ctrl-a", LineStart, Some("TextInput")),
-        KeyBinding::new("ctrl-e", LineEnd, Some("TextInput")),
-        KeyBinding::new("ctrl-b", Left, Some("TextInput")),
-        KeyBinding::new("ctrl-f", Right, Some("TextInput")),
-        KeyBinding::new("ctrl-p", Up, Some("TextInput")),
-        KeyBinding::new("ctrl-n", Down, Some("TextInput")),
-        KeyBinding::new("ctrl-d", Delete, Some("TextInput")),
-        KeyBinding::new("ctrl-h", Backspace, Some("TextInput")),
         KeyBinding::new("shift-cmd-left", SelectLineStart, Some("TextInput")),
         KeyBinding::new("shift-cmd-right", SelectLineEnd, Some("TextInput")),
         KeyBinding::new("cmd-up", DocumentStart, Some("TextInput")),
@@ -111,7 +104,43 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-z", Undo, Some("TextInput")),
         KeyBinding::new("shift-cmd-z", Redo, Some("TextInput")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextInput")),
-    ]
+    ];
+    // Emacs-style Control editing on macOS; Windows keeps Control for its
+    // standard editing shortcuts.
+    #[cfg(not(target_os = "windows"))]
+    bindings.extend([
+        KeyBinding::new("ctrl-a", LineStart, Some("TextInput")),
+        KeyBinding::new("ctrl-e", LineEnd, Some("TextInput")),
+        KeyBinding::new("ctrl-b", Left, Some("TextInput")),
+        KeyBinding::new("ctrl-f", Right, Some("TextInput")),
+        KeyBinding::new("ctrl-p", Up, Some("TextInput")),
+        KeyBinding::new("ctrl-n", Down, Some("TextInput")),
+        KeyBinding::new("ctrl-d", Delete, Some("TextInput")),
+        KeyBinding::new("ctrl-h", Backspace, Some("TextInput")),
+    ]);
+    #[cfg(target_os = "windows")]
+    bindings.extend([
+        KeyBinding::new("ctrl-a", SelectAll, Some("TextInput")),
+        KeyBinding::new("ctrl-v", Paste, Some("TextInput")),
+        KeyBinding::new("ctrl-c", Copy, Some("TextInput")),
+        KeyBinding::new("ctrl-x", Cut, Some("TextInput")),
+        KeyBinding::new("ctrl-z", Undo, Some("TextInput")),
+        KeyBinding::new("ctrl-y", Redo, Some("TextInput")),
+        KeyBinding::new("shift-ctrl-z", Redo, Some("TextInput")),
+        KeyBinding::new("ctrl-left", WordLeft, Some("TextInput")),
+        KeyBinding::new("ctrl-right", WordRight, Some("TextInput")),
+        KeyBinding::new("shift-ctrl-left", SelectWordLeft, Some("TextInput")),
+        KeyBinding::new("shift-ctrl-right", SelectWordRight, Some("TextInput")),
+        KeyBinding::new("ctrl-backspace", DeleteWordBackward, Some("TextInput")),
+        KeyBinding::new("ctrl-delete", DeleteWordForward, Some("TextInput")),
+        KeyBinding::new("ctrl-home", DocumentStart, Some("TextInput")),
+        KeyBinding::new("ctrl-end", DocumentEnd, Some("TextInput")),
+        KeyBinding::new("shift-home", SelectLineStart, Some("TextInput")),
+        KeyBinding::new("shift-end", SelectLineEnd, Some("TextInput")),
+        KeyBinding::new("shift-ctrl-home", SelectDocumentStart, Some("TextInput")),
+        KeyBinding::new("shift-ctrl-end", SelectDocumentEnd, Some("TextInput")),
+    ]);
+    bindings
 }
 
 /// A native GPUI text input with single-line and wrapped multiline modes.
@@ -130,7 +159,9 @@ pub struct TextInput {
     mouse_selection: Option<MouseSelection>,
     preferred_x: Option<Pixels>,
     multiline: bool,
+    height: Pixels,
     picker: bool,
+    read_only: bool,
     history: EditHistory,
 }
 
@@ -251,6 +282,7 @@ impl MultilineLayout {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 impl TextInput {
     pub fn new(
         cx: &mut Context<Self>,
@@ -274,6 +306,32 @@ impl TextInput {
         initial: impl AsRef<str>,
     ) -> Self {
         Self::with_mode(cx, placeholder, initial.as_ref(), true, false)
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn multiline_with_height(
+        cx: &mut Context<Self>,
+        placeholder: impl Into<SharedString>,
+        initial: impl AsRef<str>,
+        height: Pixels,
+    ) -> Self {
+        let mut input = Self::with_mode(cx, placeholder, initial.as_ref(), true, false);
+        input.height = height;
+        input
+    }
+
+    /// Selectable, copyable text that cannot be edited, drawn without the
+    /// input box.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn read_only_multiline(
+        cx: &mut Context<Self>,
+        text: impl AsRef<str>,
+        height: Pixels,
+    ) -> Self {
+        let mut input = Self::with_mode(cx, "", text.as_ref(), true, false);
+        input.height = height;
+        input.read_only = true;
+        input
     }
 
     fn with_mode(
@@ -300,7 +358,13 @@ impl TextInput {
             mouse_selection: None,
             preferred_x: None,
             multiline,
+            height: px(if multiline {
+                MULTILINE_INPUT_HEIGHT
+            } else {
+                CONTROL_HEIGHT
+            }),
             picker,
+            read_only: false,
             history: EditHistory::default(),
         }
     }
@@ -813,6 +877,9 @@ impl TextInput {
         marked_selection_utf16: Option<Range<usize>>,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -1125,7 +1192,7 @@ impl Element for TextElement {
                 scroll_y = caret.y + layout.line_height - bounds.size.height + margin;
             }
             scroll_y = scroll_y.min((layout.size().height - bounds.size.height).max(px(0.)));
-            let cursor = selected_range.is_empty().then(|| {
+            let cursor = (!input.read_only && selected_range.is_empty()).then(|| {
                 fill(
                     Bounds::new(
                         point(bounds.left() + caret.x, bounds.top() + caret.y - scroll_y),
@@ -1370,18 +1437,17 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .h(px(if self.multiline {
-                MULTILINE_INPUT_HEIGHT
-            } else {
-                CONTROL_HEIGHT
-            }))
-            .px_2p5()
-            .py(px((CONTROL_HEIGHT - 2.0 - BODY.line_height) / 2.0))
+            .h(self.height)
+            .when(!self.read_only, |input| {
+                input
+                    .px_2p5()
+                    .py(px((CONTROL_HEIGHT - 2.0 - BODY.line_height) / 2.0))
+                    .rounded(RADIUS_CONTROL)
+                    .border_1()
+                    .border_color(rgb(border))
+                    .bg(rgb(CANVAS))
+            })
             .overflow_hidden()
-            .rounded(RADIUS_CONTROL)
-            .border_1()
-            .border_color(rgb(border))
-            .bg(rgb(CANVAS))
             .text_color(rgb(TEXT_PRIMARY))
             .text_body()
             .child(TextElement { input: cx.entity() })

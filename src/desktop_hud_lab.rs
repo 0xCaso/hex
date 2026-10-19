@@ -12,22 +12,21 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::design_tokens::*;
+use crate::desktop_i18n::tr;
+use crate::desktop_ui::{
+    ButtonKind, button, pane_content, pane_header_with_action, slider_track, small_button,
+};
 use gpui::{
     AnyElement, Bounds, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     RenderImage, Window, canvas, div, img, prelude::*, px, rgb,
 };
 
-use crate::desktop_i18n::tr;
 pub(crate) use crate::desktop_indicator_model::HudTuning;
 use crate::desktop_indicator_model::{
     DictationIndicatorEvent, IndicatorModel, WINDOW_HEIGHT, WINDOW_WIDTH,
 };
 use crate::desktop_indicator_shader as indicator_shader;
-use crate::desktop_ui::{
-    LINE, MUTED, PANEL_RADIUS, SURFACE, SURFACE_HOVER, SURFACE_SELECTED, TEXT, TEXT_SOFT,
-    accent_color, compact_button, header_button, pane_content, pane_header_with_action,
-    slider_track,
-};
 
 /// The mac HUD's backing scale; the preview renders at 224x128 like the
 /// macOS Metal drawable and the Windows HUD window.
@@ -404,10 +403,10 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(PANEL_RADIUS))
+        .rounded(RADIUS_PANEL)
         .border_1()
         .border_color(rgb(LINE))
-        .bg(rgb(0x0d0d0d))
+        .bg(rgb(SIDEBAR))
         .child(
             img(preview)
                 .w(px(WINDOW_WIDTH))
@@ -416,10 +415,12 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
         );
 
     let state_button = |demo_state: HudDemoState, label: &'static str, index: usize| {
-        compact_button(tr(label))
+        small_button(ButtonKind::Secondary, tr(label))
             .id(("hud-lab-state", index))
             .when(demo == demo_state, |button| {
-                button.bg(rgb(SURFACE_SELECTED)).text_color(rgb(TEXT))
+                button
+                    .bg(rgb(SURFACE_SELECTED))
+                    .text_color(rgb(TEXT_PRIMARY))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.hud_lab_mut().set_demo(demo_state);
@@ -427,10 +428,12 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
             }))
     };
     let queue_buttons = (0..=3_usize).map(|count| {
-        compact_button(count.to_string())
+        small_button(ButtonKind::Secondary, count.to_string())
             .id(("hud-lab-queue", count))
             .when(queued == count, |button| {
-                button.bg(rgb(SURFACE_SELECTED)).text_color(rgb(TEXT))
+                button
+                    .bg(rgb(SURFACE_SELECTED))
+                    .text_color(rgb(TEXT_PRIMARY))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.hud_lab_mut().set_queued(count);
@@ -450,31 +453,22 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
                 .flex()
                 .flex_col()
                 .gap_1()
-                .rounded_md()
+                .rounded(RADIUS_CONTROL)
                 .border_1()
-                .border_color(if selected {
-                    rgb(accent_color())
-                } else {
-                    rgb(LINE)
-                })
+                .border_color(if selected { rgb(ACCENT) } else { rgb(LINE) })
                 .bg(rgb(if selected { SURFACE_SELECTED } else { SURFACE }))
                 .hover(|card| card.bg(rgb(SURFACE_HOVER)))
+                .child(div().text_caption().text_color(rgb(ACCENT)).child(key))
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(accent_color()))
-                        .child(key),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
+                        .text_footnote()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(tr(name)),
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(MUTED))
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child(tr(description)),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -497,9 +491,9 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
                 div()
                     .flex()
                     .justify_between()
-                    .text_size(px(12.0))
+                    .text_footnote()
                     .child(tr(label))
-                    .child(div().text_color(rgb(MUTED)).child(display)),
+                    .child(div().text_color(rgb(TEXT_TERTIARY)).child(display)),
             )
             .child(
                 div()
@@ -540,7 +534,7 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
                             cx.notify();
                         }),
                     )
-                    .child(slider_track(value))
+                    .child(slider_track(value).w_full())
                     .child(
                         canvas(
                             move |bounds, _, cx| {
@@ -563,12 +557,12 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
 
     let preset_box = div()
         .p_3()
-        .rounded_md()
+        .rounded(RADIUS_CONTROL)
         .border_1()
         .border_color(rgb(LINE))
-        .bg(rgb(0x0d0d0d))
-        .text_size(px(10.0))
-        .text_color(rgb(TEXT_SOFT))
+        .bg(rgb(SIDEBAR))
+        .text_caption()
+        .text_color(rgb(TEXT_SECONDARY))
         .child(preset_line(&tuning));
     #[cfg(target_os = "windows")]
     let preset_box = preset_box.font_family("Consolas");
@@ -580,13 +574,16 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
         .flex()
         .flex_col()
         .child(pane_header_with_action(
-            "HUD Lab",
+            tr("HUD Lab"),
             Some(
-                header_button(if copied {
-                    tr("Copied")
-                } else {
-                    tr("Copy preset")
-                })
+                button(
+                    ButtonKind::Secondary,
+                    if copied {
+                        tr("Copied")
+                    } else {
+                        tr("Copy preset")
+                    },
+                )
                 .id("hud-lab-copy-preset")
                 .on_click(cx.listener(|this, _, _, cx| {
                     if this.hud_lab_mut().copy_preset() {
@@ -617,8 +614,8 @@ pub(crate) fn render_hud_lab_pane<D: HudLabDelegate>(
                         .child(div().w_4())
                         .child(
                             div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(MUTED))
+                                .text_caption()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .child(tr("Queued")),
                         )
                         .children(queue_buttons),

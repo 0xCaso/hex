@@ -1,7 +1,6 @@
 //! The shared speech-model browser: the full runtime catalog with install
 //! state, a single-select language filter, download/verify/load progress,
-//! and uninstall. Both port shells (Windows and Linux) render this dialog;
-//! installing keeps the current dictation language when the model supports
+//! and uninstall. The Windows shell renders this dialog; installing keeps the current dictation language when the model supports
 //! it, otherwise falls back through automatic detection.
 
 use gpui::{
@@ -9,16 +8,15 @@ use gpui::{
     rgba,
 };
 
-use crate::desktop_host::DesktopTranscriptionSnapshot;
+use crate::design_tokens::*;
+use crate::desktop_i18n::{tr, tr_fill};
 use crate::desktop_transcription_picker::{
-    TranscriptionPickerDelegate, TranscriptionPickerProgress, TranscriptionPickerStatus,
+    ModelDeletion, TranscriptionPickerDelegate, TranscriptionPickerProgress,
+    TranscriptionPickerStatus,
 };
-use crate::desktop_ui::{
-    CANVAS, DIALOG_STROKE, DIVIDER, FAINT, LINE, MUTED, OVERLAY_PANEL, OVERLAY_SMOKE, PANEL_RADIUS,
-    SURFACE, SURFACE_HOVER, TEXT, TEXT_ON_ACCENT, accent_color, disclosure_button,
-    dropdown_backdrop, dropdown_item, dropdown_panel_with_width, error_message, header_button, tr,
-    tr_fill,
-};
+use crate::desktop_ui::{ButtonKind, Tone, button, disclosure_button, error_message, tag};
+use crate::windows_desktop_host::DesktopTranscriptionSnapshot;
+use crate::windows_ui::{dropdown_backdrop, dropdown_item, dropdown_panel_with_width};
 
 /// The catalog dialog's per-shell state and chrome. The picker delegate
 /// supplies choose/cancel/dismiss; this adds the language filter and the
@@ -40,18 +38,12 @@ pub(crate) trait ModelCatalogDelegate: TranscriptionPickerDelegate {
 
     /// The content of the per-row uninstall button.
     fn uninstall_control() -> AnyElement {
-        div()
-            .text_size(px(12.0))
-            .child(tr("Remove"))
-            .into_any_element()
+        div().text_footnote().child(tr("Remove")).into_any_element()
     }
 
     /// The content of the dialog's close button.
     fn close_control() -> AnyElement {
-        div()
-            .text_size(px(12.0))
-            .child(tr("Close"))
-            .into_any_element()
+        div().text_footnote().child(tr("Close")).into_any_element()
     }
 }
 
@@ -188,7 +180,10 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
             } else if active {
                 TranscriptionPickerStatus::Active
             } else {
-                TranscriptionPickerStatus::Available { installed }
+                TranscriptionPickerStatus::Available {
+                    installed,
+                    deletion: ModelDeletion::Unavailable,
+                }
             };
             let recommendation = recommendation_language.as_deref().and_then(|language| {
                 crate::transcription_models::choices_for_runtime(language)
@@ -206,23 +201,9 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                 })
             });
             let (control, progress_bar): (AnyElement, Option<AnyElement>) = match status {
-                TranscriptionPickerStatus::Active => (
-                    // Sized like header_button so the pill lines up with the
-                    // Use/Download controls on other rows.
-                    div()
-                        .h(px(32.0))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .rounded(px(4.0))
-                        .bg(rgb(accent_color()))
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_ON_ACCENT))
-                        .child(tr("Active"))
-                        .into_any_element(),
-                    None,
-                ),
+                TranscriptionPickerStatus::Active => {
+                    (tag(Tone::Accent, tr("Active")).into_any_element(), None)
+                }
                 TranscriptionPickerStatus::Preparing { label, progress } => (
                     div()
                         .flex()
@@ -230,12 +211,12 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                         .gap_3()
                         .child(
                             div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(MUTED))
+                                .text_footnote()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .child(label),
                         )
                         .child(
-                            header_button(tr("Cancel"))
+                            button(ButtonKind::Secondary, tr("Cancel"))
                                 .id(("model-catalog-cancel", index))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     cx.stop_propagation();
@@ -250,13 +231,13 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                                 .h_full()
                                 .w(relative(progress))
                                 .rounded_full()
-                                .bg(rgb(accent_color())),
+                                .bg(rgb(ACCENT)),
                             TranscriptionPickerProgress::Loading(progress) => div()
                                 .ml(relative(progress * 0.75))
                                 .h_full()
                                 .w(relative(0.25))
                                 .rounded_full()
-                                .bg(rgb(accent_color())),
+                                .bg(rgb(ACCENT)),
                         };
                         div()
                             .mt_2()
@@ -268,19 +249,22 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                             .into_any_element()
                     }),
                 ),
-                TranscriptionPickerStatus::Available { installed } => {
-                    let button = header_button(if another_preparing {
-                        tr("Preparing model")
-                    } else if installed {
-                        tr("Use")
-                    } else {
-                        tr("Download")
-                    })
+                TranscriptionPickerStatus::Available { installed, .. } => {
+                    let choose = button(
+                        ButtonKind::Secondary,
+                        if another_preparing {
+                            tr("Preparing model")
+                        } else if installed {
+                            tr("Use")
+                        } else {
+                            tr("Download")
+                        },
+                    )
                     .id(("model-catalog-choose", index));
-                    let button = if another_preparing {
-                        button
+                    let choose = if another_preparing {
+                        choose
                     } else {
-                        button.on_click(cx.listener(move |this, _, _, cx| {
+                        choose.on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             if let Some(language) = install_language.clone() {
                                 this.choose_transcription_model(definition.id, language, cx);
@@ -289,7 +273,7 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                         }))
                     };
                     let uninstall = installed.then(|| {
-                        header_button(D::uninstall_control())
+                        button(ButtonKind::Secondary, D::uninstall_control())
                             .id(("model-catalog-uninstall", index))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -307,7 +291,7 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                             .items_center()
                             .gap_2()
                             .children(uninstall)
-                            .child(button)
+                            .child(choose)
                             .into_any_element(),
                         None,
                     )
@@ -320,14 +304,10 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                 .flex_none()
                 .flex()
                 .flex_col()
-                .rounded(px(PANEL_RADIUS))
+                .rounded(RADIUS_PANEL)
                 .border_1()
-                .border_color(if active {
-                    rgb(accent_color())
-                } else {
-                    rgb(LINE)
-                })
-                .bg(rgb(SURFACE))
+                .border_color(rgb(if active { ACCENT_BORDER } else { LINE }))
+                .bg(rgb(if active { ACCENT_SURFACE } else { SURFACE }))
                 .hover(|row| row.bg(rgb(SURFACE_HOVER)))
                 .child(
                     div()
@@ -346,18 +326,18 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                                         .child(
                                             div()
                                                 .truncate()
-                                                .text_size(px(13.0))
+                                                .text_body()
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(TEXT))
+                                                .text_color(rgb(TEXT_PRIMARY))
                                                 .child(definition.name),
                                         )
                                         .when_some(recommendation, |name, recommendation| {
                                             name.child(
                                                 div()
                                                     .flex_none()
-                                                    .text_size(px(10.0))
+                                                    .text_caption()
                                                     .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(rgb(accent_color()))
+                                                    .text_color(rgb(ACCENT))
                                                     .child(recommendation),
                                             )
                                         }),
@@ -366,8 +346,8 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                                     div()
                                         .pt_1()
                                         .truncate()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(MUTED))
+                                        .text_caption()
+                                        .text_color(rgb(TEXT_TERTIARY))
                                         .child(detail),
                                 )
                                 .when_some(compatibility_note, |column, note| {
@@ -375,8 +355,8 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                                         div()
                                             .pt_1()
                                             .truncate()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(FAINT))
+                                            .text_caption()
+                                            .text_color(rgb(TEXT_TERTIARY))
                                             .child(note),
                                     )
                                 }),
@@ -405,7 +385,7 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgba(OVERLAY_SMOKE))
+        .bg(rgba(SCRIM))
         .on_click(cx.listener(|this, _, _, cx| {
             this.dismiss_transcription_picker(cx);
         }))
@@ -416,10 +396,10 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                 .h(dialog_height)
                 .flex()
                 .flex_col()
-                .rounded(px(8.0))
+                .rounded(RADIUS_PANEL)
                 .border_1()
-                .border_color(rgb(DIALOG_STROKE))
-                .bg(rgb(OVERLAY_PANEL))
+                .border_color(rgb(LINE_STRONG))
+                .bg(rgb(SURFACE))
                 .shadow_2xl()
                 .overflow_hidden()
                 .on_click(|_, _, cx| cx.stop_propagation())
@@ -433,13 +413,13 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                         .justify_between()
                         .gap_4()
                         .border_b_1()
-                        .border_color(rgb(DIVIDER))
+                        .border_color(rgb(LINE))
                         .child(
                             div()
                                 .min_w(px(0.0))
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(16.0))
+                                .text_headline()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(tr("Speech models")),
                         )
@@ -480,7 +460,7 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                                         ),
                                 )
                                 .child(
-                                    header_button(D::close_control())
+                                    button(ButtonKind::Secondary, D::close_control())
                                         .id("model-catalog-close")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.dismiss_transcription_picker(cx);
@@ -501,9 +481,10 @@ pub(crate) fn render_model_catalog<D: ModelCatalogDelegate>(
                         .children(sections)
                         .when_some(transcription.error.clone(), |list, error| {
                             list.child(
-                                div()
-                                    .w_full()
-                                    .child(error_message("Model could not be installed.", error)),
+                                div().w_full().child(error_message(
+                                    tr("Model could not be installed."),
+                                    error,
+                                )),
                             )
                         }),
                 ),

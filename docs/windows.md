@@ -109,7 +109,7 @@ cargo run -- app
 
 The Settings card reads **Enabled** when the shortcut works system-wide in every
 app and **Disabled** when it does nothing; its button and the tray's
-**Enable / Disable HEX** switch between them. HEX enables itself on launch by
+**Enable / Disable Hex** switch between them. HEX enables itself on launch by
 default (**Enable on launch**). The microphone records only while you dictate.
 Changing the
 transcription model, microphone, dictation shortcut, double-tap behavior, or
@@ -191,9 +191,16 @@ current-user startup registry, UI Automation, and Windows capture APIs.
 | Local transcription API and public TypeScript SDK host lifecycle on Windows | Missing; see Local Transcription Service |
 | Streaming finish with whole-clip fallback | Implemented on GPU devices with Parakeet Unified English |
 
-The shared visual tokens, navigation, pane scaffold, transcription picker,
-History presentation, mode processing and transformation cards, and text input
-are already reused.
+The Windows window uses the shared design system
+([design-system.md](design-system.md)): the same tokens, components, and text
+input as macOS, with Segoe Fluent Icons glyphs for inline icons. The sidebar
+runs the full window height as on macOS; the caption row above the content
+holds the window buttons, and the sidebar's part of it holds the app name.
+Mode processing, OpenCode rewriting, Voice Action, and transformations run
+through the same `dictation_processor` and `personal_commands` modules as
+macOS; Windows reaches OpenCode through the `opencode2 api` CLI. Like macOS,
+an unset OpenCode model tries the ranked recommended models before the
+OpenCode default.
 Remaining panes should be added only with their complete Windows behavior;
 empty look-alike screens do not count as parity.
 

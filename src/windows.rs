@@ -170,7 +170,7 @@ pub fn run(shutdown: &'static AtomicBool) -> Result<()> {
                 .transformations_enabled()
                 .then(|| {
                     crate::personal_commands::PersonalCommands::start(
-                        crate::commands_engine::CommandConfig::new(),
+                        crate::commands::CommandConfig::new(),
                         transformations.clone(),
                     )
                 })

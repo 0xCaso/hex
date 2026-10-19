@@ -1,20 +1,24 @@
+#[cfg(target_os = "macos")]
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::{error, fmt};
 
-use color_eyre::eyre::{Result, WrapErr, eyre};
+#[cfg(target_os = "macos")]
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::{Result, eyre};
 
 #[cfg(test)]
 pub use crate::command_grammar::CapturedCount;
 pub(crate) use crate::command_grammar::phrase_placeholder;
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
 pub use crate::command_grammar::{
     CapturedValue, CapturedValues, Command, ConfiguredCommand, Count, Digit, Direction,
     PersonalCapture,
 };
 pub use crate::context::ContextSelector as ContextPredicate;
 use crate::context::ContextSnapshot;
-use crate::keyboard::{Key, Modifiers};
+use crate::keys::{Key, Modifiers};
 use crate::spoken_text::normalize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -450,6 +454,7 @@ impl Action {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn execute(action: Action) -> Result<()> {
     let mut command = ProcessCommand::new("/usr/bin/open");
     match action {
@@ -485,6 +490,54 @@ pub fn execute(action: Action) -> Result<()> {
     checked_status(&mut command, "macOS open")
 }
 
+/// Opens applications, URLs, and paths through the shell; Windows has no
+/// keystroke synthesis for commands yet.
+#[cfg(target_os = "windows")]
+pub fn execute(action: Action) -> Result<()> {
+    match action {
+        Action::StartDictation
+        | Action::StartMeeting
+        | Action::StopMeeting
+        | Action::InvokeHandler { .. } => Err(eyre!("interactive actions require the HEX app")),
+        Action::OpenApplication(target) | Action::OpenUrl(target) | Action::OpenPath(target) => {
+            shell_open(&target)
+        }
+        Action::TypeText(_) | Action::Keystroke { .. } | Action::RepeatedKeystroke { .. } => {
+            Err(eyre!("keystroke actions are not available on Windows"))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn shell_open(target: &str) -> Result<()> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (verb, file) = (wide("open"), wide(target));
+    // The target is passed as one argument, never through a command shell.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW reports success as a value greater than 32.
+    if result as isize > 32 {
+        Ok(())
+    } else {
+        Err(eyre!(
+            "Windows could not open {target} ({})",
+            result as isize
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn checked_status(command: &mut ProcessCommand, operation: &str) -> Result<()> {
     let status = command
         .stdout(Stdio::null())

@@ -30,7 +30,7 @@ const BROWSER_STEMS: &[&str] = &[
 
 const URL_READ_DEADLINE: Duration = Duration::from_millis(300);
 
-pub type WindowsContext = crate::command_context::ContextSnapshot;
+pub type WindowsContext = crate::context::ContextSnapshot;
 
 /// A context read in flight: the application stem is immediate, the UIA
 /// URL read proceeds on a helper thread while the caller transcribes.

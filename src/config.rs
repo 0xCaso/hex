@@ -3,7 +3,7 @@ use std::sync::{OnceLock, RwLock};
 use crate::app_settings::DictationProcessingSettings;
 use crate::commands::{Action, Command, CommandConfig, ConfiguredCommand, Count, Digit, Direction};
 use crate::dictation_processor::{Profile, Profiles};
-use crate::keyboard::{Key, Modifiers};
+use crate::keys::{Key, Modifiers};
 
 pub const INPUT_DEVICES: &[&str] = &["Universal Audio Thunderbolt", "Studio Display Microphone"];
 static DICTATION_PROFILES: OnceLock<RwLock<Profiles>> = OnceLock::new();

@@ -12,11 +12,10 @@ use gpui::{
     prelude::*, px, rgb,
 };
 
+use crate::design_tokens::*;
+use crate::desktop_i18n::tr;
 use crate::desktop_mode_list::{ModeTarget, render_application_icon};
-use crate::desktop_ui::{
-    CANVAS, CONTROL_HEIGHT, FAINT, LINE, MUTED, NEGATIVE, SURFACE, SURFACE_HOVER, SURFACE_SELECTED,
-    TEXT, TEXT_SOFT, compact_button, compact_panel, compact_plus_button, settings_copy, tr,
-};
+use crate::desktop_ui::{ButtonKind, Icon, icon_button, panel, settings_copy, small_button};
 use crate::text_input::TextInput;
 
 #[derive(Clone)]
@@ -92,7 +91,7 @@ pub(crate) fn render_mode_basics<T: ModeBasicsDelegate>(
     cx: &mut Context<T>,
 ) -> AnyElement {
     match view {
-        ModeBasicsView::Global { title, description } => compact_panel()
+        ModeBasicsView::Global { title, description } => panel()
             .child(
                 div()
                     .w_full()
@@ -114,7 +113,7 @@ pub(crate) fn render_mode_basics<T: ModeBasicsDelegate>(
         } => {
             let target_id = target.id_fragment();
             let remove = remove_mode.then(|| {
-                compact_button(tr("Remove mode"))
+                small_button(ButtonKind::Secondary, tr("Remove mode"))
                     .id(SharedString::from(format!("remove-mode-{target_id}")))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.handle_mode_basics_action(
@@ -125,7 +124,7 @@ pub(crate) fn render_mode_basics<T: ModeBasicsDelegate>(
                     }))
                     .into_any_element()
             });
-            compact_panel()
+            panel()
                 .child(
                     div()
                         .w_full()
@@ -140,9 +139,9 @@ pub(crate) fn render_mode_basics<T: ModeBasicsDelegate>(
                         .border_color(rgb(LINE))
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_footnote()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(TEXT_PRIMARY))
                                 .child(tr("Name")),
                         )
                         .child(
@@ -214,15 +213,15 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                 .flex()
                 .items_center()
                 .gap_1()
-                .rounded_sm()
+                .rounded(RADIUS_SMALL)
                 .bg(rgb(SURFACE_SELECTED))
                 .border_1()
                 .border_color(rgb(LINE))
                 .child(render_application_icon(application.icon, &name, 20.0))
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(TEXT_SOFT))
+                        .text_caption()
+                        .text_color(rgb(TEXT_SECONDARY))
                         .child(name),
                 )
                 .child(
@@ -234,10 +233,14 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded_sm()
-                        .text_size(px(14.0))
-                        .text_color(rgb(FAINT))
-                        .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_SOFT)))
+                        .rounded(RADIUS_SMALL)
+                        .text_body()
+                        .text_color(rgb(TEXT_TERTIARY))
+                        .hover(|button| {
+                            button
+                                .bg(rgb(SURFACE_HOVER))
+                                .text_color(rgb(TEXT_SECONDARY))
+                        })
                         .child("×")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.handle_mode_basics_action(
@@ -285,15 +288,15 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                         .gap_1()
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_footnote()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT_SOFT))
+                                .text_color(rgb(TEXT_SECONDARY))
                                 .child(name),
                         )
                         .child(
                             div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(FAINT))
+                                .text_caption()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .overflow_hidden()
                                 .child(application.location),
                         ),
@@ -317,7 +320,7 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
         div()
             .mt_2()
             .p_2()
-            .rounded_sm()
+            .rounded(RADIUS_SMALL)
             .border_1()
             .border_color(rgb(LINE))
             .bg(rgb(SURFACE))
@@ -327,8 +330,8 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                     div()
                         .px_2()
                         .py_3()
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child(status),
                 )
             })
@@ -356,9 +359,9 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                             .px_2()
                             .flex()
                             .items_center()
-                            .rounded_sm()
-                            .text_size(px(11.0))
-                            .text_color(rgb(TEXT_SOFT))
+                            .rounded(RADIUS_SMALL)
+                            .text_caption()
+                            .text_color(rgb(TEXT_SECONDARY))
                             .hover(|button| button.bg(rgb(SURFACE_HOVER)))
                             .child(view.choose_label)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -378,9 +381,9 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                             .px_2()
                             .flex()
                             .items_center()
-                            .rounded_sm()
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
+                            .rounded(RADIUS_SMALL)
+                            .text_caption()
+                            .text_color(rgb(TEXT_TERTIARY))
                             .hover(|button| button.bg(rgb(SURFACE_HOVER)))
                             .child(tr("Done"))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -408,8 +411,8 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                 .justify_between()
                 .gap_4()
                 .child(div().flex_1().min_w(px(0.0)).child(settings_copy(
-                    "Applications",
-                    "Switch when an app is frontmost",
+                    tr("Applications"),
+                    tr("Switch when an app is frontmost"),
                 )))
                 .child(
                     div()
@@ -425,7 +428,7 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                         .gap_1()
                         .children(selected_rows)
                         .child(
-                            compact_plus_button()
+                            icon_button(ButtonKind::Ghost, Icon::Plus)
                                 .id(SharedString::from(format!(
                                     "open-application-picker-{target_id}"
                                 )))
@@ -448,8 +451,8 @@ fn render_catalog_editor<T: ModeBasicsDelegate>(
                 div()
                     .px_3()
                     .pb_2()
-                    .text_size(px(10.0))
-                    .text_color(rgb(NEGATIVE))
+                    .text_caption()
+                    .text_color(rgb(DANGER))
                     .child(error),
             )
         })

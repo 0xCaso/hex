@@ -492,15 +492,7 @@ pub struct DictationMode {
     pub post_processing: DictationPostProcessing,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct DictationPostProcessing {
-    pub enabled: bool,
-    pub prompt: String,
-    pub model: Option<String>,
-    pub variant: Option<String>,
-    pub deadline_seconds: u64,
-}
+pub use crate::dictation_processor::PostProcessingSettings as DictationPostProcessing;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -522,24 +514,7 @@ impl Default for VoiceActionSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default)]
-pub struct TextReplacement {
-    pub matched_phrase: String,
-    pub output: String,
-}
-
-impl Default for DictationPostProcessing {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            prompt: "Rewrite the transcript into clear, natural text while preserving the speaker's intended meaning.".into(),
-            model: None,
-            variant: None,
-            deadline_seconds: 30,
-        }
-    }
-}
+pub use crate::text_replacements::TextReplacement;
 
 impl RecordingAudioBehavior {
     pub const ALL: [Self; 3] = [Self::Mute, Self::PauseMedia, Self::DoNothing];

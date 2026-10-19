@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::commands::{Action, CommandError, CommandInfo, CommandScope};
 use crate::context::{ContextSelector, ContextSnapshot};
-use crate::keyboard::Key;
+use crate::keys::Key;
 use crate::spoken_text::normalize;
 
 #[derive(Clone, Copy, Debug)]

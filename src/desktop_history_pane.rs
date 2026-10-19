@@ -9,10 +9,11 @@ use std::sync::Arc;
 
 use gpui::{AnyElement, Context, Entity, FontWeight, div, prelude::*, px, rgb};
 
+use crate::design_tokens::*;
+use crate::desktop_i18n::{event_age, tr};
 use crate::desktop_ui::{
-    CRITICAL, FAINT, LINE, MUTED, PANE_LIST_WIDTH, SUCCESS, SURFACE_HOVER, SURFACE_SELECTED,
-    TEXT_SOFT, compact_panel, empty_message, error_message, event_age, header_button, pane_body,
-    pane_content, pane_header_with_action, section_label, tr,
+    ButtonKind, button, empty_state, error_message, pane_body, pane_content,
+    pane_header_with_action, panel, section_label,
 };
 use crate::history::{History, HistoryEntry, HistoryRetention};
 use crate::text_input::TextInput;
@@ -264,19 +265,25 @@ pub(crate) fn render_history_pane<T: HistoryPaneDelegate>(
             .unwrap_or(0);
         all[(index + 1) % all.len()]
     };
-    let retention_control = header_button(format!("{}: {}", tr("Keep"), tr(retention.label())))
-        .id("history-retention")
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.handle_history_action(HistoryPaneAction::SetRetention(next_retention), cx);
-        }))
-        .into_any_element();
-    let clear = header_button(if view.clear_armed {
-        tr("Really clear all?")
-    } else {
-        tr("Clear all")
-    })
+    let retention_control = button(
+        ButtonKind::Secondary,
+        format!("{}: {}", tr("Keep"), tr(retention.label())),
+    )
+    .id("history-retention")
+    .on_click(cx.listener(move |this, _, _, cx| {
+        this.handle_history_action(HistoryPaneAction::SetRetention(next_retention), cx);
+    }))
+    .into_any_element();
+    let clear = button(
+        ButtonKind::Secondary,
+        if view.clear_armed {
+            tr("Really clear all?")
+        } else {
+            tr("Clear all")
+        },
+    )
     .id("history-clear")
-    .when(view.clear_armed, |button| button.text_color(rgb(CRITICAL)))
+    .when(view.clear_armed, |button| button.text_color(rgb(DANGER)))
     .on_click(cx.listener(|this, _, _, cx| {
         this.handle_history_action(HistoryPaneAction::Clear, cx);
     }))
@@ -326,24 +333,23 @@ pub(crate) fn render_history_pane<T: HistoryPaneDelegate>(
                         .child(
                             div()
                                 .w_full()
-                                .text_size(px(12.0))
-                                .text_color(rgb(TEXT_SOFT))
-                                .line_height(px(18.0))
+                                .text_footnote()
+                                .text_color(rgb(TEXT_SECONDARY))
                                 .truncate()
                                 .child(preview),
                         )
                         .child(
                             div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(FAINT))
+                                .text_caption()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .child(metadata),
                         ),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(10.0))
-                        .text_color(rgb(FAINT))
+                        .text_caption()
+                        .text_color(rgb(TEXT_TERTIARY))
                         .child(event_age(entry.timestamp_ms)),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -357,32 +363,32 @@ pub(crate) fn render_history_pane<T: HistoryPaneDelegate>(
         .size_full()
         .flex()
         .flex_col()
-        .child(pane_header_with_action("History", Some(header_action)))
+        .child(pane_header_with_action(tr("History"), Some(header_action)))
         .child(
             pane_body().px_8().pt_5().pb_7().child(
                 pane_content()
                     .flex_row()
                     .gap_5()
                     .child(
-                        compact_panel()
+                        panel()
                             .id("history-list")
                             .w(px(PANE_LIST_WIDTH))
                             .h_full()
                             .flex_none()
                             .overflow_y_scroll()
                             .when(retention.is_off(), |list| {
-                                list.child(empty_message(
+                                list.child(empty_state(tr(
                                     "History is off. New dictations are not retained.",
-                                ))
+                                )))
                             })
                             .when(
                                 !retention.is_off()
                                     && view.entries.is_empty()
                                     && view.error.is_none(),
-                                |list| list.child(empty_message("No dictations retained yet.")),
+                                |list| list.child(empty_state(tr("No dictations retained yet."))),
                             )
                             .when_some(view.error, |list, error| {
-                                list.child(error_message("History could not be loaded.", error))
+                                list.child(error_message(tr("History could not be loaded."), error))
                             })
                             .child(
                                 div()
@@ -393,7 +399,7 @@ pub(crate) fn render_history_pane<T: HistoryPaneDelegate>(
                             ),
                     )
                     .child(
-                        compact_panel()
+                        panel()
                             .flex_1()
                             .min_w(px(0.0))
                             .h_full()
@@ -447,14 +453,14 @@ fn render_history_detail<T: HistoryPaneDelegate>(
                         .gap_3()
                         .child(
                             div()
-                                .text_size(px(18.0))
+                                .text_headline()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(tr(entry.kind.label())),
                         )
                         .child(
                             div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(FAINT))
+                                .text_caption()
+                                .text_color(rgb(TEXT_TERTIARY))
                                 .child(event_age(entry.timestamp_ms)),
                         ),
                 )
@@ -465,18 +471,25 @@ fn render_history_detail<T: HistoryPaneDelegate>(
                         .items_center()
                         .gap_3()
                         .child(
-                            header_button(if copied { tr("Copied") } else { tr("Copy") })
-                                .id("history-copy")
-                                .when(copied, |button| button.text_color(rgb(SUCCESS)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            button(
+                                ButtonKind::Secondary,
+                                if copied { tr("Copied") } else { tr("Copy") },
+                            )
+                            .id("history-copy")
+                            .when(copied, |button| button.text_color(rgb(SUCCESS)))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     this.handle_history_action(HistoryPaneAction::Copy(id), cx);
-                                })),
+                                },
+                            )),
                         )
-                        .child(header_button(tr("Delete")).id("history-delete").on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.handle_history_action(HistoryPaneAction::Delete(id), cx);
-                            }),
-                        )),
+                        .child(
+                            button(ButtonKind::Secondary, tr("Delete"))
+                                .id("history-delete")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.handle_history_action(HistoryPaneAction::Delete(id), cx);
+                                })),
+                        ),
                 )
                 .child(
                     div()
@@ -484,7 +497,7 @@ fn render_history_detail<T: HistoryPaneDelegate>(
                         .pt_5()
                         .border_t_1()
                         .border_color(rgb(LINE))
-                        .child(section_label("Final text"))
+                        .child(section_label(tr("Final text")))
                         .when_some(view.detail_text.clone(), |detail, input| {
                             detail.child(div().pt_3().child(input))
                         }),
@@ -496,13 +509,12 @@ fn render_history_detail<T: HistoryPaneDelegate>(
                             .pt_5()
                             .border_t_1()
                             .border_color(rgb(LINE))
-                            .child(section_label("Raw transcript"))
+                            .child(section_label(tr("Raw transcript")))
                             .child(
                                 div()
                                     .pt_3()
-                                    .text_size(px(12.0))
-                                    .line_height(px(19.0))
-                                    .text_color(rgb(MUTED))
+                                    .text_footnote()
+                                    .text_color(rgb(TEXT_TERTIARY))
                                     .child(entry.raw_text.clone()),
                             ),
                     )
@@ -537,8 +549,8 @@ fn detail_placeholder(message: &'static str) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(12.0))
-        .text_color(rgb(FAINT))
+        .text_footnote()
+        .text_color(rgb(TEXT_TERTIARY))
         .child(tr(message))
         .into_any_element()
 }
@@ -555,17 +567,16 @@ fn detail_row(label: &'static str, value: impl Into<String>) -> AnyElement {
             div()
                 .w(px(92.0))
                 .flex_none()
-                .text_size(px(11.0))
-                .text_color(rgb(FAINT))
+                .text_caption()
+                .text_color(rgb(TEXT_TERTIARY))
                 .child(tr(label)),
         )
         .child(
             div()
                 .flex_1()
                 .min_w(px(0.0))
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .text_color(rgb(TEXT_SOFT))
+                .text_footnote()
+                .text_color(rgb(TEXT_SECONDARY))
                 .child(value.into()),
         )
         .into_any_element()

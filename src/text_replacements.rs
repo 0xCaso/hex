@@ -2,10 +2,7 @@ use std::sync::OnceLock;
 
 use regex::{Regex, RegexBuilder};
 
-#[cfg(target_os = "macos")]
-pub use crate::app_settings::TextReplacement;
-
-#[cfg(target_os = "windows")]
+/// One configured phrase and the text that replaces it.
 #[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(default)]
 pub struct TextReplacement {

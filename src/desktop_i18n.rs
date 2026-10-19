@@ -112,6 +112,18 @@ pub(crate) fn tr_fill(template: &str, value: &str) -> String {
     tr(template).replace("{}", value)
 }
 
+/// A compact, translated age label for an event timestamp.
+pub(crate) fn event_age(timestamp_ms: u64) -> String {
+    let seconds = crate::history::now_ms().saturating_sub(timestamp_ms) / 1_000;
+    let (template, value) = match seconds {
+        0..=59 => ("{}s ago", seconds),
+        60..=3_599 => ("{}m ago", seconds / 60),
+        3_600..=86_399 => ("{}h ago", seconds / 3_600),
+        _ => ("{}d ago", seconds / 86_400),
+    };
+    tr_fill(template, &value.to_string())
+}
+
 fn tables() -> &'static [HashMap<&'static str, &'static str>; 5] {
     static TABLES: OnceLock<[HashMap<&'static str, &'static str>; 5]> = OnceLock::new();
     TABLES.get_or_init(|| {
@@ -130,7 +142,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Language", ["Język", "语言", "言語", "Sprache", "Idioma"]),
     ("The language you dictate in; Auto detects it", ["Język dyktowania; Auto wykrywa automatycznie", "听写语言；Auto 自动检测", "音声入力の言語。Auto は自動検出", "Diktatsprache; Auto erkennt automatisch", "Idioma del dictado; Auto lo detecta"]),
     ("Interface language", ["Język interfejsu", "界面语言", "表示言語", "Sprache der Oberfläche", "Idioma de la interfaz"]),
-    ("Language of the HEX interface", ["Język interfejsu HEX", "HEX 界面语言", "HEX の表示言語", "Sprache der HEX-Oberfläche", "Idioma de la interfaz de HEX"]),
+    ("Language of the Hex interface", ["Język interfejsu Hex", "Hex 界面语言", "Hex の表示言語", "Sprache der Hex-Oberfläche", "Idioma de la interfaz de Hex"]),
     ("System", ["Systemowy", "跟随系统", "システム", "System", "Sistema"]),
     ("Model", ["Model", "模型", "モデル", "Modell", "Modelo"]),
     ("On-device speech model", ["Model mowy na urządzeniu", "本地语音模型", "オンデバイス音声モデル", "Lokales Sprachmodell", "Modelo de voz local"]),
@@ -186,7 +198,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("No activation rules", ["Brak reguł aktywacji", "无激活规则", "有効化ルールなし", "Keine Aktivierungsregeln", "Sin reglas de activación"]),
     ("Untitled mode", ["Tryb bez nazwy", "未命名模式", "名称未設定のモード", "Unbenannter Modus", "Modo sin título"]),
     ("Used unless a more specific mode matches.", ["Używany, jeśli nie pasuje bardziej szczegółowy tryb.", "在没有更具体的模式匹配时使用。", "より具体的なモードが一致しない場合に使用します。", "Wird verwendet, wenn kein spezifischerer Modus passt.", "Se usa si no coincide un modo más específico."]),
-    ("TEXT PROCESSING", ["PRZETWARZANIE TEKSTU", "文本处理", "テキスト処理", "TEXTVERARBEITUNG", "PROCESAMIENTO DE TEXTO"]),
+    ("Text processing", ["Przetwarzanie tekstu", "文本处理", "テキスト処理", "Textverarbeitung", "Procesamiento de texto"]),
     ("Name", ["Nazwa", "名称", "名前", "Name", "Nombre"]),
     ("Applications", ["Aplikacje", "应用", "アプリケーション", "Anwendungen", "Aplicaciones"]),
     ("Web pages", ["Strony internetowe", "网页", "ウェブページ", "Webseiten", "Páginas web"]),
@@ -210,7 +222,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Paste last dictation", ["Wklej ostatnie dyktowanie", "粘贴上次听写", "前回の音声入力を貼り付け", "Letztes Diktat einfügen", "Pegar último dictado"]),
     ("Insert the most recent completed dictation at the current focus", ["Wstawia ostatnie ukończone dyktowanie w bieżącym miejscu", "在当前光标处插入最近完成的听写", "直近の音声入力を現在のフォーカス位置に挿入", "Fügt das letzte Diktat an der aktuellen Position ein", "Inserta el último dictado completado en el foco actual"]),
     ("OpenCode not found", ["Nie znaleziono OpenCode", "未找到 OpenCode", "OpenCode が見つかりません", "OpenCode nicht gefunden", "OpenCode no encontrado"]),
-    ("Hold the shortcut and speak an instruction. HEX sends it, along with any text you have selected, to OpenCode and pastes the reply at your cursor. If the model returns nothing, nothing is pasted.", ["Przytrzymaj skrót i podaj polecenie. HEX wyśle je wraz z zaznaczonym tekstem do OpenCode i wklei odpowiedź przy kursorze. Jeśli model nic nie zwróci, nic nie zostanie wklejone.", "按住快捷键说出指令。HEX 会将其与选中文本一起发送给 OpenCode，并把回复粘贴到光标处。如果模型没有返回内容，则不会粘贴任何内容。", "ショートカットを押しながら指示を話します。HEX は選択中のテキストとともに OpenCode へ送信し、応答をカーソル位置に貼り付けます。モデルが何も返さなければ何も貼り付けません。", "Kürzel halten und eine Anweisung sprechen. HEX sendet sie mit dem ausgewählten Text an OpenCode und fügt die Antwort am Cursor ein. Liefert das Modell nichts, wird nichts eingefügt.", "Mantén el atajo y di una instrucción. HEX la envía junto al texto seleccionado a OpenCode y pega la respuesta en el cursor. Si el modelo no devuelve nada, no se pega nada."]),
+    ("Hold the shortcut and speak an instruction. Hex sends it, along with any text you have selected, to OpenCode and pastes the reply at your cursor. If the model returns nothing, nothing is pasted.", ["Przytrzymaj skrót i podaj polecenie. Hex wyśle je wraz z zaznaczonym tekstem do OpenCode i wklei odpowiedź przy kursorze. Jeśli model nic nie zwróci, nic nie zostanie wklejone.", "按住快捷键说出指令。Hex 会将其与选中文本一起发送给 OpenCode，并把回复粘贴到光标处。如果模型没有返回内容，则不会粘贴任何内容。", "ショートカットを押しながら指示を話します。Hex は選択中のテキストとともに OpenCode へ送信し、応答をカーソル位置に貼り付けます。モデルが何も返さなければ何も貼り付けません。", "Kürzel halten und eine Anweisung sprechen. Hex sendet sie mit dem ausgewählten Text an OpenCode und fügt die Antwort am Cursor ein. Liefert das Modell nichts, wird nichts eingefügt.", "Mantén el atajo y di una instrucción. Hex la envía junto al texto seleccionado a OpenCode y pega la respuesta en el cursor. Si el modelo no devuelve nada, no se pega nada."]),
     ("Capture", ["Nagrywanie", "采集", "キャプチャ", "Aufnahme", "Captura"]),
     ("Processing", ["Przetwarzanie", "处理", "処理", "Verarbeitung", "Procesamiento"]),
     ("Shortcut", ["Skrót", "快捷键", "ショートカット", "Kürzel", "Atajo"]),
@@ -236,7 +248,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Press a shortcut...", ["Naciśnij skrót...", "按下快捷键...", "ショートカットを押してください...", "Kürzel drücken...", "Pulsa un atajo..."]),
     ("The transcription change did not apply.", ["Zmiana transkrypcji nie została zastosowana.", "转写更改未生效。", "文字起こしの変更が適用されませんでした。", "Die Transkriptionsänderung wurde nicht übernommen.", "El cambio de transcripción no se aplicó."]),
     ("Automatic microphone", ["Automatyczny mikrofon", "自动麦克风", "自動マイク", "Automatisches Mikrofon", "Micrófono automático"]),
-    ("Welcome to HEX", ["Witaj w HEX", "欢迎使用 HEX", "HEX へようこそ", "Willkommen bei HEX", "Bienvenido a HEX"]),
+    ("Welcome to Hex", ["Witaj w Hex", "欢迎使用 Hex", "Hex へようこそ", "Willkommen bei Hex", "Bienvenido a Hex"]),
     ("Dictate into any application. Audio never leaves this computer; one speech model download is all it takes.", ["Dyktuj w dowolnej aplikacji. Dźwięk nigdy nie opuszcza tego komputera; wystarczy pobrać jeden model mowy.", "在任何应用中听写。音频绝不离开这台电脑；只需下载一个语音模型。", "どのアプリでも音声入力できます。音声はこのコンピューターから出ません。音声モデルを一つダウンロードするだけです。", "Diktiere in jede Anwendung. Audio verlässt diesen Computer nie; ein Sprachmodell-Download genügt.", "Dicta en cualquier aplicación. El audio nunca sale de este equipo; basta con descargar un modelo de voz."]),
     ("Dictation language", ["Język dyktowania", "听写语言", "音声入力の言語", "Diktatsprache", "Idioma de dictado"]),
     ("Download {}", ["Pobierz {}", "下载 {}", "{} をダウンロード", "{} herunterladen", "Descargar {}"]),
@@ -269,14 +281,14 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Feedback volume", ["Głośność dźwięków", "提示音音量", "フィードバック音量", "Feedback-Lautstärke", "Volumen de avisos"]),
     ("Recording start, stop, and cancellation tones", ["Dźwięki startu, stopu i anulowania nagrywania", "开始、停止与取消提示音", "録音開始・停止・キャンセルの音", "Töne für Start, Stopp und Abbruch", "Tonos de inicio, parada y cancelación"]),
     ("Software updates", ["Aktualizacje aplikacji", "软件更新", "ソフトウェア更新", "Software-Updates", "Actualizaciones de software"]),
-    ("Checks for new HEX releases in the background", ["Sprawdza nowe wydania HEX w tle", "在后台检查 HEX 的新版本", "バックグラウンドで HEX の新しいリリースを確認", "Prüft im Hintergrund auf neue HEX-Versionen", "Busca nuevas versiones de HEX en segundo plano"]),
+    ("Checks for new Hex releases in the background", ["Sprawdza nowe wydania Hex w tle", "在后台检查 Hex 的新版本", "バックグラウンドで Hex の新しいリリースを確認", "Prüft im Hintergrund auf neue Hex-Versionen", "Busca nuevas versiones de Hex en segundo plano"]),
     ("Restart into {}", ["Uruchom ponownie do {}", "重启进入 {}", "再起動して {} へ", "Neu starten in {}", "Reiniciar a {}"]),
     ("Check now", ["Sprawdź teraz", "立即检查", "今すぐ確認", "Jetzt prüfen", "Comprobar ahora"]),
     ("Checking", ["Sprawdzanie", "检查中", "確認中", "Wird geprüft", "Comprobando"]),
     ("Launch at login", ["Uruchamiaj przy logowaniu", "登录时启动", "ログイン時に起動", "Beim Anmelden starten", "Iniciar al iniciar sesión"]),
-    ("Start HEX hidden in the Windows system tray after sign-in", ["Uruchamia HEX ukryty w zasobniku systemowym po zalogowaniu", "登录后在系统托盘中隐藏启动 HEX", "サインイン後、HEX をシステムトレイに隠して起動", "Startet HEX nach der Anmeldung versteckt im Infobereich", "Inicia HEX oculto en la bandeja del sistema tras iniciar sesión"]),
+    ("Start Hex hidden in the Windows system tray after sign-in", ["Uruchamia Hex ukryty w zasobniku systemowym po zalogowaniu", "登录后在系统托盘中隐藏启动 Hex", "サインイン後、Hex をシステムトレイに隠して起動", "Startet Hex nach der Anmeldung versteckt im Infobereich", "Inicia Hex oculto en la bandeja del sistema tras iniciar sesión"]),
     ("Listen on launch", ["Nasłuchuj po uruchomieniu", "启动时监听", "起動時にリッスン", "Beim Start zuhören", "Escuchar al iniciar"]),
-    ("Start the global dictation listener when HEX opens", ["Uruchamia globalne nasłuchiwanie dyktowania przy starcie HEX", "HEX 打开时启动全局听写监听", "HEX 起動時にグローバル音声入力リスナーを開始", "Startet den globalen Diktat-Listener beim Öffnen von HEX", "Inicia el escuchador global de dictado al abrir HEX"]),
+    ("Start the global dictation listener when Hex opens", ["Uruchamia globalne nasłuchiwanie dyktowania przy starcie Hex", "Hex 打开时启动全局听写监听", "Hex 起動時にグローバル音声入力リスナーを開始", "Startet den globalen Diktat-Listener beim Öffnen von Hex", "Inicia el escuchador global de dictado al abrir Hex"]),
     ("Text replacements", ["Zamiany tekstu", "文本替换", "テキスト置換", "Textersetzungen", "Sustituciones de texto"]),
     ("Exact phrase-boundary corrections run before every Windows paste", ["Dokładne poprawki fraz stosowane przed każdym wklejeniem", "在每次粘贴前应用精确的短语替换", "貼り付け前に適用される正確なフレーズ置換", "Exakte Phrasenkorrekturen vor jedem Einfügen", "Correcciones exactas de frases antes de cada pegado"]),
     ("Top", ["Góra", "顶部", "上", "Oben", "Arriba"]),
@@ -302,7 +314,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Select a history entry.", ["Wybierz wpis z historii.", "选择一条历史记录。", "履歴の項目を選択してください。", "Wählen Sie einen Verlaufseintrag.", "Selecciona una entrada del historial."]),
     ("History could not be loaded.", ["Nie udało się wczytać historii.", "无法加载历史记录。", "履歴を読み込めませんでした。", "Verlauf konnte nicht geladen werden.", "No se pudo cargar el historial."]),
     ("Text replacements could not be saved.", ["Nie udało się zapisać zamian tekstu.", "无法保存文本替换。", "テキスト置換を保存できませんでした。", "Textersetzungen konnten nicht gespeichert werden.", "No se pudieron guardar las sustituciones."]),
-    ("HEX could not apply this change.", ["HEX nie mógł zastosować tej zmiany.", "HEX 无法应用此更改。", "HEX はこの変更を適用できませんでした。", "HEX konnte diese Änderung nicht übernehmen.", "HEX no pudo aplicar este cambio."]),
+    ("Hex could not apply this change.", ["Hex nie mógł zastosować tej zmiany.", "Hex 无法应用此更改。", "Hex はこの変更を適用できませんでした。", "Hex konnte diese Änderung nicht übernehmen.", "Hex no pudo aplicar este cambio."]),
     ("Microphones could not be enumerated.", ["Nie udało się wykryć mikrofonów.", "无法枚举麦克风。", "マイクを列挙できませんでした。", "Mikrofone konnten nicht ermittelt werden.", "No se pudieron detectar los micrófonos."]),
     ("No models installed yet. Use the download button to install one.", ["Brak zainstalowanych modeli. Użyj przycisku pobierania, aby zainstalować.", "尚未安装模型。请使用下载按钮安装。", "モデルが未インストールです。ダウンロードボタンから追加してください。", "Noch keine Modelle installiert. Nutzen Sie den Download-Button.", "Aún no hay modelos instalados. Usa el botón de descarga."]),
     ("Raw transcript", ["Surowa transkrypcja", "原始转写", "生の文字起こし", "Rohtranskript", "Transcripción sin procesar"]),

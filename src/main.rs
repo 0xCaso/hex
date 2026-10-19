@@ -14,40 +14,27 @@ mod apple_speech;
 mod application_catalog;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod audio;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 mod command_grammar;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 mod commands;
 #[cfg(target_os = "macos")]
 mod config;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 mod context;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod dashboard;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod design_tokens;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-mod desktop_activity;
-#[cfg(target_os = "windows")]
-#[path = "windows_desktop_activity.rs"]
 mod desktop_activity;
 #[cfg(target_os = "linux")]
 mod desktop_host;
-#[cfg(target_os = "windows")]
-#[path = "windows_desktop_host.rs"]
-mod desktop_host;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 mod desktop_transcription_picker;
-#[cfg(target_os = "windows")]
-#[path = "windows_desktop_transcription_picker.rs"]
-mod desktop_transcription_picker;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-mod desktop_ui;
-#[cfg(target_os = "windows")]
-#[path = "windows_desktop_ui.rs"]
-#[allow(dead_code)]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod desktop_ui;
 #[cfg(target_os = "macos")]
 mod developer_control;
@@ -59,7 +46,8 @@ mod dictation_audio;
 mod dictation_diagnostics;
 #[cfg(target_os = "macos")]
 mod dictation_indicator;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 mod dictation_processor;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod events;
@@ -73,6 +61,8 @@ mod history;
 mod instance;
 #[cfg(target_os = "macos")]
 mod keyboard;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod keys;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -127,7 +117,8 @@ mod paste;
 mod pause_segmenter;
 #[cfg(target_os = "macos")]
 mod permission_guide;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 mod personal_commands;
 #[cfg(target_os = "macos")]
 mod recognition;
@@ -141,10 +132,7 @@ mod spoken_text;
 mod status_item;
 #[cfg(target_os = "macos")]
 mod suppression;
-#[cfg(target_os = "macos")]
-mod text_input;
-#[cfg(target_os = "windows")]
-#[path = "windows_text_input.rs"]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod text_input;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod text_replacements;
@@ -162,12 +150,6 @@ mod transcription_service;
 // The Windows shell and the shared desktop layer it was built on. These
 // modules come from the `windows-shell` branch and stay Windows-only until
 // the macOS and Linux shells adopt them.
-#[cfg(target_os = "windows")]
-mod command_context;
-#[cfg(target_os = "windows")]
-mod command_grammar_common;
-#[cfg(target_os = "windows")]
-mod commands_engine;
 #[cfg(target_os = "windows")]
 mod desktop_activity_pane;
 #[cfg(target_os = "windows")]
@@ -200,16 +182,7 @@ mod desktop_replacement_editor;
 mod desktop_shell;
 #[cfg(target_os = "windows")]
 mod desktop_voice_action_pane;
-#[cfg(target_os = "windows")]
-mod dictation_processing;
-#[cfg(target_os = "windows")]
-mod keys;
-#[cfg(target_os = "windows")]
-mod opencode;
-#[cfg(target_os = "windows")]
-#[path = "windows_personal_commands.rs"]
-mod personal_commands;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod self_update;
 #[cfg(target_os = "windows")]
 mod transcription_engine;
@@ -221,6 +194,8 @@ mod windows_app;
 mod windows_audio_control;
 #[cfg(target_os = "windows")]
 mod windows_context;
+#[cfg(target_os = "windows")]
+mod windows_desktop_host;
 #[cfg(target_os = "windows")]
 mod windows_dictation;
 #[cfg(target_os = "windows")]
@@ -237,8 +212,6 @@ mod windows_settings;
 mod windows_ui;
 #[cfg(target_os = "windows")]
 mod windows_updater;
-#[cfg(target_os = "windows")]
-mod windows_voice_action;
 
 #[cfg(target_os = "macos")]
 use std::fs;
