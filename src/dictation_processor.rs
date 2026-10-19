@@ -34,30 +34,7 @@ const SERVICE_INFO_ENDPOINTS: [&str; 3] = ["/api/info", "/api/status", "/api/hea
 /// Newest one-shot generation route first; older OpenCode V2 builds only serve the later name.
 const GENERATE_ENDPOINTS: [&str; 2] = ["/api/experimental/generate", "/api/generate"];
 
-/// Persisted OpenCode rewrite settings for one mode, shared by the macOS and
-/// Windows settings schemas.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default)]
-pub struct PostProcessingSettings {
-    pub enabled: bool,
-    pub prompt: String,
-    /// Optional `provider/model` key from the OpenCode catalog.
-    pub model: Option<String>,
-    pub variant: Option<String>,
-    pub deadline_seconds: u64,
-}
-
-impl Default for PostProcessingSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            prompt: "Rewrite the transcript into clear, natural text while preserving the speaker's intended meaning.".into(),
-            model: None,
-            variant: None,
-            deadline_seconds: 30,
-        }
-    }
-}
+pub use crate::app_settings::DictationPostProcessing as PostProcessingSettings;
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl PostProcessingSettings {

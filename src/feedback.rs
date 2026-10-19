@@ -29,7 +29,6 @@ static LOADER_STARTED: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static VOLUME: AtomicU32 = AtomicU32::new(0.5_f32.to_bits());
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
 }

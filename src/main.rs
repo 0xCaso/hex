@@ -2,7 +2,7 @@
 mod accessibility;
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 mod app_paths;
-#[cfg(target_os = "macos")]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod app_settings;
 #[cfg(target_os = "macos")]
 mod app_window;
@@ -55,7 +55,6 @@ mod events;
 mod feedback;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod gguf_session;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 mod history;
 mod instance;
@@ -134,7 +133,7 @@ mod status_item;
 mod suppression;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod text_input;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod text_replacements;
 #[cfg(target_os = "macos")]
 mod transcription;
@@ -237,7 +236,6 @@ struct Cli {
 }
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) const DEVELOPER_FEATURES_ENABLED: bool = cfg!(debug_assertions);
 
 #[cfg(target_os = "macos")]

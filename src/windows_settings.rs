@@ -1,11 +1,21 @@
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::PathBuf;
+//! The Windows runtime's view of the shared settings. `settings.json` is the
+//! one persisted file; `WindowsSettings` is projected from `AppSettings` for
+//! the Windows dictation loop and shell, and merged back when saved. It also
+//! reads the legacy `windows-settings.json` once to migrate it.
+
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
 
+pub use crate::app_settings::IndicatorPosition;
+/// What happens to other applications' audio while a dictation records.
+pub use crate::app_settings::RecordingAudioBehavior as WhileDictating;
+use crate::app_settings::{
+    AppSettings, DictationMode, HotkeyBinding, HotkeyKey, HotkeyModifiers, ModifierSide,
+};
 use crate::transcription_models::TranscriptionSelection;
 
 const LOCALE_NAME_CAPACITY: usize = 85;
@@ -105,26 +115,6 @@ pub fn mode_for_context<'a>(
         .find(|mode| mode.matches_application(application))
 }
 
-/// Where the recording HUD pill appears while dictating.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IndicatorPosition {
-    #[default]
-    Top,
-    Bottom,
-    Hidden,
-}
-
-/// What happens to other applications' audio while a dictation records.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WhileDictating {
-    Mute,
-    PauseMedia,
-    #[default]
-    DoNothing,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct WindowsHotkey {
@@ -137,31 +127,7 @@ pub struct WindowsHotkey {
 
 impl Default for WindowsSettings {
     fn default() -> Self {
-        Self {
-            schema_version: 1,
-            platform: "windows".into(),
-            microphone: None,
-            listen_on_launch: true,
-            dictation_hotkey: WindowsHotkey::default(),
-            shortcut_mode: crate::dictation::ShortcutMode::default(),
-            paste_last_hotkey: Some(WindowsHotkey::paste_last_default()),
-            voice_action_hotkey: None,
-            voice_action_model: None,
-            double_tap_lock: true,
-            double_tap_only: false,
-            while_dictating: WhileDictating::default(),
-            release_microphone_while_idle: false,
-            feedback_volume: 50,
-            ui_language: None,
-            indicator_position: IndicatorPosition::default(),
-            history_retention: crate::history::HistoryRetention::default(),
-            modes: Vec::new(),
-            text_replacements: Vec::new(),
-            dictation_post_processing: crate::dictation_processor::PostProcessingSettings::default(
-            ),
-            dictation_transformations: Vec::new(),
-            transcription: recommended_selection(&user_language()),
-        }
+        Self::from_app(&AppSettings::default())
     }
 }
 
@@ -178,52 +144,23 @@ impl Default for WindowsHotkey {
 }
 
 impl WindowsSettings {
+    /// The Windows view of `settings.json`.
     pub fn load() -> Result<Self> {
-        let path = settings_path()?;
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let settings: Self = serde_json::from_slice(&fs::read(&path)?)
-            .wrap_err_with(|| format!("could not parse {}", path.display()))?;
-        if settings.platform != "windows" {
-            return Err(eyre!(
-                "unsupported Windows settings platform: {}",
-                settings.platform
-            ));
-        }
-        settings.dictation_hotkey.validate()?;
-        if settings.feedback_volume > 100 {
-            return Err(eyre!("feedback volume must be between 0 and 100"));
-        }
-        if let Some(paste_last) = &settings.paste_last_hotkey {
-            paste_last.validate()?;
-            if paste_last.key.is_none() {
-                return Err(eyre!("Paste Last requires a non-modifier key"));
-            }
-            if paste_last == &settings.dictation_hotkey {
-                return Err(eyre!(
-                    "the dictation and Paste Last shortcuts must be different"
-                ));
-            }
-        }
-        if let Some(voice_action) = &settings.voice_action_hotkey {
-            voice_action.validate()?;
-            if voice_action.key.is_none() {
-                return Err(eyre!(
-                    "the voice action shortcut requires a non-modifier key"
-                ));
-            }
-            if voice_action == &settings.dictation_hotkey
-                || Some(voice_action) == settings.paste_last_hotkey.as_ref()
-            {
-                return Err(eyre!("the voice action shortcut must be unique"));
-            }
-        }
-        crate::transcription_models::validate(&settings.transcription)?;
+        let settings = Self::from_app(&AppSettings::load()?);
+        settings.validate()?;
         Ok(settings)
     }
 
+    /// Merges this view into `settings.json`, keeping every setting Windows
+    /// does not own.
     pub fn save(&self) -> Result<()> {
+        self.validate()?;
+        let mut settings = AppSettings::load()?;
+        self.apply_to(&mut settings);
+        settings.save()
+    }
+
+    fn validate(&self) -> Result<()> {
         self.dictation_hotkey.validate()?;
         if self.feedback_volume > 100 {
             return Err(eyre!("feedback volume must be between 0 and 100"));
@@ -253,19 +190,157 @@ impl WindowsSettings {
             }
         }
         crate::transcription_models::validate(&self.transcription)?;
-        let path = settings_path()?;
-        let directory = path
-            .parent()
-            .ok_or_else(|| eyre!("Windows settings path has no parent"))?;
-        fs::create_dir_all(directory)?;
-        let partial = path.with_extension("json.partial");
-        let mut file = File::create(&partial)?;
-        serde_json::to_writer_pretty(&mut file, self)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        crate::transcription_models::atomic_replace(&partial, &path)?;
         Ok(())
     }
+
+    pub fn from_app(settings: &AppSettings) -> Self {
+        let modes = &settings.dictation_processing;
+        Self {
+            schema_version: 1,
+            platform: "windows".into(),
+            microphone: settings.microphone.clone(),
+            listen_on_launch: settings.enable_on_launch,
+            dictation_hotkey: WindowsHotkey::from(&settings.dictation_hotkey),
+            shortcut_mode: settings.shortcut_mode,
+            paste_last_hotkey: settings.paste_last_hotkey.as_ref().map(WindowsHotkey::from),
+            voice_action_hotkey: settings
+                .voice_action
+                .enabled
+                .then(|| WindowsHotkey::from(&settings.edit_hotkey)),
+            voice_action_model: settings.voice_action.model.as_deref().and_then(|key| {
+                let (provider, id) = key.split_once('/')?;
+                Some(crate::dictation_processor::Model {
+                    provider: provider.into(),
+                    id: id.into(),
+                    variant: settings.voice_action.variant.clone(),
+                })
+            }),
+            double_tap_lock: settings.double_tap_lock,
+            double_tap_only: settings.double_tap_only,
+            while_dictating: settings.recording_audio_behavior,
+            release_microphone_while_idle: settings.release_microphone_while_idle,
+            feedback_volume: if settings.sound_effects {
+                (settings.sound_effect_volume.clamp(0.0, 1.0) * 100.0).round() as u8
+            } else {
+                0
+            },
+            ui_language: settings.ui_language.clone(),
+            indicator_position: settings.indicator_position,
+            history_retention: settings.history_retention,
+            text_replacements: modes.default_mode.replacements.clone(),
+            dictation_post_processing: modes.default_mode.post_processing.clone(),
+            dictation_transformations: modes.default_mode.transformations.clone(),
+            modes: modes.modes.iter().map(WindowsMode::from).collect(),
+            transcription: settings.transcription.clone(),
+        }
+    }
+
+    /// Writes the settings Windows owns into `settings`.
+    pub fn apply_to(&self, settings: &mut AppSettings) {
+        settings.microphone = self.microphone.clone();
+        settings.enable_on_launch = self.listen_on_launch;
+        settings.dictation_hotkey = HotkeyBinding::from(&self.dictation_hotkey);
+        settings.shortcut_mode = self.shortcut_mode;
+        settings.paste_last_hotkey = self.paste_last_hotkey.as_ref().map(HotkeyBinding::from);
+        settings.voice_action.enabled = self.voice_action_hotkey.is_some();
+        if let Some(hotkey) = &self.voice_action_hotkey {
+            settings.edit_hotkey = HotkeyBinding::from(hotkey);
+        }
+        settings.voice_action.model = self
+            .voice_action_model
+            .as_ref()
+            .map(|model| format!("{}/{}", model.provider, model.id));
+        settings.voice_action.variant = self
+            .voice_action_model
+            .as_ref()
+            .and_then(|model| model.variant.clone());
+        settings.double_tap_lock = self.double_tap_lock;
+        settings.double_tap_only = self.double_tap_only;
+        settings.recording_audio_behavior = self.while_dictating;
+        settings.release_microphone_while_idle = self.release_microphone_while_idle;
+        settings.sound_effects = self.feedback_volume > 0;
+        if self.feedback_volume > 0 {
+            settings.sound_effect_volume = f32::from(self.feedback_volume.min(100)) / 100.0;
+        }
+        settings.ui_language = self.ui_language.clone();
+        settings.indicator_position = self.indicator_position;
+        settings.history_retention = self.history_retention;
+        let processing = &mut settings.dictation_processing;
+        processing.default_mode.replacements = self.text_replacements.clone();
+        processing.default_mode.post_processing = self.dictation_post_processing.clone();
+        processing.default_mode.transformations = self.dictation_transformations.clone();
+        processing.modes = self.modes.iter().map(DictationMode::from).collect();
+        settings.transcription = self.transcription.clone();
+    }
+}
+
+impl From<&DictationMode> for WindowsMode {
+    fn from(mode: &DictationMode) -> Self {
+        Self {
+            name: mode.name.clone(),
+            applications: mode.applications.clone(),
+            websites: mode.browser_hosts.clone(),
+            corrections: mode.replacements.clone(),
+            post_processing: mode.post_processing.clone(),
+            transformations: mode.transformations.clone(),
+        }
+    }
+}
+
+impl From<&WindowsMode> for DictationMode {
+    fn from(mode: &WindowsMode) -> Self {
+        Self {
+            name: mode.name.clone(),
+            applications: mode.applications.clone(),
+            browser_hosts: mode.websites.clone(),
+            replacements: mode.corrections.clone(),
+            transformations: mode.transformations.clone(),
+            post_processing: mode.post_processing.clone(),
+        }
+    }
+}
+
+/// Windows names Command the Windows key and Option Alt; keys go by name.
+impl From<&HotkeyBinding> for WindowsHotkey {
+    fn from(binding: &HotkeyBinding) -> Self {
+        Self {
+            control: binding.modifiers.control.is_some(),
+            windows: binding.modifiers.command.is_some(),
+            alt: binding.modifiers.option.is_some(),
+            shift: binding.modifiers.shift.is_some(),
+            key: binding.key.as_ref().map(HotkeyKey::name),
+        }
+    }
+}
+
+impl From<&WindowsHotkey> for HotkeyBinding {
+    fn from(hotkey: &WindowsHotkey) -> Self {
+        let side = |held: bool| held.then_some(ModifierSide::Either);
+        Self {
+            modifiers: HotkeyModifiers {
+                control: side(hotkey.control),
+                option: side(hotkey.alt),
+                shift: side(hotkey.shift),
+                command: side(hotkey.windows),
+                function: false,
+            },
+            key: hotkey.key.as_deref().map(HotkeyKey::named),
+        }
+    }
+}
+
+/// The legacy `windows-settings.json` in `directory`, converted, for a
+/// one-time migration into `settings.json`.
+pub(crate) fn legacy_settings(directory: &Path) -> Result<Option<(PathBuf, AppSettings)>> {
+    let path = directory.join("windows-settings.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let legacy: WindowsSettings = serde_json::from_slice(&fs::read(&path)?)
+        .wrap_err_with(|| format!("could not parse {}", path.display()))?;
+    let mut settings = AppSettings::default();
+    legacy.apply_to(&mut settings);
+    Ok(Some((path, settings)))
 }
 
 impl WindowsHotkey {
@@ -348,14 +423,10 @@ impl WindowsHotkey {
     }
 }
 
-pub fn recommended_selection(language: &str) -> TranscriptionSelection {
-    crate::transcription_models::recommended_selection(&language.to_ascii_lowercase())
-}
-
 /// Whether a persisted settings file exists; a first run has none, and
 /// the app then offers onboarding.
 pub fn exists() -> bool {
-    settings_path().is_ok_and(|path| path.exists())
+    crate::app_settings::exists()
 }
 
 pub(crate) fn user_language() -> String {
@@ -372,10 +443,6 @@ pub(crate) fn user_language() -> String {
         .to_ascii_lowercase()
 }
 
-fn settings_path() -> Result<PathBuf> {
-    Ok(crate::app_paths::support_dir()?.join("windows-settings.json"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,21 +450,21 @@ mod tests {
 
     #[test]
     fn polish_uses_the_multilingual_model() {
-        let selection = recommended_selection("pl");
+        let selection = crate::transcription_models::recommended_selection("pl");
         assert_eq!(selection.model, TranscriptionModelId::ParakeetV3);
         assert_eq!(selection.language, "pl");
     }
 
     #[test]
     fn supported_languages_keep_their_recommended_model() {
-        let selection = recommended_selection("de");
+        let selection = crate::transcription_models::recommended_selection("de");
         assert_eq!(selection.model, TranscriptionModelId::ParakeetV3);
         assert_eq!(selection.language, "de");
     }
 
     #[test]
     fn unknown_languages_fall_back_to_english() {
-        let selection = recommended_selection("tlh");
+        let selection = crate::transcription_models::recommended_selection("tlh");
         assert_eq!(
             selection.model,
             TranscriptionModelId::ParakeetUnifiedEnglish
@@ -621,6 +688,112 @@ mod tests {
         assert!(preset.key.is_some(), "voice action requires a key");
         assert_ne!(preset, defaults.dictation_hotkey);
         assert_ne!(Some(&preset), defaults.paste_last_hotkey.as_ref());
+    }
+
+    fn scratch_directory(label: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "hex-windows-migration-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn legacy_windows_settings_migrate_once_into_settings_json() {
+        let directory = scratch_directory("once");
+        fs::write(
+            directory.join("windows-settings.json"),
+            br#"{
+                "schema_version": 1,
+                "platform": "windows",
+                "microphone": "Headset",
+                "listen_on_launch": false,
+                "dictation_hotkey": {"control": true, "windows": true, "alt": false, "shift": false, "key": null},
+                "shortcut_mode": "toggle",
+                "paste_last_hotkey": {"control": true, "windows": false, "alt": true, "shift": false, "key": "v"},
+                "voice_action_hotkey": {"control": true, "windows": false, "alt": true, "shift": false, "key": "i"},
+                "voice_action_model": {"providerID": "openai", "id": "gpt-5.6-sol", "variant": "fast"},
+                "double_tap_lock": false,
+                "while_dictating": "pause_media",
+                "feedback_volume": 30,
+                "ui_language": "pl",
+                "indicator_position": "bottom",
+                "history_retention": "day",
+                "text_replacements": [{"matched_phrase": "open code", "output": "OpenCode"}],
+                "dictation_transformations": ["lowercase"],
+                "modes": [{"name": "Code", "applications": ["code"], "websites": ["github.com"],
+                           "corrections": [{"matched_phrase": "rust", "output": "Rust"}]}],
+                "transcription": {"model": "parakeet_v3", "language": "pl", "recognition_hints": ""}
+            }"#,
+        )
+        .unwrap();
+        let path = directory.join("settings.json");
+
+        crate::app_settings::migrate_legacy_settings(&path).unwrap();
+
+        assert!(!directory.join("windows-settings.json").exists());
+        assert!(directory.join("windows-settings.json.migrated").is_file());
+        let migrated: AppSettings = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(migrated.microphone.as_deref(), Some("Headset"));
+        assert!(!migrated.enable_on_launch);
+        assert!(migrated.voice_action.enabled);
+        assert_eq!(
+            migrated.voice_action.model.as_deref(),
+            Some("openai/gpt-5.6-sol")
+        );
+        assert_eq!(migrated.voice_action.variant.as_deref(), Some("fast"));
+        assert_eq!(
+            migrated.recording_audio_behavior,
+            WhileDictating::PauseMedia
+        );
+        assert!(migrated.sound_effects);
+        assert!((migrated.sound_effect_volume - 0.3).abs() < 1e-6);
+        assert_eq!(migrated.ui_language.as_deref(), Some("pl"));
+        assert_eq!(migrated.indicator_position, IndicatorPosition::Bottom);
+        assert_eq!(
+            migrated.dictation_processing.modes[0].browser_hosts,
+            ["github.com"]
+        );
+        // The Windows view of the migrated file is the legacy file.
+        let view = WindowsSettings::from_app(&migrated);
+        assert_eq!(view.dictation_hotkey.label(), "Ctrl+Win");
+        assert_eq!(view.paste_last_hotkey.unwrap().label(), "Ctrl+Alt+V");
+        assert_eq!(view.voice_action_hotkey.unwrap().label(), "Ctrl+Alt+I");
+        assert_eq!(view.shortcut_mode, crate::dictation::ShortcutMode::Toggle);
+        assert!(!view.double_tap_lock);
+        assert_eq!(view.feedback_volume, 30);
+        assert_eq!(view.text_replacements[0].output, "OpenCode");
+        assert_eq!(view.dictation_transformations, ["lowercase"]);
+        assert_eq!(view.modes[0].corrections[0].output, "Rust");
+        assert_eq!(view.transcription.language, "pl");
+
+        // A second launch reads settings.json and leaves the backup alone.
+        fs::write(directory.join("windows-settings.json"), b"{}").unwrap();
+        crate::app_settings::migrate_legacy_settings(&path).unwrap();
+        assert!(directory.join("windows-settings.json").is_file());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_windows_view_round_trips_through_app_settings() {
+        let view = WindowsSettings {
+            dictation_hotkey: WindowsHotkey {
+                key: Some("pageup".into()),
+                shift: true,
+                ..WindowsHotkey::default()
+            },
+            voice_action_hotkey: Some(WindowsHotkey::voice_action_default()),
+            feedback_volume: 0,
+            ..WindowsSettings::default()
+        };
+        let mut settings = AppSettings::default();
+        view.apply_to(&mut settings);
+        assert_eq!(WindowsSettings::from_app(&settings), view);
+        // Muted sounds keep the remembered volume for when they return.
+        assert!(!settings.sound_effects);
+        assert_eq!(settings.sound_effect_volume, 0.5);
     }
 
     #[test]
