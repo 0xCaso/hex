@@ -52,6 +52,16 @@ pub(super) fn records_key_events() -> bool {
 }
 
 /// Sparkle has its own Check for Updates command.
+/// How the Modes pane describes website rules; `None` hides them where
+/// the listener can't read the browser's address.
+pub(super) const WEB_PAGES_DESCRIPTION: Option<&str> =
+    Some("Switch when a domain is active in Brave");
+
+/// Whether the listener knows which application is frontmost.
+pub(super) fn focused_application_known() -> bool {
+    true
+}
+
 pub(super) const MANUAL_UPDATE_CHECK: bool = true;
 
 /// What the macOS application coordinator hands a new window.

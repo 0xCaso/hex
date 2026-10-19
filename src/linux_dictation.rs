@@ -1,7 +1,7 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,67 @@ impl Drop for OutputWorker {
     }
 }
 
+/// What happens to a transcript before and after it is pasted: the modes
+/// that process it and the history that keeps it. The service shares it
+/// with the listener so saved settings apply without a restart.
+#[derive(Clone)]
+pub struct DictationOutput {
+    pub history: Option<crate::history::History>,
+    pub modes: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
+    pub transformations: Arc<crate::personal_commands::TransformationClient>,
+}
+
+impl DictationOutput {
+    pub fn from_settings(
+        settings: &crate::app_settings::AppSettings,
+        history: Option<crate::history::History>,
+    ) -> Self {
+        Self {
+            history,
+            modes: Arc::new(RwLock::new(
+                crate::dictation_modes::ModeRuntime::from_settings(settings),
+            )),
+            transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
+        }
+    }
+
+    /// Processes and pastes one transcript, then records it.
+    fn deliver(
+        &self,
+        raw_text: String,
+        paster: &mut LinuxPaster,
+        audio_ms: u64,
+        inference_ms: u64,
+        started: Instant,
+    ) -> Result<String> {
+        let context = crate::linux_context::capture();
+        let modes = self
+            .modes
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let processed = modes.process(&raw_text, &context, &self.transformations);
+        if processed.text.trim().is_empty() {
+            return Err(eyre!("text replacements produced empty output"));
+        }
+        paster.paste(&processed.text)?;
+        if let Some(history) = &self.history {
+            let draft = crate::dictation_modes::history_draft(
+                raw_text,
+                &processed,
+                context.application,
+                audio_ms,
+                inference_ms,
+                started.elapsed().as_millis() as u64,
+            );
+            if let Err(error) = history.record(draft) {
+                tracing::warn!(%error, "could not retain Linux dictation history");
+            }
+        }
+        Ok(processed.text)
+    }
+}
+
 /// Runs hotkey dictation until `shutdown`. A prepared transcriber skips the
 /// model load; otherwise the supplied transcription selection is loaded here.
 pub fn run(
@@ -54,6 +115,7 @@ pub fn run(
     device: Option<&str>,
     shutdown: &AtomicBool,
     settings: &crate::app_settings::AppSettings,
+    output_settings: DictationOutput,
     transcriber: Option<LocalTranscriber>,
     hotkey_status: HotkeyStatus,
 ) -> Result<()> {
@@ -67,7 +129,7 @@ pub fn run(
         stop: Arc::new(AtomicBool::new(false)),
         worker: None,
     };
-    let input = match device {
+    let input = match device.or(settings.microphone.as_deref()) {
         Some(name) => AudioInput::open_matching(name)?,
         None => AudioInput::open(&[])?,
     };
@@ -91,6 +153,7 @@ pub fn run(
             let started = Instant::now();
             let result = (|| -> Result<String> {
                 let transcribed = job.transcript.wait().map_err(|error| eyre!(error))?;
+                let inference_ms = started.elapsed().as_millis() as u64;
                 tracing::info!(
                     source = transcribed.source.label(),
                     finish_ms = transcribed.finish_ms,
@@ -101,11 +164,8 @@ pub fn run(
                 if text.is_empty() {
                     return Err(eyre!("transcription was empty"));
                 }
-                paster
-                    .as_mut()
-                    .map_err(|error| eyre!("{error:#}"))?
-                    .paste(&text)?;
-                Ok(text)
+                let paster = paster.as_mut().map_err(|error| eyre!("{error:#}"))?;
+                output_settings.deliver(text, paster, job.audio_ms, inference_ms, started)
             })()
             .map_err(|error| format!("{error:#}"));
             tracing::info!(

@@ -64,6 +64,8 @@ mod linux;
 #[cfg(target_os = "linux")]
 mod linux_app;
 #[cfg(target_os = "linux")]
+mod linux_context;
+#[cfg(target_os = "linux")]
 mod linux_desktop;
 #[cfg(target_os = "linux")]
 mod linux_dictation;

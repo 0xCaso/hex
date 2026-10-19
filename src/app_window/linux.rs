@@ -11,9 +11,9 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     meetings: false,
     commands: false,
     hud_lab: false,
-    modes: false,
+    modes: true,
     voice_action: false,
-    history: false,
+    history: true,
     permissions: false,
     dock_icon: false,
     launch_at_login: false,
@@ -37,6 +37,15 @@ pub(super) fn records_key_events() -> bool {
 }
 
 /// The service checks for updates on its own schedule.
+/// How the Modes pane describes website rules; `None` hides them where
+/// the listener can't read the browser's address.
+pub(super) const WEB_PAGES_DESCRIPTION: Option<&str> = None;
+
+/// Whether the listener knows which application is frontmost.
+pub(super) fn focused_application_known() -> bool {
+    !crate::linux_session::LinuxSession::detect().is_wayland()
+}
+
 pub(super) const MANUAL_UPDATE_CHECK: bool = false;
 
 pub(super) struct Args;
@@ -79,7 +88,15 @@ impl Platform {
 
 /// Opens the shared window in the Settings process.
 pub fn open(event_path: PathBuf, cx: &mut App) -> gpui::Result<WindowHandle<AppWindow>> {
-    open_new(event_path, None, None, Args, cx)
+    // The service records dictations; this process reads and edits the
+    // same file, rereading it whenever the service wrote.
+    let retention = AppSettings::load()
+        .map(|settings| settings.history_retention)
+        .unwrap_or_default();
+    let history = crate::history::History::open_default(retention)
+        .inspect_err(|error| tracing::warn!(%error, "could not open retained history"))
+        .ok();
+    open_new(event_path, history, None, Args, cx)
 }
 
 pub(super) fn window_options(options: WindowOptions) -> WindowOptions {

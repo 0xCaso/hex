@@ -4305,28 +4305,33 @@ impl AppWindow {
                         .child(div().max_w(px(MODE_FIELD_WIDTH)).flex_1().child(name)),
                 )
                 .when_some(application_picker, |panel, picker| {
-                    panel.child(div().border_b_1().border_color(rgb(LINE)).child(picker))
+                    panel.child(
+                        div()
+                            .when(platform::WEB_PAGES_DESCRIPTION.is_some(), |row| {
+                                row.border_b_1().border_color(rgb(LINE))
+                            })
+                            .child(picker),
+                    )
                 })
-                .child(
-                    div()
-                        .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
-                        .px_4()
-                        .py_2()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_4()
-                        .child(settings_copy(
-                            "Web pages",
-                            "Switch when a domain is active in Brave",
-                        ))
-                        .child(
-                            div()
-                                .max_w(px(MODE_FIELD_WIDTH))
-                                .flex_1()
-                                .child(browser_hosts),
-                        ),
-                )
+                .when_some(platform::WEB_PAGES_DESCRIPTION, |panel, description| {
+                    panel.child(
+                        div()
+                            .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
+                            .px_4()
+                            .py_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_4()
+                            .child(settings_copy("Web pages", description))
+                            .child(
+                                div()
+                                    .max_w(px(MODE_FIELD_WIDTH))
+                                    .flex_1()
+                                    .child(browser_hosts),
+                            ),
+                    )
+                })
                 .into_any_element()
         };
 
@@ -4913,7 +4918,11 @@ impl AppWindow {
                     .gap_4()
                     .child(settings_copy(
                         "Applications",
-                        "Switch when an app is frontmost",
+                        if platform::focused_application_known() {
+                            "Switch when an app is frontmost"
+                        } else {
+                            "Wayland doesn't report the frontmost app; these apply under X11"
+                        },
                     ))
                     .child(
                         div()
