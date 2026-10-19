@@ -1096,6 +1096,11 @@ fn controller_loop(
                         active.title = title.clone();
                         let _ = events.send(ControllerEvent::Retitled { title });
                     }
+                    meeting::RecordingUpdate::Transcribing => {
+                        if !active.stop.swap(true, Ordering::Relaxed) {
+                            let _ = events.send(ControllerEvent::Transcribing);
+                        }
+                    }
                 }
             }
         }

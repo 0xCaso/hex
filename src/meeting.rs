@@ -49,6 +49,8 @@ pub enum RecordingUpdate {
     Started { title: String },
     /// A provisional title from the transcript so far.
     Retitled { title: String },
+    /// Capture stopped; final transcription is running.
+    Transcribing,
 }
 
 pub fn default_title(app: Option<&str>, created_at_ms: u64) -> String {
@@ -338,26 +340,6 @@ pub fn record(
         if shutdown.load(Ordering::Relaxed) {
             return Err(eyre!("meeting recording stopped before capture started"));
         }
-        let content = SCShareableContent::get().wrap_err("could not enumerate screen content")?;
-        let display = content
-            .displays()
-            .into_iter()
-            .next()
-            .ok_or_else(|| eyre!("no display is available for system audio capture"))?;
-        let filter = SCContentFilter::create()
-            .with_display(&display)
-            .with_excluding_windows(&[])
-            .build()
-            .wrap_err("could not build meeting capture filter")?;
-        let config = SCStreamConfiguration::new()
-            .with_width(2)
-            .with_height(2)
-            .with_captures_audio(true)
-            .with_captures_microphone(true)
-            .wrap_err("could not enable meeting microphone capture")?
-            .with_excludes_current_process_audio(true)
-            .with_sample_rate(SAMPLE_RATE as i32)
-            .with_channel_count(1);
         let (sender, receiver) = mpsc::sync_channel::<AudioPacket>(128);
         let (live_sender, live_receiver) = mpsc::sync_channel(live::QUEUE_CAPACITY);
         let system_drops = Arc::new(AtomicU64::new(0));
@@ -393,7 +375,7 @@ pub fn record(
             )
         });
         let stream_error = Arc::new(Mutex::new(None::<String>));
-        let delegate_error = stream_error.clone();
+        let stream_delivered_audio = Arc::new(AtomicBool::new(false));
         let cleanup_failed_setup =
             |stream: Option<SCStream>,
              sender: SyncSender<AudioPacket>,
@@ -405,51 +387,23 @@ pub fn record(
                     tracing::error!(%cleanup_error, "could not finalize failed meeting setup");
                 }
             };
-        let mut stream = match SCStream::new_with_delegate(
-            &filter,
-            &config,
-            ErrorHandler::new(move |error| {
-                *delegate_error
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = Some(error.to_string());
-            }),
+        let capture_clock = Instant::now();
+        let sleep_prevention = crate::recording_environment::prevent_sleep();
+        let mut stream = match start_capture_stream(
+            &sender,
+            &system_drops,
+            &microphone_drops,
+            &stream_error,
+            &stream_delivered_audio,
+            capture_clock,
+            shutdown,
         ) {
             Ok(stream) => stream,
             Err(error) => {
                 cleanup_failed_setup(None, sender, writer, live_worker);
-                return Err(eyre!(error).wrap_err("could not create meeting capture stream"));
+                return Err(error);
             }
         };
-        let capture_clock = Instant::now();
-        let sleep_prevention = crate::recording_environment::prevent_sleep();
-        let start_result = (|| -> Result<()> {
-            add_audio_handler(
-                &mut stream,
-                sender.clone(),
-                MeetingSource::System,
-                system_drops.clone(),
-                SCStreamOutputType::Audio,
-                capture_clock,
-            )?;
-            add_audio_handler(
-                &mut stream,
-                sender.clone(),
-                MeetingSource::Microphone,
-                microphone_drops.clone(),
-                SCStreamOutputType::Microphone,
-                capture_clock,
-            )?;
-            if shutdown.load(Ordering::Relaxed) {
-                return Err(eyre!("meeting recording stopped before capture started"));
-            }
-            stream
-                .start_capture()
-                .wrap_err("could not start meeting capture")
-        })();
-        if let Err(error) = start_result {
-            cleanup_failed_setup(Some(stream), sender, writer, live_worker);
-            return Err(error);
-        }
         manifest.status = MeetingStatus::Recording;
         if let Err(error) = write_manifest(&meeting_dir, &manifest) {
             if let Err(stop_error) = stream.stop_capture() {
@@ -467,15 +421,44 @@ pub fn record(
         let started = Instant::now();
         let titles = notes::ProvisionalTitles::start(manifest.id.clone());
         println!("Recording '{}' (Ctrl-C to stop)", manifest.title);
-        while !shutdown.load(Ordering::Relaxed)
-            && stream_error
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .is_none()
-            && !writer.is_finished()
-        {
+        let mut capture_error = None;
+        while !shutdown.load(Ordering::Relaxed) && !writer.is_finished() {
             if let Some(title) = titles.take() {
                 record_provisional_title(&meeting_dir, &mut manifest, title, updates.as_ref());
+            }
+            if let Some(error) = take_stream_error(&stream_error) {
+                if stream_delivered_audio.swap(false, Ordering::Relaxed) {
+                    let _ = stream.stop_capture();
+                    match start_capture_stream(
+                        &sender,
+                        &system_drops,
+                        &microphone_drops,
+                        &stream_error,
+                        &stream_delivered_audio,
+                        capture_clock,
+                        shutdown,
+                    ) {
+                        Ok(restarted) => {
+                            tracing::info!(
+                                %error,
+                                meeting = manifest.id,
+                                "restarted meeting capture stream after source change"
+                            );
+                            stream = restarted;
+                            continue;
+                        }
+                        Err(restart_error) => {
+                            tracing::warn!(
+                                %error,
+                                %restart_error,
+                                meeting = manifest.id,
+                                "could not restart meeting capture stream"
+                            );
+                        }
+                    }
+                }
+                capture_error = Some(error);
+                break;
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -483,17 +466,23 @@ pub fn record(
             record_provisional_title(&meeting_dir, &mut manifest, title, updates.as_ref());
         }
         drop(titles);
-        let stop_result = stream.stop_capture();
+        let stop_result = if capture_error.is_none() {
+            stream
+                .stop_capture()
+                .map_err(|error| eyre!(error).wrap_err("could not stop meeting capture"))
+        } else {
+            let _ = stream.stop_capture();
+            Ok(())
+        };
         drop(stream);
         drop(sender);
         drop(sleep_prevention);
 
         manifest.ended_at_ms = Some(now_ms());
         manifest.duration_ms = Some(started.elapsed().as_millis() as u64);
-        let capture_error = stream_error
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        if capture_error.is_none() {
+            capture_error = take_stream_error(&stream_error);
+        }
         let mut stats = match join_audio_writer(writer) {
             Ok(stats) => stats,
             Err(error) => {
@@ -506,23 +495,14 @@ pub fn record(
         manifest.system = stats.system;
         manifest.microphone = stats.microphone;
         manifest.live_dropped_packets = manifest_live_drops.load(Ordering::Relaxed);
-        let transition_result = if capture_error.is_none() && stop_result.is_ok() {
-            manifest.status = MeetingStatus::Transcribing;
-            write_manifest(&meeting_dir, &manifest)
-        } else {
-            Ok(())
-        };
         manifest.live_transcription_error = finish_live_worker(live_worker);
-        transition_result?;
-        if let Some(error) = capture_error {
-            write_manifest(&meeting_dir, &manifest)?;
-            return Err(eyre!("meeting capture stopped unexpectedly: {error}"));
-        }
-        if let Err(error) = stop_result {
-            write_manifest(&meeting_dir, &manifest)?;
-            return Err(error).wrap_err("could not stop meeting capture");
-        }
-        write_manifest(&meeting_dir, &manifest)?;
+        prepare_for_transcription(
+            &meeting_dir,
+            &mut manifest,
+            capture_error,
+            stop_result,
+            updates.as_ref(),
+        )?;
 
         let rolling = rolling.finish();
         match transcribe(
@@ -620,11 +600,143 @@ fn persist_meeting_failure(directory: &Path, error: &color_eyre::Report) {
     }
 }
 
+fn start_capture_stream(
+    sender: &SyncSender<AudioPacket>,
+    system_drops: &Arc<AtomicU64>,
+    microphone_drops: &Arc<AtomicU64>,
+    stream_error: &Arc<Mutex<Option<String>>>,
+    stream_delivered_audio: &Arc<AtomicBool>,
+    capture_clock: Instant,
+    shutdown: &AtomicBool,
+) -> Result<SCStream> {
+    if shutdown.load(Ordering::Relaxed) {
+        return Err(eyre!("meeting recording stopped before capture started"));
+    }
+    let content = SCShareableContent::get().wrap_err("could not enumerate screen content")?;
+    let display = content
+        .displays()
+        .into_iter()
+        .next()
+        .ok_or_else(|| eyre!("no display is available for system audio capture"))?;
+    let filter = SCContentFilter::create()
+        .with_display(&display)
+        .with_excluding_windows(&[])
+        .build()
+        .wrap_err("could not build meeting capture filter")?;
+    let config = SCStreamConfiguration::new()
+        .with_width(2)
+        .with_height(2)
+        .with_captures_audio(true)
+        .with_captures_microphone(true)
+        .wrap_err("could not enable meeting microphone capture")?
+        .with_excludes_current_process_audio(true)
+        .with_sample_rate(SAMPLE_RATE as i32)
+        .with_channel_count(1);
+    stream_delivered_audio.store(false, Ordering::Relaxed);
+    *stream_error
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+    let delegate_error = stream_error.clone();
+    let mut stream = SCStream::new_with_delegate(
+        &filter,
+        &config,
+        ErrorHandler::new(move |error| {
+            *delegate_error
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(error.to_string());
+        }),
+    )
+    .map_err(|error| eyre!(error).wrap_err("could not create meeting capture stream"))?;
+    let start_result = (|| -> Result<()> {
+        add_audio_handler(
+            &mut stream,
+            sender.clone(),
+            MeetingSource::System,
+            system_drops.clone(),
+            stream_delivered_audio.clone(),
+            SCStreamOutputType::Audio,
+            capture_clock,
+        )?;
+        add_audio_handler(
+            &mut stream,
+            sender.clone(),
+            MeetingSource::Microphone,
+            microphone_drops.clone(),
+            stream_delivered_audio.clone(),
+            SCStreamOutputType::Microphone,
+            capture_clock,
+        )?;
+        if shutdown.load(Ordering::Relaxed) {
+            return Err(eyre!("meeting recording stopped before capture started"));
+        }
+        stream
+            .start_capture()
+            .wrap_err("could not start meeting capture")
+    })();
+    if let Err(error) = start_result {
+        drop(stream);
+        return Err(error);
+    }
+    Ok(stream)
+}
+
+fn take_stream_error(stream_error: &Mutex<Option<String>>) -> Option<String> {
+    stream_error
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+}
+
+fn has_recorded_audio(manifest: &MeetingManifest) -> bool {
+    manifest.system.samples > 0 || manifest.microphone.samples > 0
+}
+
+fn prepare_for_transcription(
+    directory: &Path,
+    manifest: &mut MeetingManifest,
+    capture_error: Option<String>,
+    stop_result: Result<()>,
+    updates: Option<&SyncSender<RecordingUpdate>>,
+) -> Result<()> {
+    if !has_recorded_audio(manifest) {
+        if let Some(error) = capture_error {
+            write_manifest(directory, manifest)?;
+            return Err(eyre!("meeting capture stopped unexpectedly: {error}"));
+        }
+        if let Err(error) = stop_result {
+            write_manifest(directory, manifest)?;
+            return Err(error);
+        }
+    } else {
+        if let Some(error) = capture_error {
+            tracing::warn!(
+                %error,
+                meeting = manifest.id,
+                "meeting capture stopped early; transcribing recorded audio"
+            );
+        }
+        if let Err(error) = stop_result {
+            tracing::warn!(
+                %error,
+                meeting = manifest.id,
+                "meeting capture stop reported an error; transcribing recorded audio"
+            );
+        }
+    }
+    if let Some(updates) = updates {
+        let _ = updates.try_send(RecordingUpdate::Transcribing);
+    }
+    manifest.status = MeetingStatus::Transcribing;
+    manifest.error = None;
+    write_manifest(directory, manifest)
+}
+
 fn add_audio_handler(
     stream: &mut SCStream,
     sender: SyncSender<AudioPacket>,
     source: MeetingSource,
     drops: Arc<AtomicU64>,
+    delivered: Arc<AtomicBool>,
     output_type: SCStreamOutputType,
     capture_clock: Instant,
 ) -> Result<()> {
@@ -662,6 +774,7 @@ fn add_audio_handler(
                 drops.fetch_add(1, Ordering::Relaxed);
                 return;
             };
+            delivered.store(true, Ordering::Relaxed);
             let packet = AudioPacket {
                 source,
                 pts_us,
@@ -1166,6 +1279,43 @@ fn rename_meeting(directory: &Path, title: &str) -> Result<MeetingManifest> {
     match markdown_error {
         Some(error) => Err(error.wrap_err("Renamed, but the Markdown heading was not updated")),
         None => Ok(manifest),
+    }
+}
+
+/// Debug CLI: transcribes a finished or interrupted meeting's WAV tracks
+/// and publishes its final transcript and Markdown copy.
+#[cfg(debug_assertions)]
+pub fn transcribe_meeting(id: &str) -> Result<MeetingManifest> {
+    let (_, selection) = crate::app_settings::transcription_selection();
+    let model = crate::transcription_models::validate(&selection)?;
+    if !crate::transcription_models::is_installed(model, &selection.language) {
+        return Err(eyre!("{} is not installed", model.name));
+    }
+    let directory = root()?.join(id);
+    if meeting_is_active(&directory) != Some(false) {
+        return Err(eyre!("Stop the recording before transcribing it"));
+    }
+    let mut manifest = read_manifest(&directory)?;
+    if !has_recorded_audio(&manifest) {
+        return Err(eyre!("meeting has no recorded audio"));
+    }
+    manifest.status = MeetingStatus::Transcribing;
+    manifest.error = None;
+    manifest.export_error = None;
+    write_manifest(&directory, &manifest)?;
+    match transcribe(&directory, &mut manifest, &selection, None) {
+        Ok(()) => {
+            manifest.status = MeetingStatus::Complete;
+            manifest.error = None;
+            write_manifest(&directory, &manifest)?;
+            Ok(manifest)
+        }
+        Err(error) => {
+            manifest.status = MeetingStatus::Failed;
+            manifest.error = Some(error.to_string());
+            write_manifest(&directory, &manifest)?;
+            Err(error)
+        }
     }
 }
 
