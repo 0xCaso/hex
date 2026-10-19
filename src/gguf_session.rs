@@ -82,6 +82,7 @@ impl OfflineGgufSession {
         })
     }
 
+    #[cfg(target_os = "windows")]
     pub(crate) fn device_type(&self) -> transcribe_cpp::Result<transcribe_cpp::DeviceType> {
         Ok(self.model.device()?.device_type)
     }
