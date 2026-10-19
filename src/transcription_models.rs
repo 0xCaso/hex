@@ -622,7 +622,6 @@ pub fn is_verified(model: &ModelDefinition) -> bool {
     verification_receipt_matches(&path, model)
 }
 
-#[cfg(target_os = "macos")]
 pub fn verify_installed(model: &ModelDefinition, canceled: &AtomicBool) -> Result<PathBuf> {
     check_canceled(canceled)?;
     let path = model_path(model)?;
@@ -630,7 +629,6 @@ pub fn verify_installed(model: &ModelDefinition, canceled: &AtomicBool) -> Resul
     Ok(path)
 }
 
-#[cfg(target_os = "macos")]
 fn verify_installed_at(path: &Path, model: &ModelDefinition, canceled: &AtomicBool) -> Result<()> {
     check_canceled(canceled)?;
     if !path.is_file() {
@@ -950,8 +948,9 @@ pub fn uninstall(model: &ModelDefinition) -> Result<()> {
 }
 
 /// Replaces `destination` with `source`. On Windows `fs::rename` already
-/// uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`.
-#[cfg(target_os = "windows")]
+/// uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`; on Linux it is
+/// `rename(2)`.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
     fs::rename(source, destination)?;
     Ok(())

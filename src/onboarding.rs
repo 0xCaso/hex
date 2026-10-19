@@ -1,11 +1,21 @@
-use std::fs::{self, File, OpenOptions};
+//! First-run setup state. macOS gates dictation on three privacy
+//! permissions; Windows and Linux have no such grants, so their permission
+//! states are always ready and only the transcription model step applies.
+
+use std::fs::{self, OpenOptions};
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
 use block2::RcBlock;
+#[cfg(target_os = "macos")]
 use objc2::msg_send;
+#[cfg(target_os = "macos")]
 use objc2::runtime::{AnyClass, Bool};
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
 
 use crate::transcription_models::TranscriptionSelection;
@@ -112,7 +122,7 @@ pub(crate) fn completion_recorded_at(directory: &Path) -> bool {
 pub(crate) fn record_pending_at(directory: &Path) -> color_eyre::Result<()> {
     fs::create_dir_all(directory)?;
     write_owner_only_marker(&directory.join("onboarding-pending"), false)?;
-    File::open(directory)?.sync_all()?;
+    sync_directory(directory)?;
     Ok(())
 }
 
@@ -122,17 +132,27 @@ pub(crate) fn record_completion_at(directory: &Path) -> color_eyre::Result<()> {
     let temporary = directory.join(".onboarding-complete.tmp");
     write_owner_only_marker(&temporary, true)?;
     fs::rename(temporary, destination)?;
-    File::open(directory)?.sync_all()?;
+    sync_directory(directory)?;
+    Ok(())
+}
+
+/// Windows cannot open a directory as a file; its renames are durable once
+/// the call returns.
+fn sync_directory(directory: &Path) -> color_eyre::Result<()> {
+    #[cfg(unix)]
+    fs::File::open(directory)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = directory;
     Ok(())
 }
 
 fn write_owner_only_marker(path: &Path, truncate: bool) -> color_eyre::Result<()> {
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(truncate)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(truncate).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.sync_all()?;
     Ok(())
@@ -144,6 +164,7 @@ pub fn status(selection: &TranscriptionSelection) -> SetupStatus {
     status_with_transcription_model(transcription_model)
 }
 
+#[cfg(target_os = "macos")]
 pub fn status_with_transcription_model(transcription_model: bool) -> SetupStatus {
     SetupStatus {
         microphone: microphone_state(),
@@ -153,6 +174,17 @@ pub fn status_with_transcription_model(transcription_model: bool) -> SetupStatus
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn status_with_transcription_model(transcription_model: bool) -> SetupStatus {
+    SetupStatus {
+        microphone: PermissionState::Ready,
+        input_monitoring: PermissionState::Ready,
+        accessibility: PermissionState::Ready,
+        transcription_model,
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub fn request_microphone() {
     let Some(class) = AnyClass::get(c"AVCaptureDevice") else {
         tracing::error!("AVCaptureDevice is unavailable");
@@ -173,6 +205,7 @@ pub fn request_microphone() {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn open_permission_settings(permission: &str) {
     let pane = match permission {
         "microphone" => "Privacy_Microphone",
@@ -190,6 +223,7 @@ pub fn open_permission_settings(permission: &str) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn microphone_state() -> PermissionState {
     let Some(class) = AnyClass::get(c"AVCaptureDevice") else {
         return PermissionState::NeedsRequest;
@@ -199,6 +233,7 @@ fn microphone_state() -> PermissionState {
     microphone_authorization_state(status)
 }
 
+#[cfg(target_os = "macos")]
 const fn settings(value: bool) -> PermissionState {
     if value {
         PermissionState::Ready
@@ -207,6 +242,7 @@ const fn settings(value: bool) -> PermissionState {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 const fn microphone_authorization_state(status: isize) -> PermissionState {
     match status {
         0 => PermissionState::NeedsRequest,
@@ -215,11 +251,13 @@ const fn microphone_authorization_state(status: isize) -> PermissionState {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "AVFoundation", kind = "framework")]
 unsafe extern "C" {
     static AVMediaTypeAudio: *const NSString;
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     safe fn CGPreflightListenEventAccess() -> bool;
@@ -317,6 +355,7 @@ mod tests {
         assert!(completion_recorded_at(&directory));
         let marker = directory.join("onboarding-complete");
         assert!(marker.is_file());
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(marker).unwrap().permissions().mode() & 0o777,
             0o600

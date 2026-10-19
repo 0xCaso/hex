@@ -9,7 +9,7 @@ if [[ ${1:-} != --inside ]]; then
   for command in cc pkg-config pulseaudio pactl paplay xdotool xvfb-run timeout; do
     command -v "$command" >/dev/null
   done
-  exec timeout --kill-after=10 180 xvfb-run -a --server-args="-screen 0 1280x900x24 -noreset" \
+  exec timeout --kill-after=10 300 xvfb-run -a --server-args="-screen 0 1280x900x24 -noreset" \
     "$0" --inside "$(realpath "$1")" "$(realpath "$2")" "$(realpath "$3")"
 fi
 shift
@@ -46,7 +46,7 @@ trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export HOME="$work/home" XDG_RUNTIME_DIR="$work/runtime"
-export HEX_APPLICATION_SUPPORT_DIR="$work/support"
+export HEX_APPLICATION_SUPPORT_DIR="$work/support" NO_COLOR=1
 export PULSE_SERVER="unix:$work/pulse" PULSE_SOURCE=hex-fixture.monitor
 # GPUI still needs software Vulkan; only inference uses the CPU in this fixture.
 export GDK_BACKEND=x11 GGML_VK_VISIBLE_DEVICES=""
@@ -90,25 +90,46 @@ kill -TERM "$app"
 wait "$app"
 app=
 kill -0 "$listener"
-xdotool windowfocus --sync "$window"
-echo 'Replaying speech through the held dictation shortcut...'
-xdotool keydown Alt_L keydown space
-sleep 0.5
-paplay --device=hex-fixture "$audio"
-sleep 0.5
-xdotool keyup space keyup Alt_L
-echo 'Waiting for transcribed text in the focused GTK target...'
-for ((attempt = 0; attempt < 1800; attempt++)); do
+# Holds the shortcut over the speech, then waits until the target holds
+# `$1` transcripts of it.
+dictate() {
+  xdotool windowfocus --sync "$window"
+  echo 'Replaying speech through the held dictation shortcut...'
+  xdotool keydown Alt_L keydown space
+  sleep 0.5
+  paplay --device=hex-fixture "$audio"
+  sleep 0.5
+  xdotool keyup space keyup Alt_L
+  echo 'Waiting for transcribed text in the focused GTK target...'
+  for ((attempt = 0; attempt < 1800; attempt++)); do
+    kill -0 "$listener"
+    if (($(grep -oi 'ask what you can do for your country' "$work/pasted.txt" 2>/dev/null | wc -l) >= $1)); then break; fi
+    sleep 0.05
+  done
+  (($(grep -oi 'ask not what your country can do for you' "$work/pasted.txt" | wc -l) == $1))
+  (($(grep -oi 'ask what you can do for your country' "$work/pasted.txt" | wc -l) == $1))
+}
+dictate 1
+printf 'Captured, transcribed, and pasted: %s\n' "$(<"$work/pasted.txt")"
+# The CPU never streams by default, so that dictation took the whole-clip path.
+grep -Eq 'transcribed Linux dictation.*source.{0,32}offline' "$work/listener.log"
+kill -TERM "$listener"
+wait "$listener"
+# Force a live stream on the CPU to exercise capture-time feeding, the finish,
+# and (when the stream lags behind real time) the whole-clip fallback.
+HEX_STREAMING=1 "$binary" service >"$work/stream.log" 2>&1 &
+listener=$!
+for ((attempt = 0; attempt < 1200; attempt++)); do
   kill -0 "$listener"
-  if [[ -s "$work/pasted.txt" ]]; then break; fi
+  if grep -q 'HEX dictation is ready' "$work/stream.log"; then break; fi
   sleep 0.05
 done
-grep -qi 'ask not what your country can do for you' "$work/pasted.txt"
-grep -qi 'ask what you can do for your country' "$work/pasted.txt"
-printf 'Captured, transcribed, and pasted: %s\n' "$(<"$work/pasted.txt")"
+grep -q 'streaming transcription is available' "$work/stream.log"
+dictate 2
+grep -E 'transcribed Linux dictation.*source.{0,32}(stream|fallback)' "$work/stream.log"
 kill -TERM "$listener"
 wait "$listener"
 listener=
 outputs=$(pactl list short source-outputs)
 test -z "$outputs"
-echo 'Linux service dictation after Settings exits and orderly shutdown passed.'
+echo 'Linux service dictation (whole clip and live stream) after Settings exits and orderly shutdown passed.'

@@ -49,9 +49,9 @@ pub(crate) fn apply(setting: Option<&str>) {
 pub(crate) fn system_language() -> String {
     #[cfg(target_os = "windows")]
     {
-        crate::windows_settings::user_language()
+        windows_user_language()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "windows"))]
     {
         language_from_env(
             std::env::var("LC_ALL").ok().as_deref(),
@@ -59,6 +59,24 @@ pub(crate) fn system_language() -> String {
             std::env::var("LANG").ok().as_deref(),
         )
     }
+}
+
+/// The primary subtag of the Windows user locale: `pl-PL` yields `pl`.
+#[cfg(target_os = "windows")]
+fn windows_user_language() -> String {
+    use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
+    const LOCALE_NAME_CAPACITY: usize = 85;
+    let mut buffer = [0_u16; LOCALE_NAME_CAPACITY];
+    let length = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), buffer.len() as i32) };
+    if length <= 1 {
+        return "en".into();
+    }
+    let locale = String::from_utf16_lossy(&buffer[..length as usize - 1]);
+    locale
+        .split(['-', '_'])
+        .next()
+        .unwrap_or("en")
+        .to_ascii_lowercase()
 }
 
 /// The primary language subtag from POSIX locale variables, in their

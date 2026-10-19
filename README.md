@@ -209,7 +209,8 @@ See the [Windows guide](docs/windows.md) to install or build from source.
 
 The Linux beta targets x86_64 Linux on i3/X11 and compatible wlroots Wayland
 compositors. It supports local hotkey dictation, a GPUI settings shell, and
-signed updates for direct installs. Native Wayland requires explicit input-device
+signed updates for direct installs. With a Vulkan graphics driver, dictation
+streams while you speak, as on macOS and Windows. Native Wayland requires explicit input-device
 access and compositor support for clipboard, virtual-keyboard, and layer-shell
 protocols. Voice commands and meetings are not included.
 

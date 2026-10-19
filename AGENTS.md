@@ -51,8 +51,8 @@ substitute for source inspection or a second roadmap.
 - `keyboard`: active-layout key resolution and balanced synthetic shortcuts.
 - `dictation`: warm pre-roll, growable capture, and 16 kHz
   local-transcription resampling.
-- `pause_segmenter`: pure 16 kHz pause detection that cuts intentional hotkey
-  captures into pieces for incremental transcription.
+- `pause_segmenter`: pure 16 kHz pause detection that cuts meeting audio into
+  rolling transcription chunks.
 - `dictation_audio`: the authoritative microphone timeline, lazy stream
   lifecycle, recording owner, exact shortcut boundaries, recovery handoff, and
   disposable bounded command audio projection.
@@ -68,8 +68,9 @@ substitute for source inspection or a second roadmap.
   registration and authenticated loopback HTTP through the system curl; request
   bodies and credentials use stdin, never argv or new temporary files. Windows
   sends the same requests through the `opencode2 api` CLI inside a job object.
-- `parakeet`: the strict-Metal `transcribe.cpp` adapter plus bounded inference,
-  processing, ordered output, paste, last-result, and meeting-delta workers.
+- `parakeet`: the strict-Metal `transcribe.cpp` adapter plus the dictation
+  worker that hands clips to the transcription engine and runs bounded,
+  ordered processing, output, paste, last-result, and meeting-delta work.
 - `apple_speech`: the Swift `SpeechAnalyzer` bridge with per-locale support
   checks, asset reservation, and batch transcription.
 - `transcription`: runtime selection and transactional warm-model activation.
@@ -77,11 +78,13 @@ substitute for source inspection or a second roadmap.
   `local_transcriber`; it recreates the native session around each run (and
   each live stream) so inference scratch stays bounded.
 - `local_transcriber`: the Linux and Windows GGUF loader, prewarm, whole-clip
-  transcription, and (Windows) the stream probe and stream entry point.
-- `transcription_engine`: the Windows thread that owns the loaded model and runs
-  every inference in order: live streams fed during capture, their finish, and
-  whole-clip runs. Callers get a `LiveStream` to feed and a `PendingTranscript`
-  whose wait enforces the stream deadline and falls back to the whole clip.
+  transcription, and stream entry point.
+- `transcription_engine`: the thread that owns the loaded model on every OS and
+  runs every inference in order: live streams fed during capture, their finish,
+  whole-clip runs, and (macOS) model loads and switches. The capture owns its
+  `LiveStream` and hands it to the finished clip; finishing returns a
+  `PendingTranscript` whose wait enforces the stream deadline and falls back to
+  the whole clip.
 - `transcription_preparation`: application-owned model preparation shared by
   Settings and the menu bar, with one worker, latest-choice pending admission,
   cancellation fences, and an installed-only path that never downloads a model.
@@ -309,17 +312,14 @@ CoreAudio formats, AppleScript details, or event serialization.
   as the second tap of a double-tap, so release locks and the next shortcut
   press finishes. Only Escape cancels, and a modifier pressed alone never ends a
   key-chord capture. Double-tap settings apply to Hold only.
-- Windows streaming is speculative in the same way as incremental
-  transcription: the stream receives exactly the capture's 16 kHz audio, the
-  finish always carries the complete clip, and a failed, empty, overfed, or
-  late stream falls back to the whole clip. Nothing pastes before the final
-  text. One engine thread runs every inference because a live stream holds the
-  model's compute lease. Streams run only on GPU devices.
-- Incremental transcription is speculative: pieces cut at pauses are handed to
-  the inference worker without blocking capture, at most one at a time, and never
-  paste. The final job joins piece transcripts with the tail only when every kept
-  cut has a transcript from the same model; otherwise it transcribes the full clip.
-  Output, history, and last-result effects happen once on the final text.
+- Streaming dictation is speculative on every OS: a hotkey capture's stream
+  receives exactly the capture's 16 kHz audio, the finish always carries the
+  complete clip, and a failed, empty, overfed, late, or interrupted stream
+  falls back to the whole clip. Nothing pastes, and no partial text shows,
+  before the final text. One engine thread runs every inference because a live
+  stream holds the model's compute lease. Streams run only on GPU devices
+  (Metal, Vulkan); models that cannot stream transcribe the whole clip after
+  release. Dictation is never cut at pauses; meetings are.
 - Starting a new capture never cancels accepted dictation work. Pending jobs
   preserve submission-order output while capture remains immediately available.
 - Completing or pasting an older job must not reconcile or finish a newer
@@ -422,6 +422,14 @@ CoreAudio formats, AppleScript details, or event serialization.
   GUI, or permission setup; never writes, recovers, or indexes on disk inside
   the meetings folder; runs no model; and makes no network request. Stdout
   carries only MCP messages.
+- Meeting echo is judged on one timeline built from WAV sample positions, never
+  from packet arrival. A `You` line or rolling entry is judged only once the
+  system audio that could explain it has arrived (bounded when the system track
+  stalls). Measure echo changes with `meeting_echo_replay` on a recorded
+  speaker-mode call, counting genuine `You` lines lost as well as echo kept.
+- Moonshine sessions run single-threaded (`MOONSHINE_ORT_SINGLE_THREAD`, set
+  first thing in `main`); ONNX Runtime's default spinning pools cost several
+  times the CPU of the decoding itself.
 - Live meeting drafts remain available if final transcription fails. Final
   publication is atomic; adjacent same-source entries within three seconds form
   one displayed turn labeled `You` or `Them`. Speaker echo never shows as `You`:

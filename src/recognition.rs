@@ -352,7 +352,7 @@ pub fn listen(
         recording_environment,
         input_monitor.pending_events(),
         microphone_policy.release_while_idle,
-        dictation_worker.segment_sink(),
+        dictation_worker.engine(),
     )?;
     let (mut transcription_revision, _) = crate::app_settings::transcription_selection();
     let mut action_executor: Option<ActionExecutor> = None;

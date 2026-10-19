@@ -35,7 +35,7 @@ fn wait<T: windows::core::RuntimeType>(
     operation.GetResults()
 }
 
-use crate::windows_settings::WhileDictating;
+use crate::app_settings::RecordingAudioBehavior as WhileDictating;
 
 enum Command {
     Suppress,

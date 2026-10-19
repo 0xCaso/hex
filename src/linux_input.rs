@@ -5,6 +5,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
+use serde::{Deserialize, Serialize};
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::ErrorKind;
@@ -12,10 +13,122 @@ use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{ConnectionExt, GrabMode, ModMask, Window};
 use x11rb::rust_connection::RustConnection;
 
+use crate::app_settings::{HotkeyBinding, HotkeyKey, HotkeyModifiers, ModifierSide};
 use crate::linux_session::LinuxSession;
-use crate::linux_settings::LinuxHotkey;
 
 pub(crate) use crate::linux_wayland_input::{WaylandModifierState, capture_wayland_binding};
+
+/// A shortcut as X11 grabs and evdev matching see it: held modifiers and a
+/// named key. Settings store it as a portable `HotkeyBinding`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct LinuxHotkey {
+    pub control: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
+    pub key: String,
+}
+
+impl Default for LinuxHotkey {
+    fn default() -> Self {
+        Self {
+            control: false,
+            alt: true,
+            shift: false,
+            super_key: false,
+            key: "space".into(),
+        }
+    }
+}
+
+/// Linux names Command the Super key and Option Alt; keys go by name.
+impl From<&HotkeyBinding> for LinuxHotkey {
+    fn from(binding: &HotkeyBinding) -> Self {
+        Self {
+            control: binding.modifiers.control.is_some(),
+            alt: binding.modifiers.option.is_some(),
+            shift: binding.modifiers.shift.is_some(),
+            super_key: binding.modifiers.command.is_some(),
+            key: binding
+                .key
+                .as_ref()
+                .map(HotkeyKey::name)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl From<&LinuxHotkey> for HotkeyBinding {
+    fn from(hotkey: &LinuxHotkey) -> Self {
+        let side = |held: bool| held.then_some(ModifierSide::Either);
+        Self {
+            modifiers: HotkeyModifiers {
+                control: side(hotkey.control),
+                option: side(hotkey.alt),
+                shift: side(hotkey.shift),
+                command: side(hotkey.super_key),
+                function: false,
+            },
+            key: (!hotkey.key.trim().is_empty()).then(|| HotkeyKey::named(&hotkey.key)),
+        }
+    }
+}
+
+impl LinuxHotkey {
+    pub fn validate(&self) -> Result<()> {
+        if self.key.trim().is_empty() {
+            return Err(eyre!("Linux hotkeys require a non-modifier key"));
+        }
+        Ok(())
+    }
+
+    pub fn label(&self) -> String {
+        self.keycaps().join("+")
+    }
+
+    pub fn keycaps(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if self.control {
+            parts.push("Ctrl".to_string());
+        }
+        if self.alt {
+            parts.push("Alt".to_string());
+        }
+        if self.shift {
+            parts.push("Shift".to_string());
+        }
+        if self.super_key {
+            parts.push("Super".to_string());
+        }
+        let key = if self.key == "space" {
+            "Space".into()
+        } else {
+            self.key.to_ascii_uppercase()
+        };
+        parts.push(key);
+        parts
+    }
+
+    pub(crate) fn modifier_mask(
+        &self,
+        connection: &RustConnection,
+        keymap: &Keymap,
+    ) -> Result<ModMask> {
+        let mut result = ModMask::default();
+        for (enabled, symbols) in [
+            (self.control, &[XK_CONTROL_L, XK_CONTROL_R][..]),
+            (self.alt, &[XK_ALT_L, XK_ALT_R][..]),
+            (self.shift, &[XK_SHIFT_L, XK_SHIFT_R][..]),
+            (self.super_key, &[XK_SUPER_L, XK_SUPER_R][..]),
+        ] {
+            if enabled {
+                result |= keymap.modifier_for(connection, symbols)?;
+            }
+        }
+        Ok(result)
+    }
+}
 
 const XK_SPACE: u32 = 0x20;
 const XK_ESCAPE: u32 = 0xff1b;
@@ -169,6 +282,7 @@ impl Drop for LinuxHotkeyMonitor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     sender: SyncSender<HotkeyEvent>,
     stop: Arc<AtomicBool>,
@@ -458,6 +572,42 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_binding_is_alt_space() {
+        assert_eq!(LinuxHotkey::default().label(), "Alt+Space");
+    }
+
+    #[test]
+    fn modifier_only_bindings_are_rejected() {
+        let binding = LinuxHotkey {
+            key: String::new(),
+            ..LinuxHotkey::default()
+        };
+        assert!(binding.validate().is_err());
+    }
+
+    #[test]
+    fn standalone_function_keys_are_accepted() {
+        let binding = LinuxHotkey {
+            alt: false,
+            key: "f12".into(),
+            ..LinuxHotkey::default()
+        };
+        assert_eq!(binding.label(), "F12");
+        assert!(binding.validate().is_ok());
+    }
+
+    #[test]
+    fn hotkeys_round_trip_through_the_portable_binding() {
+        let hotkey = LinuxHotkey {
+            control: true,
+            super_key: true,
+            key: "f12".into(),
+            ..LinuxHotkey::default()
+        };
+        assert_eq!(LinuxHotkey::from(&HotkeyBinding::from(&hotkey)), hotkey);
+    }
     use std::sync::{Mutex, MutexGuard};
     use x11rb::protocol::xtest;
 

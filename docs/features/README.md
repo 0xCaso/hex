@@ -291,7 +291,6 @@ Settings                                 // settings
 ├── While dictating -> Mute / Pause media / Do nothing
 │   ├── Intentional capture only, not ordinary shortcut chords
 │   └── Pause/resume only players already reported running by macOS
-├── Transcribe during pauses -> On by default; next hotkey capture // dictate.incremental
 └── Sound volume -> Immediate feedback setting; zero suppresses tones
 
 Intentional recording                    // recording.environment
@@ -590,7 +589,8 @@ update from an older supported build.
 
 ```ts
 Linux beta                               // not macOS feature parity
-├── hex start -> Per-user service -> Alt-Space capture -> Transcribe -> Paste
+├── hex start -> Per-user service -> Alt-Space capture -> Stream (Vulkan GPU) -> Paste
+│   └── CPU or a model that cannot stream -> Transcribe the whole clip after release
 ├── hex app -> Settings client; closing it leaves the runtime running
 ├── Recording sounds -> Shortcut press / capture stop / active cancellation
 ├── X11 -> No tray or recording HUD; service status and sounds remain available

@@ -627,6 +627,7 @@ pub(crate) fn settings_row(
         .px_4()
         .py_2()
         .flex()
+        .flex_wrap()
         .items_center()
         .justify_between()
         .gap_4()
@@ -635,10 +636,12 @@ pub(crate) fn settings_row(
         .child(
             div()
                 .flex_1()
-                .min_w_0()
+                .min_w(px(SETTINGS_COPY_MIN_WIDTH))
                 .child(settings_copy(title, description)),
         )
-        .child(control)
+        // Controls keep their width; in a narrow window they move below
+        // the copy instead of clipping at the panel edge.
+        .child(div().flex_none().ml_auto().child(control))
 }
 
 /// A label and value inside a detail card.

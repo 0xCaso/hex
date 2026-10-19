@@ -10,9 +10,9 @@ use color_eyre::eyre::{Result, eyre};
 
 use crate::audio::{CaptureInstant, RecoveringAudioInput, RecoveringAudioInputEvent};
 use crate::dictation::{DictationCapture, Finish};
-use crate::parakeet::SegmentSink;
 use crate::recording_environment::RecordingEnvironmentController;
 use crate::suppression::PendingInputEvents;
+use crate::transcription_engine::TranscriptionEngine;
 
 const RECOGNITION_QUEUE_CAPACITY: usize = 64;
 const MAX_RECOGNITION_BACKLOG: Duration = Duration::from_millis(500);
@@ -149,7 +149,9 @@ struct Owner {
     recognition_overflowed: bool,
     pending_input: PendingInputEvents,
     last_captured_through: Option<CaptureInstant>,
-    segments: Option<SegmentSink>,
+    engine: Option<Arc<TranscriptionEngine>>,
+    /// Whether the active capture streams once it is intentional.
+    stream_capture: bool,
     scrawl_sink: Option<SyncSender<(Vec<f32>, u32)>>,
 }
 
@@ -178,7 +180,7 @@ impl DictationAudio {
         recording_environment: RecordingEnvironmentController,
         pending_input: PendingInputEvents,
         release_while_idle: bool,
-        segments: Option<SegmentSink>,
+        engine: Option<Arc<TranscriptionEngine>>,
     ) -> Result<Self> {
         let input = if release_while_idle {
             RecoveringAudioInput::closed(device_override, selection_revision, selected_device)
@@ -197,7 +199,7 @@ impl DictationAudio {
             recording_environment,
             pending_input,
             release_while_idle,
-            segments,
+            engine,
         )
     }
 
@@ -207,7 +209,7 @@ impl DictationAudio {
         recording_environment: RecordingEnvironmentController,
         pending_input: PendingInputEvents,
         release_while_idle: bool,
-        segments: Option<SegmentSink>,
+        engine: Option<Arc<TranscriptionEngine>>,
     ) -> Result<Self> {
         let (owner, mut audio) = Owner::new(
             input,
@@ -215,7 +217,7 @@ impl DictationAudio {
             recording_environment,
             pending_input,
             release_while_idle,
-            segments,
+            engine,
         );
         audio.worker = Some(
             thread::Builder::new()
@@ -403,7 +405,7 @@ impl Owner {
         recording_environment: RecordingEnvironmentController,
         pending_input: PendingInputEvents,
         release_while_idle: bool,
-        segments: Option<SegmentSink>,
+        engine: Option<Arc<TranscriptionEngine>>,
     ) -> (Self, DictationAudio) {
         let state = Arc::new(State {
             sample_rate: AtomicU64::new(if input.is_open() {
@@ -444,7 +446,8 @@ impl Owner {
             recognition_overflowed: false,
             pending_input,
             last_captured_through: None,
-            segments,
+            engine,
+            stream_capture: false,
             scrawl_sink: None,
         };
         let audio = DictationAudio {
@@ -691,9 +694,13 @@ impl Owner {
                     captured_through,
                     self.pending_input.oldest(),
                 );
-                if let Some(segments) = &self.segments {
-                    self.capture
-                        .offer_segment(|segment| segments.offer(segment));
+                // Short taps and shortcut chords never reach the model; the
+                // stream starts with the backlog once the hold counts.
+                if self.stream_capture
+                    && self.capture.is_intentional()
+                    && let Some(engine) = &self.engine
+                {
+                    self.capture.begin_stream(engine);
                 }
                 if let Some(sink) = &self.scrawl_sink {
                     let rate = self.sample_rate();
@@ -878,14 +885,9 @@ impl Owner {
             CaptureKind::Programmatic => self.capture.start_programmatic_at(at),
             CaptureKind::Voice { .. } => self.capture.start_voice_at(at),
         }
-        // Only hotkey captures are cut at pauses; the setting applies per capture.
-        if matches!(kind, CaptureKind::Hotkey)
-            && self.segments.is_some()
-            && crate::app_settings::incremental_transcription()
-        {
-            self.capture
-                .segment_capture(self.state.capture_generation.load(Ordering::Acquire));
-        }
+        // Only hotkey captures stream: voice-delimited clips are retranscribed
+        // without their control phrase, and programmatic ones need no speed-up.
+        self.stream_capture = matches!(kind, CaptureKind::Hotkey);
     }
 
     fn close_input(&mut self) {
@@ -953,58 +955,64 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_captures_hand_pieces_off_without_blocking_and_others_do_not() {
-        let speech = crate::pause_segmenter::tests::utterance(
-            &[(4_000, 1_000), (4_000, 1_000), (1_000, 0)],
-            -70.0,
-        )
-        .into_iter()
-        .flat_map(|sample| [sample; 3])
-        .collect::<Vec<_>>();
+    fn hotkey_captures_stream_once_intentional_and_others_do_not() {
+        use crate::transcription_engine::Command as EngineCommand;
         for kind in [CaptureKind::Hotkey, CaptureKind::Programmatic] {
-            let (mut owner, input, _samples) = owner_for_test(true);
-            let (sink, received) = SegmentSink::for_test();
-            owner.segments = Some(sink);
-            let at = capture_time();
-            assert!(control(&mut owner, |reply| Command::Start {
-                at,
-                kind,
-                reply
-            }));
-            control(&mut owner, |reply| Command::BecomeIntentional {
-                at: at + crate::dictation::MINIMUM_HOLD_DURATION,
-                reply,
-            });
-            let mut pieces = Vec::new();
-            let mut through = at;
-            for chunk in speech.chunks(480) {
-                through = through + Duration::from_millis(10);
-                owner.handle_input(RecoveringAudioInputEvent::Chunk {
-                    samples: chunk.to_vec(),
-                    captured_through: through,
+            for cancel in [false, true] {
+                let hotkey = matches!(kind, CaptureKind::Hotkey);
+                let (engine, commands) = TranscriptionEngine::for_test();
+                let (mut owner, _input, _samples) = owner_for_test(true);
+                owner.engine = Some(Arc::new(engine));
+                let at = capture_time();
+                assert!(control(&mut owner, |reply| Command::Start {
+                    at,
+                    kind,
+                    reply
+                }));
+                let mut through = at;
+                let mut chunk = |owner: &mut Owner| {
+                    through = through + Duration::from_millis(10);
+                    owner.handle_input(RecoveringAudioInputEvent::Chunk {
+                        samples: vec![0.25; 480],
+                        captured_through: through,
+                    });
+                };
+                chunk(&mut owner);
+                // A short tap or chord never reaches the model.
+                assert!(commands.try_iter().next().is_none());
+                control(&mut owner, |reply| Command::BecomeIntentional {
+                    at: at + crate::dictation::MINIMUM_HOLD_DURATION,
+                    reply,
                 });
-                // The worker takes each piece before the next pause.
-                pieces.extend(received());
-            }
-            let Finish::Transcribe(clip) = control(&mut owner, |reply| Command::Finish {
-                tail: Duration::ZERO,
-                at: through,
-                reply,
-            }) else {
-                panic!("expected transcription");
-            };
-            if matches!(kind, CaptureKind::Hotkey) {
-                assert_eq!(pieces.len(), 2);
-                assert_eq!(clip.cuts().len(), 2);
-                assert_eq!(clip.capture_generation(), Some(input.capture_generation()));
-                assert!(
-                    pieces
-                        .iter()
-                        .all(|piece| piece.capture_generation == input.capture_generation())
-                );
-            } else {
-                assert!(pieces.is_empty());
-                assert!(clip.cuts().is_empty());
+                for _ in 0..100 {
+                    chunk(&mut owner);
+                }
+                let mut stream = None;
+                if cancel {
+                    control(&mut owner, |reply| Command::Cancel { reply });
+                } else {
+                    let Finish::Transcribe(mut clip) =
+                        control(&mut owner, |reply| Command::Finish {
+                            tail: Duration::ZERO,
+                            at: through,
+                            reply,
+                        })
+                    else {
+                        panic!("expected transcription");
+                    };
+                    stream = clip.take_stream();
+                }
+                let received = commands.try_iter().collect::<Vec<_>>();
+                let count = |matches: fn(&EngineCommand) -> bool| {
+                    received.iter().filter(|command| matches(command)).count()
+                };
+                let begun = count(|command| matches!(command, EngineCommand::Begin { .. }));
+                let feeds = count(|command| matches!(command, EngineCommand::Feed { .. }));
+                let cancels = count(|command| matches!(command, EngineCommand::Cancel { .. }));
+                assert_eq!(begun, usize::from(hotkey), "{cancel}");
+                assert_eq!(feeds > 0, hotkey, "{cancel}");
+                assert_eq!(cancels, usize::from(hotkey && cancel), "{cancel}");
+                assert_eq!(stream.is_some(), hotkey && !cancel, "{cancel}");
             }
         }
     }

@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 use color_eyre::eyre::{Result, eyre};
+#[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -14,14 +16,16 @@ static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
 static SHORTCUT_TOGGLE: AtomicBool = AtomicBool::new(false);
-static INCREMENTAL_TRANSCRIPTION: AtomicBool = AtomicBool::new(true);
 static MEETINGS_ENABLED: AtomicBool = AtomicBool::new(false);
 static MEETING_NOTES_ENABLED: AtomicBool = AtomicBool::new(true);
 static MEETING_OUTPUT_FOLDER: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
+static INDICATOR_POSITION: AtomicU8 = AtomicU8::new(0);
 static HOTKEYS: OnceLock<RwLock<RuntimeHotkeys>> = OnceLock::new();
+#[cfg(target_os = "macos")]
 static PASTE_KEY_CODE: OnceLock<u16> = OnceLock::new();
+#[cfg(target_os = "macos")]
 static SCRAWL_KEY_CODE: OnceLock<u16> = OnceLock::new();
 static SCRAWL_ENABLED: AtomicBool = AtomicBool::new(false);
 static SCRAWL_AUTO_CROP: AtomicBool = AtomicBool::new(true);
@@ -115,6 +119,28 @@ impl HotkeyModifiers {
         }
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub const fn control() -> Self {
+        Self {
+            control: Some(ModifierSide::Either),
+            option: None,
+            shift: None,
+            command: None,
+            function: false,
+        }
+    }
+
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub const fn control_option() -> Self {
+        Self {
+            control: Some(ModifierSide::Either),
+            option: Some(ModifierSide::Either),
+            shift: None,
+            command: None,
+            function: false,
+        }
+    }
+
     pub const fn option_command() -> Self {
         Self {
             option: Some(ModifierSide::Either),
@@ -159,6 +185,7 @@ impl HotkeyModifiers {
             && (!required.function || self.function)
     }
 
+    #[cfg(target_os = "macos")]
     fn keycaps(self) -> impl Iterator<Item = &'static str> {
         [
             (self.function, "fn"),
@@ -166,6 +193,32 @@ impl HotkeyModifiers {
             (self.option.is_some(), side_keycap(self.option, "⌥")),
             (self.shift.is_some(), side_keycap(self.shift, "⇧")),
             (self.command.is_some(), side_keycap(self.command, "⌘")),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, label)| enabled.then_some(label))
+    }
+
+    /// Windows names Command the Windows key and Option Alt.
+    #[cfg(target_os = "windows")]
+    fn keycaps(self) -> impl Iterator<Item = &'static str> {
+        [
+            (self.control.is_some(), "Ctrl"),
+            (self.command.is_some(), "Win"),
+            (self.option.is_some(), "Alt"),
+            (self.shift.is_some(), "Shift"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, label)| enabled.then_some(label))
+    }
+
+    /// Linux names Command the Super key and Option Alt.
+    #[cfg(target_os = "linux")]
+    fn keycaps(self) -> impl Iterator<Item = &'static str> {
+        [
+            (self.control.is_some(), "Ctrl"),
+            (self.option.is_some(), "Alt"),
+            (self.shift.is_some(), "Shift"),
+            (self.command.is_some(), "Super"),
         ]
         .into_iter()
         .filter_map(|(enabled, label)| enabled.then_some(label))
@@ -188,6 +241,7 @@ fn modifier_contains(candidate: Option<ModifierSide>, required: Option<ModifierS
     }
 }
 
+#[cfg(target_os = "macos")]
 fn side_keycap(side: Option<ModifierSide>, symbol: &'static str) -> &'static str {
     match (side, symbol) {
         (Some(ModifierSide::Left), "⌃") => "L⌃",
@@ -202,10 +256,53 @@ fn side_keycap(side: Option<ModifierSide>, symbol: &'static str) -> &'static str
     }
 }
 
+/// A shortcut's non-modifier key. macOS identifies it by `code`, the virtual
+/// key code resolved through the active keyboard layout. Windows and Linux
+/// identify it by `label`, the key's name ("Space", "V", "F12", "PageUp"),
+/// which their input layers translate to virtual keys, X11 keysyms, or evdev
+/// codes; `code` is zero there. A settings file never moves between OSes.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HotkeyKey {
     pub code: u16,
     pub label: String,
+}
+
+impl HotkeyKey {
+    /// A key identified by name on Windows and Linux.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub fn named(name: &str) -> Self {
+        Self {
+            code: 0,
+            label: key_label(name),
+        }
+    }
+
+    /// The lowercase key name Windows and Linux input layers resolve.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub fn name(&self) -> String {
+        self.label.to_ascii_lowercase()
+    }
+
+    fn same_key(&self, other: &Self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.code == other.code
+        } else {
+            self.label.eq_ignore_ascii_case(&other.label)
+        }
+    }
+}
+
+/// The keycap label for a key name: one character in uppercase, otherwise
+/// the name with a leading capital ("space" -> "Space", "f12" -> "F12").
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn key_label(name: &str) -> String {
+    let name = name.trim();
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) if name.chars().count() == 1 => first.to_uppercase().collect(),
+        Some(first) => first.to_uppercase().chain(characters).collect(),
+        None => String::new(),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -216,24 +313,48 @@ pub struct HotkeyBinding {
 }
 
 impl Default for HotkeyBinding {
+    /// Option on macOS, Ctrl+Space on Windows, Alt+Space on Linux.
     fn default() -> Self {
-        Self {
+        #[cfg(target_os = "macos")]
+        let binding = Self {
             modifiers: HotkeyModifiers::option(),
             key: None,
-        }
+        };
+        #[cfg(target_os = "windows")]
+        let binding = Self::chord(HotkeyModifiers::control(), "space");
+        #[cfg(target_os = "linux")]
+        let binding = Self::chord(HotkeyModifiers::option(), "space");
+        binding
     }
 }
 
 impl HotkeyBinding {
-    pub fn edit_default() -> Self {
+    /// Modifiers plus a key identified by name (Windows and Linux).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn chord(modifiers: HotkeyModifiers, key: &str) -> Self {
         Self {
-            modifiers: HotkeyModifiers::option_command(),
-            key: None,
+            modifiers,
+            key: Some(HotkeyKey::named(key)),
         }
     }
 
+    /// Option-Command on macOS; Ctrl+Alt+I elsewhere, where a modifier-only
+    /// chord would collide with ordinary typing.
+    pub fn edit_default() -> Self {
+        #[cfg(target_os = "macos")]
+        let binding = Self {
+            modifiers: HotkeyModifiers::option_command(),
+            key: None,
+        };
+        #[cfg(not(target_os = "macos"))]
+        let binding = Self::chord(HotkeyModifiers::control_option(), "i");
+        binding
+    }
+
+    /// Option-Shift-V on macOS; Ctrl+Alt+V elsewhere.
     pub fn paste_last_default() -> Self {
-        Self {
+        #[cfg(target_os = "macos")]
+        let binding = Self {
             modifiers: HotkeyModifiers {
                 option: Some(ModifierSide::Either),
                 shift: Some(ModifierSide::Either),
@@ -243,7 +364,10 @@ impl HotkeyBinding {
                 code: paste_key_code(),
                 label: "V".into(),
             }),
-        }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let binding = Self::chord(HotkeyModifiers::control_option(), "v");
+        binding
     }
 
     pub fn paste_meeting_default() -> Self {
@@ -275,14 +399,25 @@ impl HotkeyBinding {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn paste_key_code() -> u16 {
     *PASTE_KEY_CODE.get_or_init(|| crate::keyboard::key_code_for('v').unwrap_or(9))
 }
 
+#[cfg(not(target_os = "macos"))]
+fn paste_key_code() -> u16 {
+    0
+}
+
+#[cfg(target_os = "macos")]
 fn scrawl_key_code() -> u16 {
     *SCRAWL_KEY_CODE.get_or_init(|| crate::keyboard::key_code_for('s').unwrap_or(1))
 }
 
+#[cfg(not(target_os = "macos"))]
+fn scrawl_key_code() -> u16 {
+    0
+}
 impl HotkeyBinding {
     pub fn keycaps(&self) -> Vec<String> {
         self.modifiers
@@ -311,8 +446,12 @@ impl HotkeyBinding {
     }
 
     pub fn overlaps(&self, other: &Self) -> bool {
-        self.key.as_ref().map(|key| key.code) == other.key.as_ref().map(|key| key.code)
-            && modifiers_overlap(self.modifiers, other.modifiers)
+        let same_key = match (&self.key, &other.key) {
+            (Some(left), Some(right)) => left.same_key(right),
+            (None, None) => true,
+            _ => false,
+        };
+        same_key && modifiers_overlap(self.modifiers, other.modifiers)
     }
 }
 
@@ -496,6 +635,17 @@ pub fn default_meeting_output_folder() -> PathBuf {
         .join("Hex Meetings")
 }
 
+/// Where the recording HUD appears while dictating.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum IndicatorPosition {
+    #[default]
+    Top = 0,
+    Bottom = 1,
+    Hidden = 2,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingAudioBehavior {
@@ -505,7 +655,7 @@ pub enum RecordingAudioBehavior {
     DoNothing,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DictationProcessingSettings {
     pub default_mode: DictationMode,
@@ -524,7 +674,7 @@ impl Default for DictationProcessingSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DictationMode {
     pub name: String,
@@ -535,9 +685,31 @@ pub struct DictationMode {
     pub post_processing: DictationPostProcessing,
 }
 
-pub use crate::dictation_processor::PostProcessingSettings as DictationPostProcessing;
+/// Persisted OpenCode rewrite settings for one mode.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct DictationPostProcessing {
+    pub enabled: bool,
+    pub prompt: String,
+    /// Optional `provider/model` key from the OpenCode catalog.
+    pub model: Option<String>,
+    pub variant: Option<String>,
+    pub deadline_seconds: u64,
+}
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+impl Default for DictationPostProcessing {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prompt: "Rewrite the transcript into clear, natural text while preserving the speaker's intended meaning.".into(),
+            model: None,
+            variant: None,
+            deadline_seconds: 30,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct VoiceActionSettings {
     pub enabled: bool,
@@ -587,7 +759,7 @@ impl RecordingAudioBehavior {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub commands_enabled: bool,
@@ -599,8 +771,6 @@ pub struct AppSettings {
     pub double_tap_lock: bool,
     pub double_tap_only: bool,
     pub shortcut_mode: crate::dictation::ShortcutMode,
-    /// Transcribe completed speech at pauses during hotkey captures.
-    pub incremental_transcription: bool,
     pub dictation_hotkey: HotkeyBinding,
     #[serde(
         default = "HotkeyBinding::edit_default",
@@ -616,9 +786,26 @@ pub struct AppSettings {
     pub history_retention: crate::history::HistoryRetention,
     pub meetings: MeetingSettings,
     pub scrawl: ScrawlSettings,
+    /// Start listening when Hex opens (Windows and Linux, where the
+    /// listener can be off).
+    pub enable_on_launch: bool,
+    /// Paste with Ctrl-Shift-V for terminals (Linux).
+    pub paste_with_shift: bool,
+    /// The interface language code; `None` follows the system language.
+    pub ui_language: Option<String>,
+    pub indicator_position: IndicatorPosition,
+    /// One-time settings changes already applied. A file that predates a
+    /// change lacks its ID, so the change runs once on the next load; new
+    /// settings start with every ID because they need none.
+    #[serde(default)]
+    pub migrations: Vec<String>,
     #[serde(skip_serializing)]
     pub text_replacements: Vec<TextReplacement>,
 }
+
+/// Moves English dictation to the streaming English model once.
+const STREAMING_ENGLISH_MIGRATION: &str = "streaming-english-model";
+const MIGRATIONS: &[&str] = &[STREAMING_ENGLISH_MIGRATION];
 
 fn deserialize_edit_hotkey<'de, D>(deserializer: D) -> std::result::Result<HotkeyBinding, D::Error>
 where
@@ -640,21 +827,36 @@ impl Default for AppSettings {
             double_tap_lock: true,
             double_tap_only: false,
             shortcut_mode: crate::dictation::ShortcutMode::Hold,
-            incremental_transcription: true,
             dictation_hotkey: HotkeyBinding::default(),
             edit_hotkey: HotkeyBinding::edit_default(),
             paste_last_hotkey: Some(HotkeyBinding::paste_last_default()),
             show_dock_icon: true,
-            transcription: TranscriptionSelection::default(),
+            transcription: default_transcription(),
             transcription_recents: Vec::new(),
             dictation_processing: DictationProcessingSettings::default(),
             voice_action: VoiceActionSettings::default(),
             history_retention: crate::history::HistoryRetention::default(),
             meetings: MeetingSettings::default(),
             scrawl: ScrawlSettings::default(),
+            enable_on_launch: true,
+            paste_with_shift: false,
+            ui_language: None,
+            indicator_position: IndicatorPosition::default(),
+            migrations: MIGRATIONS.iter().map(|id| id.to_string()).collect(),
             text_replacements: Vec::new(),
         }
     }
+}
+
+/// A new Windows install starts with the model recommended for the system
+/// language; macOS and Linux start with the default model.
+fn default_transcription() -> TranscriptionSelection {
+    #[cfg(target_os = "windows")]
+    let selection =
+        crate::transcription_models::recommended_selection(&crate::desktop_i18n::system_language());
+    #[cfg(not(target_os = "windows"))]
+    let selection = TranscriptionSelection::default();
+    selection
 }
 
 impl AppSettings {
@@ -779,12 +981,14 @@ impl AppSettings {
     }
 
     pub fn load() -> Result<Self> {
-        let settings = Self::load_from(&path()?)?;
+        let path = path()?;
+        migrate_legacy_settings(&path)?;
+        let settings = Self::load_from(&path)?;
         settings.apply_runtime();
         Ok(settings)
     }
 
-    fn load_from(path: &std::path::Path) -> Result<Self> {
+    pub(crate) fn load_from(path: &std::path::Path) -> Result<Self> {
         match fs::read(path) {
             Ok(data) => {
                 let mut settings: Self = serde_json::from_slice(&data)?;
@@ -795,6 +999,7 @@ impl AppSettings {
                 settings.migrate_legacy_replacements();
                 settings.normalize_mode_application_names();
                 settings.migrate_disabled_transcription_model();
+                settings.apply_one_time_migrations();
                 settings.normalize_transcription_recents();
                 crate::transcription_models::validate(&settings.transcription)?;
                 settings.repair_hotkey_conflict();
@@ -823,6 +1028,7 @@ impl AppSettings {
             .parent()
             .ok_or_else(|| eyre!("settings path has no parent"))?;
         fs::create_dir_all(parent)?;
+        #[cfg(target_os = "macos")]
         if !path.exists() {
             // Saving new preferences does not imply onboarding completion.
             crate::onboarding::record_pending_at(parent)?;
@@ -838,20 +1044,12 @@ impl AppSettings {
             u8::from(self.commands_enabled) | (u8::from(self.release_microphone_while_idle) << 1);
         MICROPHONE_POLICY.store(policy, Ordering::Release);
         CUSTOM_TRANSFORMATIONS_ENABLED.store(
-            !self
-                .dictation_processing
-                .default_mode
-                .transformations
-                .is_empty()
-                || self
-                    .dictation_processing
-                    .modes
-                    .iter()
-                    .any(|mode| !mode.transformations.is_empty()),
+            transformations_used(&self.dictation_processing),
             Ordering::Release,
         );
         crate::feedback::set_enabled(self.sound_effects);
         crate::feedback::set_volume(self.sound_effect_volume.clamp(0.0, 1.0));
+        INDICATOR_POSITION.store(self.indicator_position as u8, Ordering::Relaxed);
         RECORDING_AUDIO_BEHAVIOR.store(self.recording_audio_behavior.encoded(), Ordering::Relaxed);
         DOUBLE_TAP_LOCK.store(self.double_tap_lock, Ordering::Relaxed);
         DOUBLE_TAP_ONLY.store(
@@ -862,7 +1060,6 @@ impl AppSettings {
             self.shortcut_mode == crate::dictation::ShortcutMode::Toggle,
             Ordering::Relaxed,
         );
-        INCREMENTAL_TRANSCRIPTION.store(self.incremental_transcription, Ordering::Relaxed);
         MEETINGS_ENABLED.store(self.meetings.available(), Ordering::Release);
         MEETING_NOTES_ENABLED.store(
             self.meetings.summarize_with_apple_intelligence,
@@ -881,6 +1078,7 @@ impl AppSettings {
             .unwrap_or_else(|error| error.into_inner()) = self.runtime_hotkeys();
         set_transcription_selection(&self.transcription);
         set_microphone_selection(self.microphone.as_deref());
+        #[cfg(target_os = "macos")]
         crate::config::update_dictation_profiles(&self.dictation_processing);
         *VOICE_ACTION_SETTINGS
             .get_or_init(Default::default)
@@ -890,6 +1088,10 @@ impl AppSettings {
 
     /// Mode activations saved while Finder showed filename extensions carry a
     /// `.app` suffix that never matched the foreground application name.
+    #[cfg(not(target_os = "macos"))]
+    fn normalize_mode_application_names(&mut self) {}
+
+    #[cfg(target_os = "macos")]
     fn normalize_mode_application_names(&mut self) {
         let modes = std::iter::once(&mut self.dictation_processing.default_mode)
             .chain(self.dictation_processing.modes.iter_mut());
@@ -929,6 +1131,50 @@ impl AppSettings {
         self.text_replacements.clear();
     }
 
+    /// Applies each one-time change this file has not seen, then records it
+    /// so a later choice, such as switching back, sticks.
+    fn apply_one_time_migrations(&mut self) {
+        if !self.has_migration(STREAMING_ENGLISH_MIGRATION) {
+            self.switch_english_to_streaming_model();
+            self.migrations.push(STREAMING_ENGLISH_MIGRATION.into());
+        }
+    }
+
+    fn has_migration(&self, id: &str) -> bool {
+        self.migrations.iter().any(|applied| applied == id)
+    }
+
+    /// English dictation moves to Parakeet Unified English, which streams
+    /// while the shortcut is held. The previous model stays downloaded and
+    /// in the recent models, one click away. Other languages and Auto keep
+    /// their model because Parakeet Unified is English-only.
+    fn switch_english_to_streaming_model(&mut self) {
+        if self.transcription.language != "en"
+            || self.transcription.model == TranscriptionModelId::ParakeetUnifiedEnglish
+        {
+            return;
+        }
+        let model =
+            crate::transcription_models::definition(TranscriptionModelId::ParakeetUnifiedEnglish);
+        let selection = TranscriptionSelection {
+            model: model.id,
+            language: "en".into(),
+            recognition_hints: if model.supports_recognition_hints {
+                self.transcription.recognition_hints.clone()
+            } else {
+                String::new()
+            },
+        };
+        if crate::transcription_models::validate(&selection).is_err() {
+            return;
+        }
+        tracing::info!(
+            from = self.transcription.model.as_str(),
+            "switched English dictation to the streaming English model"
+        );
+        self.remember_transcription(selection);
+    }
+
     fn migrate_disabled_transcription_model(&mut self) {
         if crate::transcription_models::definition(self.transcription.model).available() {
             return;
@@ -960,6 +1206,7 @@ impl AppSettings {
         if !self.voice_action.enabled || !self.dictation_hotkey.overlaps(&self.edit_hotkey) {
             return;
         }
+        #[cfg(target_os = "macos")]
         let edit_with_key = crate::keyboard::key_code_for('e')
             .ok()
             .map(|code| HotkeyBinding {
@@ -969,6 +1216,8 @@ impl AppSettings {
                     label: "E".into(),
                 }),
             });
+        #[cfg(not(target_os = "macos"))]
+        let edit_with_key = Some(HotkeyBinding::chord(HotkeyModifiers::option_command(), "e"));
         let control_command = HotkeyBinding {
             modifiers: HotkeyModifiers {
                 control: Some(ModifierSide::Either),
@@ -1062,6 +1311,25 @@ pub fn microphone_policy() -> MicrophonePolicy {
     }
 }
 
+/// Whether the global mode or any mode runs a transformation.
+pub fn transformations_used(processing: &DictationProcessingSettings) -> bool {
+    !processing.default_mode.transformations.is_empty()
+        || processing
+            .modes
+            .iter()
+            .any(|mode| !mode.transformations.is_empty())
+}
+
+/// Where the recording HUD appears, as last saved.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn indicator_position() -> IndicatorPosition {
+    match INDICATOR_POSITION.load(Ordering::Relaxed) {
+        1 => IndicatorPosition::Bottom,
+        2 => IndicatorPosition::Hidden,
+        _ => IndicatorPosition::Top,
+    }
+}
+
 pub fn custom_transformations_enabled() -> bool {
     CUSTOM_TRANSFORMATIONS_ENABLED.load(Ordering::Acquire)
 }
@@ -1076,10 +1344,6 @@ pub fn double_tap_only() -> bool {
 
 pub fn shortcut_toggle() -> bool {
     SHORTCUT_TOGGLE.load(Ordering::Relaxed)
-}
-
-pub fn incremental_transcription() -> bool {
-    INCREMENTAL_TRANSCRIPTION.load(Ordering::Relaxed)
 }
 
 /// Whether meeting detection and recording may run: always in developer
@@ -1147,6 +1411,7 @@ pub fn dock_icon_visible(show_dock_icon: bool, status_item_available: bool) -> b
     show_dock_icon || !status_item_available
 }
 
+#[cfg(target_os = "macos")]
 pub fn set_dock_icon_visible(visible: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
         tracing::warn!("Dock icon visibility must be changed on the main thread");
@@ -1163,6 +1428,7 @@ pub fn set_dock_icon_visible(visible: bool) {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn hide_application() {
     let Some(marker) = MainThreadMarker::new() else {
         tracing::warn!("cannot hide HEX outside the main thread");
@@ -1173,6 +1439,59 @@ pub fn hide_application() {
 
 fn path() -> Result<PathBuf> {
     Ok(crate::app_paths::support_dir()?.join("settings.json"))
+}
+
+/// The per-OS settings file that predates `settings.json`.
+const LEGACY_SETTINGS_FILE: Option<&str> = if cfg!(target_os = "windows") {
+    Some("windows-settings.json")
+} else if cfg!(target_os = "linux") {
+    Some("linux-settings.json")
+} else {
+    None
+};
+
+/// Whether settings were ever saved, including a legacy file that the next
+/// load migrates; a first run has neither and onboards.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn exists() -> bool {
+    path().is_ok_and(|path| saved_at(&path))
+}
+
+fn saved_at(path: &std::path::Path) -> bool {
+    path.exists()
+        || LEGACY_SETTINGS_FILE
+            .zip(path.parent())
+            .is_some_and(|(legacy, directory)| directory.join(legacy).exists())
+}
+
+/// Before the first `settings.json`, adopt a legacy per-OS settings file
+/// once: write `settings.json`, then keep the old file as `*.migrated`.
+pub(crate) fn migrate_legacy_settings(path: &std::path::Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    let Some(directory) = path.parent() else {
+        return Ok(());
+    };
+    #[cfg(target_os = "windows")]
+    let legacy = crate::windows_migration::legacy_settings(directory)?;
+    #[cfg(target_os = "linux")]
+    let legacy = crate::linux_migration::legacy_settings(directory)?;
+    #[cfg(target_os = "macos")]
+    let legacy: Option<(PathBuf, AppSettings)> = {
+        let _ = directory;
+        None
+    };
+    let Some((legacy_path, mut settings)) = legacy else {
+        return Ok(());
+    };
+    settings.migrations.clear();
+    settings.write_to(path)?;
+    let mut migrated = legacy_path.clone().into_os_string();
+    migrated.push(".migrated");
+    fs::rename(&legacy_path, migrated)?;
+    tracing::info!(from = %legacy_path.display(), "migrated legacy settings into settings.json");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1193,7 +1512,6 @@ mod tests {
         );
         assert!(settings.double_tap_lock);
         assert!(!settings.double_tap_only);
-        assert!(settings.incremental_transcription);
         assert_eq!(settings.dictation_hotkey, HotkeyBinding::default());
         assert_eq!(settings.edit_hotkey, HotkeyBinding::edit_default());
         assert_eq!(
@@ -1201,7 +1519,7 @@ mod tests {
             Some(HotkeyBinding::paste_last_default())
         );
         assert!(settings.show_dock_icon);
-        assert_eq!(settings.transcription, TranscriptionSelection::default());
+        assert_eq!(settings.transcription, AppSettings::default().transcription);
         assert!(
             !settings
                 .dictation_processing
@@ -1246,6 +1564,89 @@ mod tests {
         );
     }
 
+    fn english(model: TranscriptionModelId) -> String {
+        format!(
+            r#"{{"transcription":{{"model":"{}","language":"en","recognition_hints":""}}}}"#,
+            model.as_str()
+        )
+    }
+
+    #[test]
+    fn english_dictation_switches_to_the_streaming_model_once() {
+        let dir = TestSettingsDir::new("streaming-english");
+        fs::write(&dir.path, english(TranscriptionModelId::ParakeetV3)).unwrap();
+
+        let settings = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(
+            settings.transcription.model,
+            TranscriptionModelId::ParakeetUnifiedEnglish
+        );
+        assert!(settings.has_migration(STREAMING_ENGLISH_MIGRATION));
+        assert!(
+            settings
+                .transcription_recents
+                .iter()
+                .any(|recent| recent.model == TranscriptionModelId::ParakeetV3),
+            "the previous model stays one click away"
+        );
+        let saved: AppSettings = serde_json::from_slice(&fs::read(&dir.path).unwrap()).unwrap();
+        assert!(saved.has_migration(STREAMING_ENGLISH_MIGRATION));
+
+        // Switching back after the migration sticks.
+        let mut chosen = settings.clone();
+        chosen.transcription.model = TranscriptionModelId::ParakeetV3;
+        chosen.write_to(&dir.path).unwrap();
+        let reloaded = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(
+            reloaded.transcription.model,
+            TranscriptionModelId::ParakeetV3
+        );
+    }
+
+    #[test]
+    fn other_languages_and_auto_keep_their_model() {
+        for language in ["de", "auto"] {
+            let model = crate::transcription_models::choices_for_runtime(language)
+                .iter()
+                .map(|choice| choice.model.id)
+                .find(|model| *model != TranscriptionModelId::ParakeetUnifiedEnglish)
+                .expect("a model for the language");
+            let dir = TestSettingsDir::new("streaming-other");
+            fs::write(
+                &dir.path,
+                format!(
+                    r#"{{"transcription":{{"model":"{}","language":"{language}","recognition_hints":""}}}}"#,
+                    model.as_str()
+                ),
+            )
+            .unwrap();
+            let settings = AppSettings::load_from(&dir.path).unwrap();
+            assert_eq!(settings.transcription.model, model);
+            assert_eq!(settings.transcription.language, language);
+            assert!(settings.has_migration(STREAMING_ENGLISH_MIGRATION));
+        }
+    }
+
+    #[test]
+    fn new_settings_need_no_one_time_migration() {
+        assert!(AppSettings::default().has_migration(STREAMING_ENGLISH_MIGRATION));
+        let dir = TestSettingsDir::new("streaming-new");
+        let settings = AppSettings {
+            transcription: TranscriptionSelection {
+                model: TranscriptionModelId::ParakeetV3,
+                language: "en".into(),
+                recognition_hints: String::new(),
+            },
+            ..AppSettings::default()
+        };
+        settings.write_to(&dir.path).unwrap();
+        let reloaded = AppSettings::load_from(&dir.path).unwrap();
+        assert_eq!(
+            reloaded.transcription.model,
+            TranscriptionModelId::ParakeetV3
+        );
+    }
+
     struct TestSettingsDir {
         directory: PathBuf,
         path: PathBuf,
@@ -1270,6 +1671,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn new_settings_require_onboarding_across_reloads() {
         use crate::onboarding::{completion_recorded_at, record_completion_at};
@@ -1312,6 +1714,7 @@ mod tests {
         assert!(completion_recorded_at(&dir.directory));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn loading_strips_finder_bundle_extensions_from_mode_applications() {
         let dir = TestSettingsDir::new("mode-applications");
@@ -1361,6 +1764,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn rewriting_legacy_rust_settings_preserves_onboarding_migration() {
         let dir = TestSettingsDir::new("legacy-onboarding");
@@ -1373,6 +1777,7 @@ mod tests {
         assert!(dir.directory.join("onboarding-complete").is_file());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn first_settings_write_requires_the_pending_marker() {
         let dir = TestSettingsDir::new("pending-onboarding");
@@ -1380,6 +1785,19 @@ mod tests {
 
         assert!(AppSettings::default().write_to(&dir.path).is_err());
         assert!(!dir.path.exists());
+    }
+
+    #[test]
+    fn a_legacy_settings_file_counts_as_saved_settings() {
+        let dir = TestSettingsDir::new("legacy-exists");
+        assert!(!saved_at(&dir.path));
+        if let Some(legacy) = LEGACY_SETTINGS_FILE {
+            fs::write(dir.directory.join(legacy), b"{}").unwrap();
+            assert!(saved_at(&dir.path));
+            fs::remove_file(dir.directory.join(legacy)).unwrap();
+        }
+        fs::write(&dir.path, b"{}").unwrap();
+        assert!(saved_at(&dir.path));
     }
 
     #[test]
@@ -1712,9 +2130,10 @@ mod tests {
         assert_eq!(decoded.dictation_hotkey, settings.dictation_hotkey);
         assert_eq!(decoded.paste_last_hotkey, None);
         assert!(decoded.double_tap_only);
-        let disabled: AppSettings =
-            serde_json::from_str(r#"{"incremental_transcription":false}"#).unwrap();
-        assert!(!disabled.incremental_transcription);
+        // Settings saved before dictation streamed still load.
+        assert!(
+            serde_json::from_str::<AppSettings>(r#"{"incremental_transcription":false}"#).is_ok()
+        );
 
         let legacy: HotkeyModifiers = serde_json::from_str(
             r#"{"control":false,"option":true,"shift":false,"command":false,"function":false}"#,
@@ -1871,6 +2290,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn edit_shortcut_cannot_shadow_the_dictation_shortcut() {
         let option = HotkeyBinding::default();

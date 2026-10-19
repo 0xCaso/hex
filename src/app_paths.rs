@@ -46,7 +46,6 @@ pub fn init_process_logging(shutdown: &'static AtomicBool) -> Result<PathBuf> {
     Ok(log_dir)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn opencode_workspace() -> Result<PathBuf> {
     Ok(support_dir()?.join("opencode"))
 }
@@ -56,12 +55,10 @@ pub fn local_api_discovery_file() -> Result<PathBuf> {
     Ok(support_dir()?.join("local-api.json"))
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn personal_commands_status_file() -> Result<PathBuf> {
     Ok(support_dir()?.join("personal-commands.json"))
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn personal_commands_workspace() -> Result<PathBuf> {
     Ok(dirs::home_dir()
         .ok_or_else(|| eyre!("home directory is unavailable"))?
@@ -87,7 +84,7 @@ pub fn personal_commands_sdk() -> Result<PathBuf> {
 
 /// A source checkout's SDK, otherwise the SDK sources embedded in this
 /// executable, written once per content hash under Application Support.
-#[cfg(target_os = "windows")]
+#[cfg(not(target_os = "macos"))]
 pub fn personal_commands_sdk() -> Result<PathBuf> {
     use std::fmt::Write as _;
 

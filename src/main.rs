@@ -2,28 +2,24 @@
 mod accessibility;
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 mod app_paths;
-#[cfg(target_os = "macos")]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod app_settings;
-#[cfg(target_os = "macos")]
 mod app_window;
 #[cfg(target_os = "macos")]
 mod apple_intelligence;
 #[cfg(target_os = "macos")]
 mod apple_speech;
-#[cfg(target_os = "macos")]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod application_catalog;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod audio;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod command_grammar;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod commands;
 #[cfg(target_os = "macos")]
 mod config;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod context;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod dashboard;
@@ -36,7 +32,7 @@ mod desktop_host;
 mod desktop_transcription_picker;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod desktop_ui;
-#[cfg(target_os = "macos")]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod developer_control;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod dictation;
@@ -46,8 +42,7 @@ mod dictation_audio;
 mod dictation_diagnostics;
 #[cfg(target_os = "macos")]
 mod dictation_indicator;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod dictation_processor;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod events;
@@ -55,13 +50,12 @@ mod events;
 mod feedback;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod gguf_session;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 mod history;
 mod instance;
 #[cfg(target_os = "macos")]
 mod keyboard;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod keys;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -74,13 +68,13 @@ mod linux_dictation;
 #[cfg(target_os = "linux")]
 mod linux_input;
 #[cfg(target_os = "linux")]
+mod linux_migration;
+#[cfg(target_os = "linux")]
 mod linux_paste;
 #[cfg(target_os = "linux")]
 mod linux_service;
 #[cfg(target_os = "linux")]
 mod linux_session;
-#[cfg(target_os = "linux")]
-mod linux_settings;
 #[cfg(target_os = "linux")]
 mod linux_updater;
 #[cfg(target_os = "linux")]
@@ -90,7 +84,7 @@ mod local_api;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 mod local_transcriber;
-#[cfg(target_os = "macos")]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod login_item;
 #[cfg(target_os = "macos")]
 mod meeting;
@@ -107,7 +101,7 @@ mod microphone_activity;
 mod moonshine;
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod moonshine_lab;
-#[cfg(target_os = "macos")]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod onboarding;
 #[cfg(target_os = "macos")]
 mod parakeet;
@@ -117,8 +111,7 @@ mod paste;
 mod pause_segmenter;
 #[cfg(target_os = "macos")]
 mod permission_guide;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod personal_commands;
 #[cfg(target_os = "macos")]
 mod recognition;
@@ -134,17 +127,18 @@ mod spoken_text;
 mod status_item;
 #[cfg(target_os = "macos")]
 mod suppression;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod text_input;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod text_replacements;
 #[cfg(target_os = "macos")]
 mod transcription;
 #[cfg(target_os = "macos")]
 mod transcription_benchmark;
+mod transcription_engine;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod transcription_models;
-#[cfg(target_os = "macos")]
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod transcription_preparation;
 #[cfg(target_os = "macos")]
 mod transcription_service;
@@ -152,42 +146,15 @@ mod transcription_service;
 // The Windows shell and the shared desktop layer it was built on. These
 // modules come from the `windows-shell` branch and stay Windows-only until
 // the macOS and Linux shells adopt them.
-#[cfg(target_os = "windows")]
-mod desktop_activity_pane;
-#[cfg(target_os = "windows")]
-mod desktop_history_pane;
-#[cfg(target_os = "windows")]
-mod desktop_hud_lab;
-#[cfg(target_os = "windows")]
+// The shared window's strings move onto these tables next.
+#[allow(dead_code)]
 mod desktop_i18n;
 #[cfg(target_os = "windows")]
 mod desktop_indicator_model;
 #[cfg(target_os = "windows")]
 mod desktop_indicator_shader;
-#[cfg(target_os = "windows")]
-mod desktop_mode_basics;
-#[cfg(target_os = "windows")]
-mod desktop_mode_list;
-#[cfg(target_os = "windows")]
-mod desktop_mode_processing;
-#[cfg(target_os = "windows")]
-mod desktop_mode_target;
-#[cfg(target_os = "windows")]
-mod desktop_mode_transformations;
-#[cfg(target_os = "windows")]
-mod desktop_model_catalog;
-#[cfg(target_os = "windows")]
-mod desktop_onboarding;
-#[cfg(target_os = "windows")]
-mod desktop_replacement_editor;
-#[cfg(target_os = "windows")]
-mod desktop_shell;
-#[cfg(target_os = "windows")]
-mod desktop_voice_action_pane;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod self_update;
-#[cfg(target_os = "windows")]
-mod transcription_engine;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
@@ -197,8 +164,6 @@ mod windows_audio_control;
 #[cfg(target_os = "windows")]
 mod windows_context;
 #[cfg(target_os = "windows")]
-mod windows_desktop_host;
-#[cfg(target_os = "windows")]
 mod windows_dictation;
 #[cfg(target_os = "windows")]
 mod windows_indicator;
@@ -207,9 +172,9 @@ mod windows_input;
 #[cfg(target_os = "windows")]
 mod windows_login_item;
 #[cfg(target_os = "windows")]
-mod windows_paste;
+mod windows_migration;
 #[cfg(target_os = "windows")]
-mod windows_settings;
+mod windows_paste;
 #[cfg(target_os = "windows")]
 mod windows_ui;
 #[cfg(target_os = "windows")]
@@ -240,7 +205,6 @@ struct Cli {
 }
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) const DEVELOPER_FEATURES_ENABLED: bool = cfg!(debug_assertions);
 
 #[cfg(target_os = "macos")]
@@ -525,6 +489,7 @@ enum MeetingCommand {
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<()> {
+    moonshine::run_sessions_single_threaded();
     color_eyre::install()?;
     let cli = Cli::parse_from(mcp_alias_arguments(std::env::args_os().collect()));
     // Before process logging, the instance lock, or any GUI or permission

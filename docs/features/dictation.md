@@ -119,7 +119,8 @@ Release or locked finishing press                     // dictate.release-tail
      ├── Arrives -> Clip ends exactly at release + 200 ms
      └── Stream stalls/fails -> Finish within tail + 100 ms with what arrived
   -> Same for Voice Action and promotion; not Escape, short taps, voice
-     controls, programmatic stop, meetings, or Linux
+     controls, programmatic stop, or meetings
+  -> Linux and Windows wait the same tail; Linux ends at the release it observes
   -> A press inside the tail starts after the old clip finishes, with its own pre-roll
 
 Release when idle -> Press shortcut                   // dictate.cold-microphone
@@ -137,7 +138,7 @@ Source: `DictationCapture` in [dictation.rs](../../src/dictation.rs); checks:
 `release_tail_keeps_audio_through_the_tail_and_no_further`,
 `short_tap_discards_on_its_physical_release_despite_the_tail`,
 `resampled_clips_keep_the_last_word_through_a_delayed_release` (44.1/48 kHz,
-segmented and not, with the tail). These cover sample-buffer/timestamp logic, not
+streamed and not, with the tail). These cover sample-buffer/timestamp logic, not
 a microphone recording. The physical release stays exact; the 200 ms tail is an
 explicit extension of the trim boundary. The opt-in `release_boundary_harness`
 ([dictation_tail_tests.rs](../../src/dictation_tail_tests.rs); `HEX_TAIL_MODEL`,
@@ -153,8 +154,8 @@ Unified English, clips matched the release to the sample; releasing at
 `-100 ms`: 7/10; `-150 ms`: 4/10; `-200 ms`: 2/10). Warm 450 ms pre-roll kept the
 initial word even when speech began `-300 ms` before press, whereas cold 0 ms
 pre-roll lost initial syllables when speech preceded readiness by `150–300 ms`.
-Incremental on/off and 1 versus default decoder threads gave identical tail
-results. The harnesses now apply the tail; they have not been re-run with it. The
+The since-removed pause chunking on or off, and 1 versus default decoder
+threads, gave identical tail results. The harnesses now apply the tail; they have not been re-run with it. The
 tail also keeps any key-up or click sound made at release; no filtering is applied.
 The owner in [dictation_audio.rs](../../src/dictation_audio.rs) has
 `cold_capture_restart_rejects_late_open_results_and_closes_after_finish` and
@@ -170,35 +171,72 @@ by up to 200 ms (300 ms on a stalled stream); their order is unchanged.
 ### Streaming Finish
 
 ```ts
-Windows, model advertises streaming, GPU device       // dictate.streaming
-  Load -> Probe a one-second silent stream (also prewarms the stream graph)
-       ├── Succeeds -> Stream captures
-       └── Fails, CPU device, or HEX_STREAMING=0 -> Whole-clip path only
-  Capture passes the hold threshold (Toggle: on press)
+Model advertises streaming, GPU device             // dictate.streaming
+  // Metal on macOS, Vulkan on Linux and x64 Windows
+  Load or switch model -> Probe a one-second silent stream (also prewarms the stream graph)
+       ├── Succeeds -> Stream shortcut captures
+       └── Fails, CPU device, Apple Speech, or HEX_STREAMING=0 -> Whole-clip path only
+  Shortcut capture passes the hold threshold (Toggle on Windows and Linux: on press)
     -> Open one live stream; feed the 16 kHz backlog, then every 160 ms
        // same audio as the final clip, pre-roll included; never blocks capture
   Release -> Collect the 200 ms tail -> Finish with the complete clip
     -> Feed any unfed remainder -> Finalize -> Final text
        ├── Stream failed, produced no text, or was fed > 250 ms past the clip
        │   -> Transcribe the whole clip offline (source=fallback)
-       └── No final text within 1.5 s -> Abort the stream -> Whole clip
+       ├── No final text within 1.5 s -> Abort the stream -> Whole clip
+       └── Model switched during the capture -> Stream closed -> Whole clip
   Short tap, Escape, chord discard, microphone failure -> Drop the stream
+  Voice-delimited and programmatic captures (macOS) -> Whole clip after release
   Nothing is shown or pasted until the final text exists
 ```
 
 Source: [transcription_engine.rs](../../src/transcription_engine.rs) (one thread
-owns the model; streams, finishes, and offline runs share its FIFO because a live
-stream holds the model's compute lease), `probe_stream` and `with_stream` in
-[local_transcriber.rs](../../src/local_transcriber.rs), `with_stream` in
-[gguf_session.rs](../../src/gguf_session.rs), and `recorded_from` in
-[dictation.rs](../../src/dictation.rs). Parakeet buffers with its largest
-context menu (Unified English: 5.6 s left, 1.04 s chunk, 1.04 s right), its most
-accurate and least compute-intensive setting; `HEX_STREAM_CHUNK_MS` overrides
-the chunk for benchmarks. Each dictation logs `source=stream|offline|fallback`
-and `finish_ms`. Checks: `recorded_audio_is_a_prefix_of_the_finished_clip`
-(16, 44.1, and 48 kHz) and `source_labels_distinguish_fallbacks`. The hidden
-`model stream-bench <wav> [--speed N]` command replays a WAV in real time and
-compares both paths.
+owns the model on every OS; streams, finishes, offline runs, and macOS model
+loads and switches share its FIFO because a live stream holds the model's
+compute lease), `probe_stream` and `with_stream` in
+[gguf_session.rs](../../src/gguf_session.rs), the stream entry points in
+[local_transcriber.rs](../../src/local_transcriber.rs) and
+[parakeet.rs](../../src/parakeet.rs), and `begin_stream` in
+[dictation.rs](../../src/dictation.rs): the capture owns its stream, feeds it as
+audio arrives, cancels it with the recording, and hands it to the finished clip.
+macOS streams hotkey captures from the audio owner in
+[dictation_audio.rs](../../src/dictation_audio.rs); `DictationWorker::transcribe`
+hands the clip to the engine when it is submitted, so its stream finishes before
+a later capture opens one, and the job then waits for its text in order. Linux
+([linux_dictation.rs](../../src/linux_dictation.rs)) and Windows
+([windows_dictation.rs](../../src/windows_dictation.rs)) drive the same engine
+from their capture loops. Parakeet buffers with its largest context menu
+(Unified English: 5.6 s left, 1.04 s chunk, 1.04 s right), its most accurate and
+least compute-intensive setting; `HEX_STREAM_CHUNK_MS` overrides the chunk for
+benchmarks and `HEX_STREAMING=1` streams on any device, including a CPU
+(diagnostics and the Linux CI fixture). Each dictation logs
+`source=stream|offline|fallback` and `finish_ms`. The macOS "Transcribe during
+pauses" setting no longer affects dictation.
+
+Checks: `recorded_audio_is_a_prefix_of_the_finished_clip` (16, 44.1, and
+48 kHz), `resampled_clips_keep_the_last_word_through_a_delayed_release` (streamed
+and not), `a_stream_starts_with_the_backlog_and_feeds_in_blocks`, and
+`short_taps_cancellation_and_unstreamable_models_end_the_stream` in dictation.rs;
+`hotkey_captures_stream_once_intentional_and_others_do_not` in dictation_audio.rs;
+`hold_streams_after_the_threshold_and_toggle_streams_from_the_press`,
+`a_release_finishes_its_stream_with_the_complete_clip`,
+`escape_and_short_taps_cancel_the_stream_and_submit_nothing`, and
+`a_model_that_cannot_stream_transcribes_the_whole_clip_after_release` in
+linux_dictation.rs; `source_labels_distinguish_fallbacks`,
+`streams_send_their_audio_in_order_and_cancel_when_dropped`, and (macOS, a real
+engine thread without a model) `a_finish_without_a_stream_transcribes_the_clip_offline`,
+`an_unusable_stream_falls_back_to_the_complete_clip`,
+`work_runs_in_order_and_failures_reach_the_caller`, and
+`dropping_the_engine_stops_despite_an_open_stream` in transcription_engine.rs.
+These use synthetic audio and recorded engine commands. The Linux CI fixture
+[`scripts/test-linux-dictation.sh`](../../scripts/test-linux-dictation.sh)
+replays the same speech through a virtual microphone twice with the real model:
+once on the CPU (whole clip, `source=offline`) and once with `HEX_STREAMING=1`
+(`source=stream`, or `fallback` when the CPU stream misses its deadline). The
+hidden Windows `model stream-bench <wav> [--speed N]` command and the opt-in
+macOS `metal_stream_tracks_offline_transcription` (parakeet.rs;
+`HEX_STREAM_MODEL`, `HEX_STREAM_WAVS`, `HEX_STREAM_SPEED`) replay a WAV in real
+time and compare both paths.
 
 **Observed October 19, 2026, RTX 5070 Ti, Vulkan, Unified English Q8, Windows
 TTS clips replayed at 4× (131 s also at 1×):** release-to-text 55/55/93 ms
@@ -207,9 +245,18 @@ the dictation; process peak working set 214 MB and about 3% of one core during
 a real-time 131 s stream. Against the script, both paths transcribed the 10 s
 and 27 s clips perfectly; on 131 s the stream added one homophone error ("cache"
 → "cash") to formatting differences both paths share. Smaller chunks (560 or
-160 ms) added more errors and up to 20% GPU without a faster release. Not
-measured: macOS (not wired), physical microphone corpora, or noisy rooms.
+160 ms) added more errors and up to 20% GPU without a faster release. After the
+engine became shared (same machine and clips at 4×): 56/91 ms streaming versus
+92/865 ms whole-clip for 10/131 s, with 0/28 and 1/408 word differences, matching
+the earlier build.
 
+**Observed October 19, 2026, MacBook Air M4, Metal, Unified English Q8, the same
+clips at 4× through `metal_stream_tracks_offline_transcription`:** Metal
+qualified for streaming and both clips finished from the stream: 140/253 ms
+release-to-text (10/131 s) versus 156/2,838 ms whole-clip, with 0/28 and 1/408
+word differences. This drives the production engine and Parakeet adapter, not
+the shortcut, microphone, or paste. Not measured: physical microphone corpora,
+noisy rooms, or Linux on a real GPU.
 ### Optional Voice Controls
 
 Optional spoken entry requires Commands enabled, its model ready, and recognition
@@ -252,86 +299,12 @@ sections in each repetition. This is Metal inference evidence on an M2 Max, not
 physical capture/paste or Linux runtime proof. Chunk boundaries can still affect
 individual words; this is not a claim of perfect recognition or silence handling.
 
-The macOS `Transcriber` owns backend input padding for ordinary, voice-protocol,
-and segmented transcription. `short_unified_input_is_minimum_padded_before_trailing_context`
+The macOS `Transcriber` owns backend input padding for ordinary and
+voice-protocol transcription. `short_unified_input_is_minimum_padded_before_trailing_context`
 in [transcription.rs](../../src/transcription.rs) checks minimum-duration padding
 followed by Unified English's additional trailing silence. This is a pure sample
 policy check, not native inference-quality proof. Padding is now included in
 `inference_ms`; `prepare_ms` covers clip conversion and diagnostic retention.
-
-```ts
-Settings > Transcribe during pauses = On (default)  // dictate.incremental
-Intentional hotkey capture (Dictation or Voice Action shortcut)
-  -> Pause >= 600 ms after a piece >= 3 s, or >= 300 ms after >= 8 s
-     // speech = 20 ms frame >= 12 dB above an adaptive floor, never below -55 dBFS
-     -> Cut mid-pause -> Offer the piece to the inference worker, never blocking capture
-        ├── Worker idle -> Transcribe the piece in the background; nothing pastes
-        └── A piece already queued or running -> Keep the audio for the next piece
-Release -> One accepted job for the whole clip
-  ├── Every kept cut has a piece transcript, same model, not voice-delimited
-  │    ├── Tail near-silent (< -50 dBFS) -> Skip tail inference
-  │    ├── Tail < 3 s (the segmenter's minimum piece) -> Transcribe the last piece + tail
-  │    │    together, replacing that piece's text   // a lone word after a pause has no context
-  │    └── Otherwise -> Transcribe only the tail
-  │    -> Join pieces + tail
-  │       // after , ; : - or a mid-clause function word/hesitation/repeated word,
-  │       // lowercase the next word (not I/acronyms) and drop isolated mid-clause periods;
-  │       // otherwise close an unpunctuated piece before a capital
-  └── Missing/failed/stale piece, model change, or voice-delimited capture
-       -> Transcribe the full clip exactly as with the setting Off
-  -> Mode processing, paste, last dictation, history once on the final text
-Short tap, Escape, or new capture -> Piece transcripts are never used
-Delayed release -> Cuts after release + 200 ms are dropped with their pieces
-              // the final tail piece includes the 200 ms tail
-Programmatic/voice-delimited captures and Linux -> Never segmented
-```
-
-Source: [pause_segmenter.rs](../../src/pause_segmenter.rs), `offer_segment` in
-[dictation.rs](../../src/dictation.rs), the audio owner in
-[dictation_audio.rs](../../src/dictation_audio.rs), and `SegmentSink`,
-`SpeculativeTranscript`, `transcribe_clip`, and `join_segments` in
-[parakeet.rs](../../src/parakeet.rs). The queue keeps two slots for final jobs;
-at most one piece is admitted at a time. Logs record `joined incremental
-transcription` with `pieces`/`tail_ms`/`merged_short_tail`, or `incremental
-transcription fell back to the full clip` with a `reason`. Checks: the `pause_segmenter` tests (cut placement,
-minimum length, long-piece pauses, noise floor, digital silence);
-`segmented_pieces_match_the_final_clip_across_resampler_delays`,
-`delayed_release_drops_cuts_after_the_physical_release`,
-`rejected_pieces_merge_into_the_next_piece`, and
-`short_taps_and_cancelled_captures_never_offer_pieces` in dictation.rs;
-`hotkey_captures_hand_pieces_off_without_blocking_and_others_do_not` in
-dictation_audio.rs; and `final_job_transcribes_only_the_tail_after_complete_pieces`,
-`a_short_final_piece_is_transcribed_with_the_piece_before_it`,
-`incomplete_stale_or_mismatched_pieces_fall_back_to_the_full_clip`,
-`a_new_capture_discards_pieces_from_a_cancelled_capture`,
-`piece_admission_never_takes_a_final_job_slot`, and
-`join_segments_continues_clauses_and_closes_sentences` in parakeet.rs. These use
-synthetic audio and fake transcription; they do not drive the threads end to end.
-
-**Benchmark-only, October 14, 2026, Mac Studio, Unified English Q8, Metal:** the
-opt-in `incremental_join_tracks_offline_transcription` feeds 16 kHz recordings
-through the production capture, segmenter, plan, and join with the real model,
-sequentially rather than in real time. On 24/77/99-second recordings it cut 3/7/6
-pieces; release-time tail inference took 69/119/133 ms versus 208/715/1,270 ms for
-the full clip, with 0/2/0 word differences from the full-clip transcript (66/235/280
-words). An earlier real-time prototype measured 46–220 ms versus 0.7–3.3 s on
-77–99-second clips. Neither is physical capture or paste on a MacBook Pro, and a
-piece boundary can still change a word or its punctuation.
-
-**Short final piece, October 15, 2026, Mac Studio, Unified English Q8, Metal:** a
-retained 25-second dictation (private, not in the corpus) where the speaker paused
-before the final word "world" was cut into 5 pieces plus a 989 ms tail. Transcribed
-alone, the tail returned nothing (or "What" at release `-150 ms`), so every
-incremental `release_boundary_harness` row ended "…an amazing"; with the merge,
-every row from `-150 ms` to `+150 ms` ends "…an amazing world", matching the full
-clip. Release inference went from 27–29 ms (tail only) to 37–51 ms (last piece +
-tail) versus 102–177 ms for the full clip; the cost grows with the last piece's
-length. [`scripts/dictation-pause-fixtures.sh`](../../scripts/dictation-pause-fixtures.sh)
-writes four `say` clips with 900 ms of silence before one final word
-(`tail_pause_word`) for both harnesses. Without the merge they kept the word but
-split it into its own sentence ("an amazing. World", "finally. Done.") or lost
-its capital ("by friday"); with it they match the full clip at every offset. TTS
-does not reproduce the dropped word itself.
 
 ```ts
 Listening idle                            // dictate.model-memory
@@ -581,9 +554,10 @@ TextEdit process were stopped afterward.
 - **Voice Action is distinct:** its
   [cold modifier-order gap](voice-action.md#cold-modifier-order) is not covered by
   ordinary cold-dictation checks.
-- **Incremental transcription:** `dictate.incremental` has benchmark and
-  synthetic evidence only. Real microphones, room noise, Bluetooth inputs, and
-  inference under load have not been observed with piece handoff during capture.
+- **Streaming:** `dictate.streaming` has benchmark, synthetic, and Linux CI
+  (CPU-forced) evidence only. Real microphones, room noise, Bluetooth inputs,
+  and a physical shortcut on a Mac or a Linux GPU have not been observed with a
+  live stream.
 - **Paste consumption:** current paste policy waits a fixed interval rather than
   acknowledging target consumption. Internal ordering does not establish
   correctness for an arbitrarily slow target application.

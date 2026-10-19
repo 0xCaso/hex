@@ -16,7 +16,6 @@ use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::desktop_host::{DesktopAction, DesktopSnapshot};
-use crate::linux_settings::LinuxSettings;
 use crate::transcription_models::TranscriptionModelId;
 
 const VERSION: u32 = 1;
@@ -31,20 +30,20 @@ pub enum Request {
     Desktop(DesktopAction),
     CaptureShortcut,
     CancelShortcut,
-    SetTerminalPaste(bool),
-    SetVolume(f32),
     ChooseModel {
         model: TranscriptionModelId,
         language: String,
     },
     CancelModel,
+    /// Settings saved `settings.json`; adopt it.
+    ReloadSettings,
     Shutdown,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub desktop: DesktopSnapshot,
-    pub settings: LinuxSettings,
+    pub settings: crate::app_settings::AppSettings,
     pub editing: bool,
     pub capturing: bool,
     pub hud_limitation: Option<String>,
@@ -626,13 +625,19 @@ mod tests {
             &mut client,
             &Message {
                 version: VERSION,
-                request: Request::SetVolume(0.25),
+                request: Request::ChooseModel {
+                    model: TranscriptionModelId::default(),
+                    language: "pl".into(),
+                },
             },
         )
         .unwrap();
         let message: Message = read_frame(&mut server).unwrap();
         assert_eq!(message.version, VERSION);
-        assert!(matches!(message.request, Request::SetVolume(0.25)));
+        assert!(matches!(
+            message.request,
+            Request::ChooseModel { language, .. } if language == "pl"
+        ));
         client
             .write_all(&((MAX_FRAME + 1) as u32).to_be_bytes())
             .unwrap();

@@ -1,6 +1,6 @@
 //! End-to-end dictation corpus evaluation: sweeps shortcut release offsets
-//! (-300 ms to +200 ms), onset offsets, short/long holds, and incremental pause
-//! joins across real and synthetic WAV corpora.
+//! (-300 ms to +200 ms), onset offsets, and short/long holds across real and
+//! synthetic WAV corpora.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,9 +38,6 @@ struct SyntheticManifestEntry {
 #[derive(Debug, Serialize)]
 struct OffsetOutcome {
     offset_ms: i64,
-    incremental: bool,
-    cuts: usize,
-    pieces: Vec<String>,
     transcript: String,
     kept_last_word: bool,
 }
@@ -66,10 +63,6 @@ struct ClipReport {
     target_first_word: String,
     target_last_word: String,
     offline_has_last_word: bool,
-    incremental_full_cuts: usize,
-    incremental_full_pieces: Vec<String>,
-    incremental_full_text: String,
-    false_mid_clause_period: bool,
     offsets: Vec<OffsetOutcome>,
     onsets: Vec<OnsetOutcome>,
 }
@@ -175,32 +168,6 @@ fn last_word_of(text: &str) -> Option<String> {
     normalized_words(text).into_iter().next_back()
 }
 
-fn has_false_mid_clause_period(offline: &str, joined: &str) -> bool {
-    let mid_clause_endings = [
-        " of.",
-        " the.",
-        " a.",
-        " an.",
-        " to.",
-        " in.",
-        " on.",
-        " for.",
-        " with.",
-        " and.",
-        " or.",
-        " but.",
-        " that.",
-        " you know.",
-        " kind of.",
-        " sort of.",
-    ];
-    let lower_joined = joined.to_lowercase();
-    let lower_offline = offline.to_lowercase();
-    mid_clause_endings
-        .iter()
-        .any(|pattern| lower_joined.contains(pattern) && !lower_offline.contains(pattern))
-}
-
 /// Feeds 10 ms chunks through `DictationCapture`, starting at `lead` samples
 /// and releasing at `lead + release_samples`. Like production, the clip keeps
 /// the post-release tail and finishes once that tail plus one 20 ms buffer
@@ -210,9 +177,8 @@ fn simulate_capture(
     rate: u32,
     lead_samples: usize,
     release_samples: usize,
-    incremental: bool,
     warm_mic: bool,
-) -> (DictationClip, Vec<CaptureSegment>) {
+) -> DictationClip {
     let origin = CaptureInstant::from_nanos(60_000_000_000);
     let at = |samples: usize| {
         origin + Duration::from_nanos(samples as u64 * 1_000_000_000 / u64::from(rate))
@@ -220,7 +186,6 @@ fn simulate_capture(
     let pressed_at = at(lead_samples);
     let released_at = at(lead_samples + release_samples);
     let mut capture = DictationCapture::new(rate);
-    let mut pieces = Vec::new();
     let mut fed = 0usize;
     let mut finish = None;
     let chunk_len = (rate as usize / 100).max(1);
@@ -233,16 +198,9 @@ fn simulate_capture(
         }
         if fed < lead_samples && next_fed >= lead_samples {
             capture.start_at(pressed_at);
-            if incremental {
-                capture.segment_capture(1);
-            }
         }
         if next_fed > lead_samples && finish.is_none() {
             capture.become_intentional(through.min(released_at));
-            capture.offer_segment(|segment| {
-                pieces.push(segment);
-                true
-            });
             if through >= released_at + POST_RELEASE_TAIL + Duration::from_millis(20) {
                 finish = Some(capture.finish_with_tail(released_at, POST_RELEASE_TAIL));
             }
@@ -253,7 +211,7 @@ fn simulate_capture(
     let Finish::Transcribe(clip) = finish else {
         panic!("expected transcription clip");
     };
-    (clip, pieces)
+    clip
 }
 
 fn run_parakeet(model: &mut Parakeet, mut samples: Vec<f32>) -> String {
@@ -268,30 +226,9 @@ fn evaluate_clip_at_release(
     rate: u32,
     lead_samples: usize,
     release_samples: usize,
-    incremental: bool,
-) -> (usize, Vec<String>, String) {
-    let selection = TranscriptionSelection::default();
-    let (clip, pieces) = simulate_capture(
-        padded_audio,
-        rate,
-        lead_samples,
-        release_samples,
-        incremental,
-        true,
-    );
-    let cuts = clip.cuts().len();
-    let mut speculative = SpeculativeTranscript::default();
-    let mut piece_texts = Vec::new();
-    for mut piece in pieces {
-        let text = run_parakeet(model, std::mem::take(&mut piece.samples));
-        piece_texts.push(text.clone());
-        speculative.record(&piece, selection.clone(), Ok(text));
-    }
-    let plan = speculative.take_plan(&clip, &selection, false);
-    let samples = clip.into_transcription_samples();
-    let transcript =
-        transcribe_clip(samples, plan, None, |tail, _| Ok(run_parakeet(model, tail))).unwrap();
-    (cuts, piece_texts, transcript)
+) -> String {
+    let clip = simulate_capture(padded_audio, rate, lead_samples, release_samples, true);
+    run_parakeet(model, clip.into_transcription_samples())
 }
 
 #[test]
@@ -393,11 +330,6 @@ fn evaluate_dictation_corpus() {
         let offline_has_last_word = !target_last_word.is_empty()
             && last_word_of(&offline_text).as_deref() == Some(target_last_word.as_str());
 
-        let full_release = speech.len() + samples_for_duration(Duration::from_millis(200), rate);
-        let (inc_cuts, inc_pieces, inc_text) =
-            evaluate_clip_at_release(&mut model, &padded, rate, lead, full_release, true);
-        let false_period = has_false_mid_clause_period(&offline_text, &inc_text);
-
         let do_sweep = swept_count < sweep_limit
             && duration_ms <= 12_000
             && (category.starts_with("tail_") || category == "real_short");
@@ -410,28 +342,17 @@ fn evaluate_dictation_corpus() {
                     samples_for_duration(MINIMUM_HOLD_DURATION + Duration::from_millis(20), rate)
                         as i64;
                 let release_samples = rel_signed.max(min_rel) as usize;
-                for incremental in [false, true] {
-                    let (cuts, pieces, transcript) = evaluate_clip_at_release(
-                        &mut model,
-                        &padded,
-                        rate,
-                        lead,
-                        release_samples,
-                        incremental,
-                    );
-                    let kept_last_word = !target_last_word.is_empty()
-                        && normalized_words(&transcript)
-                            .last()
-                            .is_some_and(|w| w == &target_last_word);
-                    offsets.push(OffsetOutcome {
-                        offset_ms,
-                        incremental,
-                        cuts,
-                        pieces,
-                        transcript,
-                        kept_last_word,
-                    });
-                }
+                let transcript =
+                    evaluate_clip_at_release(&mut model, &padded, rate, lead, release_samples);
+                let kept_last_word = !target_last_word.is_empty()
+                    && normalized_words(&transcript)
+                        .last()
+                        .is_some_and(|w| w == &target_last_word);
+                offsets.push(OffsetOutcome {
+                    offset_ms,
+                    transcript,
+                    kept_last_word,
+                });
             }
         }
 
@@ -451,14 +372,8 @@ fn evaluate_dictation_corpus() {
                         rate,
                     ));
                 for warm_mic in [true, false] {
-                    let (clip, _) = simulate_capture(
-                        &padded,
-                        rate,
-                        press_samples,
-                        release_samples,
-                        false,
-                        warm_mic,
-                    );
+                    let clip =
+                        simulate_capture(&padded, rate, press_samples, release_samples, warm_mic);
                     let transcript = run_parakeet(&mut model, clip.into_transcription_samples());
                     let kept_first_word = !target_first_word.is_empty()
                         && normalized_words(&transcript)
@@ -475,21 +390,9 @@ fn evaluate_dictation_corpus() {
         }
 
         println!(
-            "[{}] cat={} sr={} dur={}ms end={}ms cuts={} false_period={} last={:?} offline={:?} inc={:?}",
-            id,
-            category,
-            rate,
-            duration_ms,
-            speech_end_ms,
-            inc_cuts,
-            false_period,
-            target_last_word,
-            offline_text,
-            inc_text
+            "[{}] cat={} sr={} dur={}ms end={}ms last={:?} offline={:?}",
+            id, category, rate, duration_ms, speech_end_ms, target_last_word, offline_text
         );
-        if !inc_pieces.is_empty() {
-            println!("  pieces={inc_pieces:?}");
-        }
 
         reports.push(ClipReport {
             id,
@@ -503,10 +406,6 @@ fn evaluate_dictation_corpus() {
             target_first_word,
             target_last_word,
             offline_has_last_word,
-            incremental_full_cuts: inc_cuts,
-            incremental_full_pieces: inc_pieces,
-            incremental_full_text: inc_text,
-            false_mid_clause_period: false_period,
             offsets,
             onsets,
         });

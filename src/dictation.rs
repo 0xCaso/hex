@@ -5,7 +5,7 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler, WindowFunction};
 
 use crate::audio::CaptureInstant;
-use crate::pause_segmenter::PauseSegmenter;
+use crate::transcription_engine::{LiveStream, TranscriptionEngine};
 
 #[cfg(target_os = "macos")]
 use crate::recording_environment::{RecordingEnvironmentController, RecordingEnvironmentSession};
@@ -26,6 +26,10 @@ const PARAKEET_SAMPLE_RATE: u32 = 16_000;
 /// sits well above it, so only a quiet room's noise floor is discarded.
 const SILENCE_THRESHOLD_DBFS: f32 = -50.0;
 const SILENCE_WINDOW_SAMPLES: usize = 480;
+/// Live audio is handed to a capture's stream in blocks of at least this many
+/// 16 kHz samples (160 ms), well under the model's chunk, to keep per-feed
+/// overhead low.
+const STREAM_FEED_SAMPLES: usize = 2_560;
 
 use crate::spoken_text::normalize;
 
@@ -346,17 +350,8 @@ pub enum ShortcutMode {
 
 pub struct DictationClip {
     samples: Vec<f32>,
-    /// Ascending 16 kHz offsets of pieces handed to the transcription worker
-    /// during capture. Every cut lies strictly inside `samples`.
-    cuts: Vec<usize>,
-    capture_generation: Option<u64>,
-}
-
-/// Completed speech between two pauses of a segmented capture.
-pub struct CaptureSegment {
-    pub capture_generation: u64,
-    pub index: usize,
-    pub samples: Vec<f32>,
+    /// The live stream fed with this clip's audio during capture, if any.
+    stream: Option<LiveStream>,
 }
 
 impl DictationClip {
@@ -364,25 +359,16 @@ impl DictationClip {
         self.samples.len() as u64 * 1_000 / u64::from(PARAKEET_SAMPLE_RATE)
     }
 
-    pub fn cuts(&self) -> &[usize] {
-        &self.cuts
-    }
-
-    pub fn capture_generation(&self) -> Option<u64> {
-        self.capture_generation
-    }
-
-    /// Captured 16 kHz audio from `start` to the end of the clip.
-    pub fn samples_from(&self, start: usize) -> &[f32] {
-        &self.samples[start.min(self.samples.len())..]
+    /// Takes the clip's live stream; finish it with the complete clip.
+    pub fn take_stream(&mut self) -> Option<LiveStream> {
+        self.stream.take()
     }
 
     #[cfg(test)]
-    pub fn for_test(samples: Vec<f32>, cuts: Vec<usize>, capture_generation: Option<u64>) -> Self {
+    pub fn for_test(samples: Vec<f32>) -> Self {
         Self {
             samples,
-            cuts,
-            capture_generation,
+            stream: None,
         }
     }
 
@@ -406,7 +392,7 @@ impl DictationClip {
         silent
     }
 
-    #[cfg(any(test, target_os = "linux"))]
+    #[cfg(test)]
     pub fn into_parakeet_samples(self) -> Vec<f32> {
         let mut samples = self.samples;
         pad_for_parakeet(&mut samples);
@@ -433,10 +419,6 @@ fn loudest_window_dbfs(samples: &[f32]) -> f32 {
         })
         .fold(0.0, f64::max);
     (20.0 * loudest.max(1e-6).log10()) as f32
-}
-
-pub(crate) fn is_near_silent_samples(samples: &[f32]) -> bool {
-    loudest_window_dbfs(samples) < SILENCE_THRESHOLD_DBFS
 }
 
 pub(crate) fn pad_for_parakeet(samples: &mut Vec<f32>) {
@@ -554,16 +536,9 @@ struct Recording {
     recorded_through: Option<CaptureInstant>,
     input_buffer: Vec<f32>,
     resampler: Option<Fft<f32>>,
-    segments: Option<Segments>,
+    stream: Option<LiveStream>,
     #[cfg(target_os = "macos")]
     environment: RecordingEnvironmentState,
-}
-
-struct Segments {
-    capture_generation: u64,
-    segmenter: PauseSegmenter,
-    /// Accepted cuts in final clip coordinates (after the resampler delay).
-    cuts: Vec<usize>,
 }
 
 #[cfg(target_os = "macos")]
@@ -620,7 +595,7 @@ impl Recording {
             recorded_through: None,
             input_buffer: Vec::with_capacity(Self::CHUNK_SIZE),
             resampler,
-            segments: None,
+            stream: None,
             #[cfg(target_os = "macos")]
             environment: RecordingEnvironmentState::Disabled,
         })
@@ -652,37 +627,17 @@ impl Recording {
         self.recorded_through = Some(captured_through);
     }
 
-    /// Scans resampled audio produced since the last call. A piece is cut only
-    /// once the capture is intentional; it is recorded only if `offer` accepts
-    /// it, otherwise its audio stays with the next piece.
-    fn offer_segment(&mut self, offer: impl FnOnce(CaptureSegment) -> bool) {
-        let Self {
-            intentional: true,
-            samples,
-            resampler,
-            segments: Some(segments),
-            ..
-        } = self
-        else {
+    /// Hands the stream every complete block of audio it has not seen, in
+    /// final-clip coordinates (after the resampler delay).
+    fn feed_stream(&mut self) {
+        let delay = self.resampler.as_ref().map_or(0, Fft::output_delay);
+        let Some(stream) = &mut self.stream else {
             return;
         };
-        let output_delay = resampler.as_ref().map_or(0, Fft::output_delay);
-        let available = &samples[output_delay.min(samples.len())..];
-        let scanned = segments.segmenter.consumed();
-        if available.len() <= scanned {
-            return;
-        }
-        let Some(cut) = segments.segmenter.push(&available[scanned..]) else {
-            return;
-        };
-        let start = segments.cuts.last().copied().unwrap_or(0);
-        let segment = CaptureSegment {
-            capture_generation: segments.capture_generation,
-            index: segments.cuts.len(),
-            samples: available[start..cut].to_vec(),
-        };
-        if offer(segment) {
-            segments.cuts.push(cut);
+        let recorded = &self.samples[delay.min(self.samples.len())..];
+        let fresh = &recorded[stream.fed().min(recorded.len())..];
+        if fresh.len() >= STREAM_FEED_SAMPLES {
+            stream.feed(fresh);
         }
     }
 
@@ -865,6 +820,7 @@ impl DictationCapture {
     ) {
         if let Some(recording) = &mut self.recording {
             recording.push_through(samples, captured_through);
+            recording.feed_stream();
         }
         let retention = oldest_pending
             .map(|pending| {
@@ -912,7 +868,7 @@ impl DictationCapture {
     /// 16 kHz audio recorded so far, from `start` in final-clip coordinates.
     /// The resampler's tail is only flushed by finishing, so the clip may end
     /// slightly later than what this has returned.
-    #[cfg(any(test, target_os = "windows"))]
+    #[cfg(test)]
     pub fn recorded_from(&self, start: usize) -> &[f32] {
         let Some(recording) = &self.recording else {
             return &[];
@@ -922,24 +878,36 @@ impl DictationCapture {
         &available[start.min(available.len())..]
     }
 
-    /// Cuts the current capture into pieces at pauses once it is intentional.
-    pub fn segment_capture(&mut self, capture_generation: u64) {
-        if let Some(recording) = &mut self.recording {
-            recording.segments = Some(Segments {
-                capture_generation,
-                segmenter: PauseSegmenter::default(),
-                cuts: Vec::new(),
-            });
+    /// Whether the active recording has passed the hold threshold (or never
+    /// needed one).
+    pub fn is_intentional(&self) -> bool {
+        self.recording
+            .as_ref()
+            .is_some_and(|recording| recording.intentional)
+    }
+
+    #[cfg(test)]
+    pub fn is_streaming(&self) -> bool {
+        self.recording
+            .as_ref()
+            .is_some_and(|recording| recording.stream.is_some())
+    }
+
+    /// Opens a live stream for the active recording when the engine's model
+    /// can stream. The stream receives the recording's 16 kHz audio from its
+    /// first sample (pre-roll included) as it arrives, travels with the
+    /// finished clip, and is cancelled with the recording.
+    pub fn begin_stream(&mut self, engine: &TranscriptionEngine) {
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
+        if recording.stream.is_none() {
+            recording.stream = engine.begin();
+            recording.feed_stream();
         }
     }
 
-    pub fn offer_segment(&mut self, offer: impl FnOnce(CaptureSegment) -> bool) {
-        if let Some(recording) = &mut self.recording {
-            recording.offer_segment(offer);
-        }
-    }
-
-    #[cfg(any(test, target_os = "linux"))]
+    #[cfg(test)]
     pub fn finish(&mut self, now: CaptureInstant) -> Finish {
         self.finish_with_tail(now, Duration::ZERO)
     }
@@ -964,19 +932,9 @@ impl DictationCapture {
             return Finish::Discard;
         };
 
-        let segments = recording.segments.take();
+        let stream = recording.stream.take();
         let samples = recording.finish(Some(ended_at + tail));
-        let (mut cuts, capture_generation) = segments
-            .map(|segments| (segments.cuts, Some(segments.capture_generation)))
-            .unwrap_or_default();
-        // A delayed release trims audio captured after its boundary; pieces
-        // reaching into that audio are no longer part of the clip.
-        cuts.retain(|&cut| cut < samples.len());
-        Finish::Transcribe(DictationClip {
-            samples,
-            cuts,
-            capture_generation,
-        })
+        Finish::Transcribe(DictationClip { samples, stream })
     }
 }
 
@@ -1046,7 +1004,7 @@ mod tests {
 
     #[test]
     fn silence_gate_discards_only_near_silent_captures() {
-        let clip = |samples: Vec<f32>| DictationClip::for_test(samples, Vec::new(), None);
+        let clip = |samples: Vec<f32>| DictationClip::for_test(samples);
 
         assert!(clip(vec![0.0; 16_000]).is_near_silent());
         assert!(clip(Vec::new()).is_near_silent());
@@ -1341,60 +1299,21 @@ mod tests {
             .collect()
     }
 
-    /// Feeds 10 ms chunks through an intentional segmented capture.
-    fn record_segmented(
-        capture: &mut DictationCapture,
-        audio: &[f32],
-        offer: &mut impl FnMut(CaptureSegment) -> bool,
-    ) -> CaptureInstant {
-        let start = capture_time();
-        capture.start(start);
-        capture.segment_capture(7);
-        assert!(capture.become_intentional(start + MINIMUM_HOLD_DURATION));
-        let mut through = start;
-        for chunk in audio.chunks(capture.sample_rate as usize / 100) {
-            through = through + Duration::from_millis(10);
-            capture.ingest(chunk, through);
-            capture.offer_segment(&mut *offer);
-        }
-        through
-    }
-
-    #[test]
-    fn segmented_pieces_match_the_final_clip_across_resampler_delays() {
-        for sample_rate in [16_000, 44_100, 48_000] {
-            let mut capture = DictationCapture::new(sample_rate);
-            let mut pieces = Vec::new();
-            let through =
-                record_segmented(&mut capture, &paused_speech(sample_rate), &mut |segment| {
-                    pieces.push(segment);
-                    true
-                });
-            let Finish::Transcribe(clip) = capture.finish(through) else {
-                panic!("expected transcription")
-            };
-            assert_eq!(clip.capture_generation(), Some(7));
-            assert_eq!(clip.cuts().len(), 2, "{sample_rate} Hz: {:?}", clip.cuts());
-            assert_eq!(pieces.len(), 2);
-            for (index, (piece, &cut)) in pieces.iter().zip(clip.cuts()).enumerate() {
-                let start = index
-                    .checked_sub(1)
-                    .map_or(0, |previous| clip.cuts()[previous]);
-                assert_eq!(piece.index, index);
-                assert_eq!(piece.capture_generation, 7);
-                assert!(
-                    piece.samples == clip.samples[start..cut],
-                    "{sample_rate} Hz piece {index} must equal its final-clip span"
-                );
-            }
-            for (cut, expected_ms) in clip.cuts().iter().zip([4_300, 9_300]) {
-                let cut_ms = (*cut as u64 * 1_000 / u64::from(PARAKEET_SAMPLE_RATE)) as i64;
-                assert!(
-                    (cut_ms - expected_ms).abs() <= 40,
-                    "{sample_rate} Hz: {cut_ms}"
-                );
+    /// Audio handed to streams, in order, and the streams cancelled.
+    fn stream_traffic(
+        commands: &std::sync::mpsc::Receiver<crate::transcription_engine::Command>,
+    ) -> (Vec<f32>, usize, usize) {
+        use crate::transcription_engine::Command;
+        let (mut fed, mut begun, mut cancelled) = (Vec::new(), 0, 0);
+        for command in commands.try_iter() {
+            match command {
+                Command::Begin { .. } => begun += 1,
+                Command::Feed { samples, .. } => fed.extend(samples),
+                Command::Cancel { .. } => cancelled += 1,
+                _ => {}
             }
         }
+        (fed, begun, cancelled)
     }
 
     #[test]
@@ -1408,27 +1327,37 @@ mod tests {
             let kept = kept_ms as usize * sample_rate as usize / 1_000;
             let expected = resample_for_parakeet(&audio[..kept], sample_rate);
             let mut clips = Vec::new();
-            for segmented in [false, true] {
+            for streamed in [false, true] {
+                let (engine, commands) = TranscriptionEngine::for_test();
                 let mut capture = DictationCapture::new(sample_rate);
                 let start = capture_time();
                 capture.start(start);
-                if segmented {
-                    capture.segment_capture(7);
-                }
                 assert!(capture.become_intentional(start + MINIMUM_HOLD_DURATION));
+                if streamed {
+                    capture.begin_stream(&engine);
+                }
                 let mut through = start;
                 for chunk in audio.chunks(sample_rate as usize / 100) {
                     through = through + Duration::from_millis(10);
                     capture.ingest(chunk, through);
-                    capture.offer_segment(|_| true);
                 }
-                let Finish::Transcribe(clip) = capture.finish_with_tail(
+                let Finish::Transcribe(mut clip) = capture.finish_with_tail(
                     start + Duration::from_millis(released_ms),
                     POST_RELEASE_TAIL,
                 ) else {
                     panic!("expected transcription")
                 };
-                assert_eq!(clip.cuts().len(), if segmented { 2 } else { 0 });
+                let stream = clip.take_stream();
+                assert_eq!(stream.is_some(), streamed);
+                let (fed, begun, cancelled) = stream_traffic(&commands);
+                drop(stream);
+                assert_eq!((begun, cancelled), (usize::from(streamed), 0));
+                // The stream saw exactly the clip's audio, in order, plus at
+                // most the audio captured after the release's tail.
+                let shared = fed.len().min(clip.samples.len());
+                assert_eq!(fed[..shared], clip.samples[..shared], "{sample_rate} Hz");
+                assert!(fed.len() <= clip.samples.len() + 16_000 / 4);
+                assert_eq!(fed.len() > clip.samples.len() / 2, streamed);
                 assert_eq!(clip.samples.len(), expected.len(), "{sample_rate} Hz");
                 // Only the final 10 ms may differ: the clip's resampler saw the
                 // real audio after the tail where the reference saw silence.
@@ -1438,93 +1367,76 @@ mod tests {
                         .iter()
                         .zip(&expected[..settled])
                         .all(|(clip, expected)| (clip - expected).abs() < 1e-4),
-                    "{sample_rate} Hz segmented={segmented} lost audio before the tail ended"
+                    "{sample_rate} Hz streamed={streamed} lost audio before the tail ended"
                 );
                 clips.push(clip.samples);
             }
             assert!(
                 clips[0] == clips[1],
-                "{sample_rate} Hz: segmenting changed the clip"
+                "{sample_rate} Hz: streaming changed the clip"
             );
         }
     }
 
     #[test]
-    fn delayed_release_drops_cuts_after_the_physical_release() {
-        let mut capture = DictationCapture::new(48_000);
-        let mut offered = 0;
-        record_segmented(&mut capture, &paused_speech(48_000), &mut |_| {
-            offered += 1;
-            true
-        });
-        assert_eq!(offered, 2);
-        let Finish::Transcribe(clip) = capture.finish(capture_time() + Duration::from_secs(8))
-        else {
-            panic!("expected transcription")
-        };
-        assert_eq!(clip.duration_ms(), 8_000);
-        assert_eq!(clip.cuts().len(), 1);
-        assert!(clip.cuts()[0] < clip.samples.len());
-    }
-
-    #[test]
-    fn rejected_pieces_merge_into_the_next_piece() {
+    fn a_stream_starts_with_the_backlog_and_feeds_in_blocks() {
+        let (engine, commands) = TranscriptionEngine::for_test();
         let mut capture = DictationCapture::new(16_000);
-        let mut offers = Vec::new();
-        let through = record_segmented(&mut capture, &paused_speech(16_000), &mut |segment| {
-            offers.push((segment.index, segment.samples.len()));
-            offers.len() > 1
-        });
-        let Finish::Transcribe(clip) = capture.finish(through) else {
-            panic!("expected transcription")
-        };
-        // The first piece was refused, so the second offer also starts at zero.
-        assert_eq!(offers.len(), 2);
-        assert_eq!(offers[1].0, 0);
-        assert!(offers[1].1 > offers[0].1);
-        assert_eq!(clip.cuts(), [offers[1].1]);
+        capture.keep_warm(&vec![0.25; 16_000]);
+        let start = capture_time();
+        capture.start(start);
+        assert!(!capture.is_streaming());
+        // Toggle and Linux open the stream before the hold threshold.
+        capture.begin_stream(&engine);
+        capture.begin_stream(&engine);
+        assert!(capture.is_streaming());
+        let (fed, begun, _) = stream_traffic(&commands);
+        assert_eq!(begun, 1, "a recording opens one stream");
+        assert_eq!(fed.len(), 7_200, "the 450 ms pre-roll is fed at once");
+        capture.ingest(&[0.5; 1_600], start + Duration::from_millis(100));
+        assert!(
+            stream_traffic(&commands).0.is_empty(),
+            "100 ms waits for a block"
+        );
+        capture.ingest(&[0.5; 1_600], start + Duration::from_millis(200));
+        assert_eq!(stream_traffic(&commands).0.len(), 3_200);
     }
 
     #[test]
-    fn short_taps_and_cancelled_captures_never_offer_pieces() {
-        let audio = paused_speech(16_000);
+    fn short_taps_cancellation_and_unstreamable_models_end_the_stream() {
+        let (engine, commands) = TranscriptionEngine::for_test();
         let start = capture_time();
         let mut short = DictationCapture::new(16_000);
         short.start(start);
-        short.segment_capture(1);
-        for chunk in audio.chunks(160) {
-            short.ingest(chunk, start + Duration::from_millis(100));
-            short.offer_segment(|_| panic!("unintentional capture must not cut"));
-        }
+        short.begin_stream(&engine);
+        short.ingest(&[0.5; 1_600], start + Duration::from_millis(100));
         assert!(matches!(
             short.finish(start + Duration::from_millis(100)),
             Finish::Discard
         ));
+        assert_eq!(stream_traffic(&commands).2, 1, "a short tap cancels");
 
         let mut cancelled = DictationCapture::new(16_000);
         cancelled.start(start);
-        cancelled.segment_capture(2);
         assert!(cancelled.become_intentional(start + MINIMUM_HOLD_DURATION));
-        cancelled.ingest(&audio[..16_000], start + Duration::from_secs(1));
+        cancelled.begin_stream(&engine);
+        cancelled.ingest(&[0.5; 16_000], start + Duration::from_secs(1));
         cancelled.cancel();
-        for chunk in audio[16_000..].chunks(160) {
-            cancelled.ingest(chunk, start + Duration::from_secs(2));
-            cancelled.offer_segment(|_| panic!("cancelled capture must not cut"));
-        }
-    }
+        assert!(!cancelled.is_streaming());
+        let (_, _, cancels) = stream_traffic(&commands);
+        assert_eq!(cancels, 1, "Escape cancels");
 
-    #[test]
-    fn unsegmented_captures_report_no_pieces() {
+        let (offline, commands) = TranscriptionEngine::for_test_without_streaming();
         let mut capture = DictationCapture::new(16_000);
-        let start = capture_time();
         capture.start(start);
-        capture.ingest(&paused_speech(16_000), start + Duration::from_secs(11));
-        capture.offer_segment(|_| panic!("unsegmented capture must not cut"));
-        let Finish::Transcribe(clip) = capture.finish(start + Duration::from_secs(11)) else {
+        capture.begin_stream(&offline);
+        assert!(!capture.is_streaming());
+        capture.ingest(&[0.5; 16_000], start + Duration::from_secs(1));
+        let Finish::Transcribe(mut clip) = capture.finish(start + Duration::from_secs(1)) else {
             panic!("expected transcription")
         };
-        assert!(clip.cuts().is_empty());
-        assert_eq!(clip.capture_generation(), None);
+        assert!(clip.take_stream().is_none());
+        assert!(commands.try_iter().next().is_none());
     }
 
     #[test]
