@@ -13,7 +13,6 @@ on:
         default: main
   push:
     tags: ["app-v*"]
-    branches: [ci/release-desktop] # TEMPORARY: dry run before the workflow reaches main
 
 permissions:
   contents: read
@@ -31,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || (github.ref_type == 'tag' && github.ref || 'cfb4eb4b634dac872f12f650e2287d998eef2d47') }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
           persist-credentials: false
       - id: resolve
         env:
