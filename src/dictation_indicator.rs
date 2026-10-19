@@ -23,11 +23,15 @@ use objc2_app_kit::{
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use objc2_quartz_core::CALayer;
 
+use crate::app_settings::IndicatorPosition;
+
 const WINDOW_WIDTH: f32 = 112.0;
 const WINDOW_HEIGHT: f32 = 64.0;
 const CAPSULE_WIDTH: f32 = 56.0;
 const CAPSULE_HEIGHT: f32 = 16.0;
 const TOP_OFFSET: f64 = 12.0;
+/// The capsule's gap above the Dock or the screen's bottom edge.
+const BOTTOM_OFFSET: f64 = 24.0;
 const ENTRANCE_ANGULAR_FREQUENCY: f32 = 24.0;
 const EXIT_ANGULAR_FREQUENCY: f32 = 24.0;
 const GEOMETRY_ANGULAR_FREQUENCY: f32 = 24.0;
@@ -241,7 +245,8 @@ impl MetalIndicator {
         if matches!(
             event,
             DictationIndicatorEvent::Started | DictationIndicatorEvent::EditingStarted
-        ) {
+        ) && crate::app_settings::indicator_position() != IndicatorPosition::Hidden
+        {
             self.position_on_pointer_screen();
             self.window.orderFrontRegardless();
             self.ordered = true;
@@ -255,7 +260,8 @@ impl MetalIndicator {
     }
 
     fn maintain(&mut self) {
-        if self.renderer.is_active() {
+        let hidden = crate::app_settings::indicator_position() == IndicatorPosition::Hidden;
+        if self.renderer.is_active() && !hidden {
             self.position_on_pointer_screen();
             if !self.ordered {
                 self.window.orderFrontRegardless();
@@ -290,9 +296,17 @@ impl MetalIndicator {
         let screen_frame = screen.frame();
         let visible = screen.visibleFrame();
         let capsule_margin = f64::from((WINDOW_HEIGHT - CAPSULE_HEIGHT) / 2.0);
+        let top = match crate::app_settings::indicator_position() {
+            IndicatorPosition::Bottom => {
+                visible.origin.y + BOTTOM_OFFSET - capsule_margin + f64::from(WINDOW_HEIGHT)
+            }
+            IndicatorPosition::Top | IndicatorPosition::Hidden => {
+                visible.origin.y + visible.size.height + capsule_margin - TOP_OFFSET
+            }
+        };
         let top_left = NSPoint::new(
             screen_frame.origin.x + (screen_frame.size.width - f64::from(WINDOW_WIDTH)) / 2.0,
-            visible.origin.y + visible.size.height + capsule_margin - TOP_OFFSET,
+            top,
         );
         let frame = self.window.frame();
         if (frame.origin.x - top_left.x).abs() > 0.5

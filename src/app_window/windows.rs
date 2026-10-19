@@ -372,10 +372,12 @@ impl AppWindow {
             UpdateCheck::Checking => SoftwareUpdate::Checking,
             UpdateCheck::Current => SoftwareUpdate::Current,
             UpdateCheck::Failed => SoftwareUpdate::Failed,
-            UpdateCheck::Available { version, .. } => SoftwareUpdate::Available { version },
-            UpdateCheck::ReadyToRestart { version, .. } => {
-                SoftwareUpdate::ReadyToRestart { version }
-            }
+            UpdateCheck::Available { version, .. } => SoftwareUpdate::Available {
+                version: Some(version),
+            },
+            UpdateCheck::ReadyToRestart { version, .. } => SoftwareUpdate::ReadyToRestart {
+                version: Some(version),
+            },
         })
     }
 

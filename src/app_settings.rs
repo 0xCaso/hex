@@ -21,6 +21,7 @@ static MEETING_NOTES_ENABLED: AtomicBool = AtomicBool::new(true);
 static MEETING_OUTPUT_FOLDER: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
+static INDICATOR_POSITION: AtomicU8 = AtomicU8::new(0);
 static HOTKEYS: OnceLock<RwLock<RuntimeHotkeys>> = OnceLock::new();
 #[cfg(target_os = "macos")]
 static PASTE_KEY_CODE: OnceLock<u16> = OnceLock::new();
@@ -588,11 +589,12 @@ pub fn default_meeting_output_folder() -> PathBuf {
 /// Where the recording HUD appears while dictating.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum IndicatorPosition {
     #[default]
-    Top,
-    Bottom,
-    Hidden,
+    Top = 0,
+    Bottom = 1,
+    Hidden = 2,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -996,6 +998,7 @@ impl AppSettings {
         );
         crate::feedback::set_enabled(self.sound_effects);
         crate::feedback::set_volume(self.sound_effect_volume.clamp(0.0, 1.0));
+        INDICATOR_POSITION.store(self.indicator_position as u8, Ordering::Relaxed);
         RECORDING_AUDIO_BEHAVIOR.store(self.recording_audio_behavior.encoded(), Ordering::Relaxed);
         DOUBLE_TAP_LOCK.store(self.double_tap_lock, Ordering::Relaxed);
         DOUBLE_TAP_ONLY.store(
@@ -1261,6 +1264,16 @@ pub fn transformations_used(processing: &DictationProcessingSettings) -> bool {
             .modes
             .iter()
             .any(|mode| !mode.transformations.is_empty())
+}
+
+/// Where the recording HUD appears, as last saved.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn indicator_position() -> IndicatorPosition {
+    match INDICATOR_POSITION.load(Ordering::Relaxed) {
+        1 => IndicatorPosition::Bottom,
+        2 => IndicatorPosition::Hidden,
+        _ => IndicatorPosition::Top,
+    }
 }
 
 pub fn custom_transformations_enabled() -> bool {

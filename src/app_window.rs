@@ -643,13 +643,15 @@ struct ListenerView {
 }
 
 /// The background update check's state, for the Software updates row.
+/// The update state the Software updates row shows. `version` is `None`
+/// where the updater does not report it.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 enum SoftwareUpdate {
     Checking,
     Current,
     Failed,
-    Available { version: String },
-    ReadyToRestart { version: String },
+    Available { version: Option<String> },
+    ReadyToRestart { version: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2968,7 +2970,8 @@ impl AppWindow {
         let control = match self.platform_software_update()? {
             SoftwareUpdate::Checking => busy_label("Checking").into_any_element(),
             SoftwareUpdate::Available { version } => {
-                button(ButtonKind::Secondary, format!("Update to {version}"))
+                let label = version.map_or_else(|| "Update".into(), |v| format!("Update to {v}"));
+                button(ButtonKind::Secondary, label)
                     .id("software-update")
                     .text_color(rgb(ACCENT_TEXT))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2978,7 +2981,11 @@ impl AppWindow {
                     .into_any_element()
             }
             SoftwareUpdate::ReadyToRestart { version } => {
-                button(ButtonKind::Secondary, format!("Restart into {version}"))
+                let label = version.map_or_else(
+                    || "Restart to update".into(),
+                    |v| format!("Restart into {v}"),
+                );
+                button(ButtonKind::Secondary, label)
                     .id("software-update")
                     .text_color(rgb(ACCENT_TEXT))
                     .on_click(cx.listener(|this, _, _, cx| {

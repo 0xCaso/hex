@@ -39,9 +39,9 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     release_microphone: true,
     double_tap_only: true,
     modifier_sides: true,
-    indicator_position: false,
+    indicator_position: true,
     interface_language: false,
-    software_updates: false,
+    software_updates: true,
     terminal_paste: false,
 };
 
@@ -52,7 +52,7 @@ pub(super) fn records_key_events() -> bool {
 }
 
 /// Sparkle has its own Check for Updates command.
-pub(super) const MANUAL_UPDATE_CHECK: bool = false;
+pub(super) const MANUAL_UPDATE_CHECK: bool = true;
 
 /// What the macOS application coordinator hands a new window.
 pub(super) struct Args {
@@ -429,14 +429,27 @@ impl AppWindow {
 
     pub(super) fn set_listening(&mut self, _: bool) {}
 
-    /// Sparkle presents its own update UI.
+    /// Sparkle's state. Sparkle presents the update itself, so installing
+    /// starts its check, which offers the found update.
     pub(super) fn platform_software_update(&self) -> Option<SoftwareUpdate> {
-        None
+        use crate::sparkle::UpdateStatus;
+        Some(match self.platform.update_status {
+            UpdateStatus::Unavailable => return None,
+            UpdateStatus::Checking => SoftwareUpdate::Checking,
+            UpdateStatus::Idle | UpdateStatus::UpToDate => SoftwareUpdate::Current,
+            UpdateStatus::UpdateAvailable => SoftwareUpdate::Available { version: None },
+        })
     }
 
-    pub(super) fn check_for_updates(&mut self) {}
+    pub(super) fn check_for_updates(&mut self) {
+        if !self.preview {
+            crate::sparkle::check_for_updates();
+        }
+    }
 
-    pub(super) fn install_update(&mut self, _: &mut Context<Self>) {}
+    pub(super) fn install_update(&mut self, _: &mut Context<Self>) {
+        self.check_for_updates();
+    }
 }
 
 /// Opens the app shell, or focuses and refreshes an existing shell window.
