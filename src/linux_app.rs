@@ -157,8 +157,11 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
     } else {
         UpdateState::Unmanaged
     };
+    let enable_on_launch = settings.enable_on_launch;
     let mut host = LinuxDesktopHost::new(event_path, settings, error, update);
-    host.start();
+    if enable_on_launch {
+        host.start();
+    }
     let mut editor: Option<(u64, Instant)> = None;
     let mut stopping = false;
     loop {
