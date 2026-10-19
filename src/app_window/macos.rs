@@ -1092,7 +1092,7 @@ pub(super) fn command_model_notice(
     }
 }
 
-pub(super) const fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'static str) {
+pub(super) fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'static str) {
     match kind {
         PermissionKind::Microphone => (
             tr("Microphone access is off"),
@@ -1109,7 +1109,7 @@ pub(super) const fn permission_warning_copy(kind: PermissionKind) -> (&'static s
     }
 }
 
-pub(super) const fn permission_action_label(action: PermissionAction) -> &'static str {
+pub(super) fn permission_action_label(action: PermissionAction) -> &'static str {
     match action {
         PermissionAction::RequestMicrophone => tr("Allow"),
         PermissionAction::OpenMicrophoneSettings => tr("Open settings"),
