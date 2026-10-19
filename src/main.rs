@@ -150,8 +150,6 @@ mod transcription_service;
 // The Windows shell and the shared desktop layer it was built on. These
 // modules come from the `windows-shell` branch and stay Windows-only until
 // the macOS and Linux shells adopt them.
-// The shared window's strings move onto these tables next.
-#[allow(dead_code)]
 mod desktop_i18n;
 #[cfg(target_os = "windows")]
 mod desktop_indicator_model;

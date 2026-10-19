@@ -3,6 +3,7 @@ use gpui::{
 };
 
 use crate::design_tokens::*;
+use crate::desktop_i18n::{tr, tr_fill};
 use crate::desktop_ui::{
     ButtonKind, Icon, Tone, error_panel, icon_button, menu_item, small_button, tag,
 };
@@ -106,9 +107,14 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
         let definition = model.choice.model;
         let mut deletion = ModelDeletion::Unavailable;
         let (state, action, active, preparing, progress, installed) = match model.status {
-            TranscriptionPickerStatus::Active => {
-                (tag(Tone::Accent, "Active"), None, true, false, None, true)
-            }
+            TranscriptionPickerStatus::Active => (
+                tag(Tone::Accent, tr("Active")),
+                None,
+                true,
+                false,
+                None,
+                true,
+            ),
             TranscriptionPickerStatus::Available {
                 installed,
                 deletion: offered,
@@ -116,7 +122,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                 deletion = offered;
                 (
                     tag(Tone::Neutral, model.choice.recommendation.label()),
-                    Some(if installed { "Use" } else { "Download" }),
+                    Some(if installed { tr("Use") } else { tr("Download") }),
                     false,
                     false,
                     None,
@@ -125,7 +131,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
             }
             TranscriptionPickerStatus::Preparing { label, progress } => (
                 tag(Tone::Accent, label),
-                Some("Cancel"),
+                Some(tr("Cancel")),
                 false,
                 true,
                 progress,
@@ -133,15 +139,21 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
             ),
         };
         let mut metadata = if definition.coverage == language_name(&language) {
-            format!("{} · {}", definition.quality_context, definition.timestamps)
+            format!(
+                "{} · {}",
+                tr(definition.quality_context),
+                tr(definition.timestamps)
+            )
         } else {
             format!(
                 "{} · {} · {}",
-                definition.coverage, definition.quality_context, definition.timestamps
+                tr(definition.coverage),
+                tr(definition.quality_context),
+                tr(definition.timestamps)
             )
         };
         if installed && !active {
-            metadata.push_str(" · Installed");
+            metadata.push_str(&format!(" · {}", tr("Installed")));
         }
         let actions = div()
             .flex()
@@ -164,9 +176,9 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                                 ButtonKind::Secondary
                             },
                             if confirming {
-                                format!("Delete {}?", definition.size_label())
+                                tr_fill("Delete {}?", &definition.size_label())
                             } else {
-                                "Delete".into()
+                                tr("Delete").into()
                             },
                         )
                         .id(("transcription-model-delete", index))
@@ -232,8 +244,8 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                 div()
                     .flex()
                     .gap_5()
-                    .child(model_metric("Speed", definition.realtime))
-                    .child(model_metric("Size", definition.size_label()))
+                    .child(model_metric(tr("Speed"), tr(definition.realtime)))
+                    .child(model_metric(tr("Size"), definition.size_label()))
                     .child(model_metric("WER", definition.quality)),
             )
             .when(definition.id == TranscriptionModelId::ParakeetV3, |card| {
@@ -313,7 +325,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                         .justify_between()
                         .border_b_1()
                         .border_color(rgb(LINE))
-                        .child(div().text_headline().child("Local transcription"))
+                        .child(div().text_headline().child(tr("Local transcription")))
                         .child(
                             icon_button(ButtonKind::Ghost, Icon::Close)
                                 .id("close-transcription-picker")
@@ -354,10 +366,16 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                                 .gap_2()
                                 .overflow_y_scroll()
                                 .when_some(view.error, |list, error| {
-                                    list.child(error_panel("Model could not be installed.", error))
+                                    list.child(error_panel(
+                                        tr("Model could not be installed."),
+                                        error,
+                                    ))
                                 })
                                 .when_some(view.deletion_error, |list, error| {
-                                    list.child(error_panel("Model could not be deleted.", error))
+                                    list.child(error_panel(
+                                        tr("Model could not be deleted."),
+                                        error,
+                                    ))
                                 })
                                 .children(model_cards),
                         ),

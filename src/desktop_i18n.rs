@@ -130,6 +130,16 @@ pub(crate) fn tr_fill(template: &str, value: &str) -> String {
     tr(template).replace("{}", value)
 }
 
+/// Translate a template with named `{name}` placeholders and fill them, so
+/// each language can order the values as its grammar needs.
+pub(crate) fn tr_named(template: &str, values: &[(&str, &str)]) -> String {
+    values
+        .iter()
+        .fold(tr(template).to_string(), |text, (name, value)| {
+            text.replace(&format!("{{{name}}}"), value)
+        })
+}
+
 /// A compact, translated age label for an event timestamp.
 pub(crate) fn event_age(timestamp_ms: u64) -> String {
     let seconds = crate::history::now_ms().saturating_sub(timestamp_ms) / 1_000;
@@ -207,7 +217,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Keep", ["Przechowuj", "保留", "保持", "Aufbewahren", "Conservar"]),
     ("Dictation", ["Dyktowanie", "听写", "音声入力", "Diktat", "Dictado"]),
     ("Send", ["Wysłano", "发送", "送信", "Senden", "Enviar"]),
-    ("Voice Action", ["Akcja głosowa", "语音操作", "音声アクション", "Sprachaktion", "Acción de voz"]),
+    ("Voice Action", ["Voice Action", "Voice Action", "Voice Action", "Voice Action", "Voice Action"]),
     ("Application", ["Aplikacja", "应用", "アプリ", "Anwendung", "Aplicación"]),
     ("Problem", ["Problem", "问题", "問題", "Problem", "Problema"]),
     ("Default mode", ["Tryb domyślny", "默认模式", "デフォルトモード", "Standardmodus", "Modo predeterminado"]),
@@ -346,6 +356,295 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Unavailable", ["Niedostępny", "不可用", "利用不可", "Nicht verfügbar", "No disponible"]),
     ("Recording", ["Nagrywanie", "录音中", "録音中", "Aufnahme", "Grabando"]),
     ("Transcribing", ["Transkrypcja", "转写中", "文字起こし中", "Transkribiert", "Transcribiendo"]),
+    ("Add", ["Dodaj", "添加", "追加", "Hinzufügen", "Añadir"]),
+    ("Add Application", ["Dodaj aplikację", "添加应用", "アプリを追加", "App hinzufügen", "Añadir aplicación"]),
+    ("Add a key", ["Dodaj klawisz", "添加一个按键", "キーを追加してください", "Taste hinzufügen", "Añade una tecla"]),
+    ("Add a key Linux can register", ["Dodaj klawisz, który Linux może zarejestrować", "添加一个 Linux 可以注册的按键", "Linux で登録できるキーを追加してください", "Taste hinzufügen, die Linux registrieren kann", "Añade una tecla que Linux pueda registrar"]),
+    ("Add a modifier", ["Dodaj modyfikator", "添加一个修饰键", "修飾キーを追加してください", "Sondertaste hinzufügen", "Añade un modificador"]),
+    ("Already in use", ["Już w użyciu", "已被使用", "すでに使用されています", "Bereits belegt", "Ya está en uso"]),
+    ("Behavior", ["Zachowanie", "行为", "動作", "Verhalten", "Comportamiento"]),
+    ("Change shortcut", ["Zmień skrót", "更改快捷键", "ショートカットを変更", "Kürzel ändern", "Cambiar atajo"]),
+    ("Check again", ["Sprawdź ponownie", "再次检查", "再確認", "Erneut prüfen", "Comprobar de nuevo"]),
+    ("Check failed; retrying later", ["Sprawdzanie nie powiodło się; ponowimy później", "检查失败；稍后重试", "確認に失敗しました。後で再試行します", "Prüfung fehlgeschlagen; später erneut", "La comprobación falló; se reintentará más tarde"]),
+    ("Checking for OpenCode", ["Szukanie OpenCode", "正在查找 OpenCode", "OpenCode を確認中", "Suche nach OpenCode", "Buscando OpenCode"]),
+    ("Checking…", ["Sprawdzanie…", "正在检查…", "確認中…", "Wird geprüft…", "Comprobando…"]),
+    ("Choose a local model to start dictating.", ["Wybierz lokalny model, aby zacząć dyktować.", "选择一个本地模型即可开始听写。", "ローカルモデルを選ぶと音声入力を始められます。", "Wähle ein lokales Modell, um mit dem Diktieren zu beginnen.", "Elige un modelo local para empezar a dictar."]),
+    ("Choose how much reasoning the model should use", ["Wybierz, ile rozumowania ma użyć model", "选择模型应使用多少推理", "モデルが使う推論量を選択", "Lege fest, wie viel der Modell nachdenken soll", "Elige cuánto razonamiento debe usar el modelo"]),
+    ("Choose model", ["Wybierz model", "选择模型", "モデルを選択", "Modell wählen", "Elegir modelo"]),
+    ("Clear", ["Wyczyść", "清除", "クリア", "Löschen", "Borrar"]),
+    ("Click to record a new shortcut", ["Kliknij, aby nagrać nowy skrót", "点击以录制新的快捷键", "クリックして新しいショートカットを記録", "Klicken, um ein neues Kürzel aufzunehmen", "Haz clic para grabar un atajo nuevo"]),
+    ("Confirm delete", ["Potwierdź usunięcie", "确认删除", "削除を確定", "Löschen bestätigen", "Confirmar eliminación"]),
+    ("Could not save shortcut. Try again.", ["Nie udało się zapisać skrótu. Spróbuj ponownie.", "无法保存快捷键。请重试。", "ショートカットを保存できませんでした。もう一度お試しください。", "Kürzel konnte nicht gespeichert werden. Versuche es erneut.", "No se pudo guardar el atajo. Inténtalo de nuevo."]),
+    ("Could not update Voice Action:", ["Nie udało się zaktualizować Voice Action:", "无法更新 Voice Action：", "Voice Action を更新できませんでした:", "Voice Action konnte nicht aktualisiert werden:", "No se pudo actualizar Voice Action:"]),
+    ("Create a TypeScript workspace to define reusable transformations.", ["Utwórz obszar roboczy TypeScript, aby zdefiniować transformacje wielokrotnego użytku.", "创建一个 TypeScript 工作区来定义可复用的转换。", "TypeScript ワークスペースを作成して、再利用できる変換を定義します。", "Lege einen TypeScript-Arbeitsbereich an, um wiederverwendbare Transformationen zu definieren.", "Crea un espacio de trabajo de TypeScript para definir transformaciones reutilizables."]),
+    ("Custom transformations", ["Własne transformacje", "自定义转换", "カスタム変換", "Eigene Transformationen", "Transformaciones personalizadas"]),
+    ("Deadline", ["Limit czasu", "期限", "期限", "Zeitlimit", "Plazo"]),
+    ("Delete mode", ["Usuń tryb", "删除模式", "モードを削除", "Modus löschen", "Eliminar modo"]),
+    ("Delete mode…", ["Usuń tryb…", "删除模式…", "モードを削除…", "Modus löschen…", "Eliminar modo…"]),
+    ("Describe how OpenCode should rewrite your dictation…", ["Opisz, jak OpenCode ma przepisać twoje dyktowanie…", "描述 OpenCode 应如何改写你的听写内容…", "OpenCode が音声入力をどう書き直すか説明してください…", "Beschreibe, wie OpenCode dein Diktat umschreiben soll…", "Describe cómo debe reescribir OpenCode tu dictado…"]),
+    ("Dictation will be available once your local speech model is ready.", ["Dyktowanie będzie dostępne, gdy lokalny model mowy będzie gotowy.", "本地语音模型就绪后即可使用听写。", "ローカル音声モデルの準備ができると音声入力を使えます。", "Diktieren ist verfügbar, sobald dein lokales Sprachmodell bereit ist.", "El dictado estará disponible cuando tu modelo de voz local esté listo."]),
+    ("Disable", ["Wyłącz", "停用", "無効にする", "Deaktivieren", "Desactivar"]),
+    ("Download a speech model to start dictating", ["Pobierz model mowy, aby zacząć dyktować", "下载语音模型即可开始听写", "音声入力を始めるには音声モデルをダウンロードしてください", "Lade ein Sprachmodell herunter, um mit dem Diktieren zu beginnen", "Descarga un modelo de voz para empezar a dictar"]),
+    ("Either", ["Dowolny", "任意", "どちらでも", "Beide", "Cualquiera"]),
+    ("Enable", ["Włącz", "启用", "有効にする", "Aktivieren", "Activar"]),
+    ("Enable Voice Action", ["Włącz Voice Action", "启用 Voice Action", "Voice Action を有効にする", "Voice Action aktivieren", "Activar Voice Action"]),
+    ("Enable on launch", ["Włączaj przy uruchomieniu", "启动时启用", "起動時に有効にする", "Beim Start aktivieren", "Activar al iniciar"]),
+    ("Every registered transformation is already included.", ["Wszystkie zarejestrowane transformacje są już dodane.", "所有已注册的转换都已包含。", "登録済みの変換はすべて追加されています。", "Alle registrierten Transformationen sind bereits enthalten.", "Todas las transformaciones registradas ya están incluidas."]),
+    ("Final text", ["Tekst końcowy", "最终文本", "最終テキスト", "Endgültiger Text", "Texto final"]),
+    ("Finding applications…", ["Wyszukiwanie aplikacji…", "正在查找应用…", "アプリを検索中…", "Apps werden gesucht…", "Buscando aplicaciones…"]),
+    ("Grant permissions and choose a local model to start dictating.", ["Przyznaj uprawnienia i wybierz lokalny model, aby zacząć dyktować.", "授予权限并选择本地模型即可开始听写。", "権限を許可し、ローカルモデルを選ぶと音声入力を始められます。", "Erteile die Berechtigungen und wähle ein lokales Modell, um mit dem Diktieren zu beginnen.", "Concede los permisos y elige un modelo local para empezar a dictar."]),
+    ("Hex could not load the OpenCode model catalog.", ["Hex nie mógł wczytać katalogu modeli OpenCode.", "Hex 无法加载 OpenCode 模型目录。", "Hex は OpenCode のモデル一覧を読み込めませんでした。", "Hex konnte den OpenCode-Modellkatalog nicht laden.", "Hex no pudo cargar el catálogo de modelos de OpenCode."]),
+    ("Hex will open the microphone when you press the shortcut. This adds a start-up delay and removes pre-roll, so the beginning of speech may be missed if you speak right away.", ["Hex otworzy mikrofon po naciśnięciu skrótu. Dodaje to opóźnienie startu i wyłącza wstępne nagrywanie, więc początek wypowiedzi może zostać pominięty, jeśli zaczniesz mówić od razu.", "Hex 会在你按下快捷键时打开麦克风。这会增加启动延迟并移除预录音，因此如果你立即开始说话，开头部分可能会被漏掉。", "Hex はショートカットを押したときにマイクを開きます。起動に時間がかかりプリロールもなくなるため、すぐに話し始めると冒頭が録音されないことがあります。", "Hex öffnet das Mikrofon erst, wenn du das Kürzel drückst. Das verzögert den Start und entfernt die Vorlaufaufnahme, sodass der Anfang fehlen kann, wenn du sofort sprichst.", "Hex abrirá el micrófono cuando pulses el atajo. Esto añade un retraso al inicio y elimina la pregrabación, así que el comienzo puede perderse si hablas enseguida."]),
+    ("Input device for dictation and commands", ["Urządzenie wejściowe do dyktowania i poleceń", "用于听写和命令的输入设备", "音声入力とコマンドに使う入力デバイス", "Eingabegerät für Diktat und Befehle", "Dispositivo de entrada para dictado y comandos"]),
+    ("Install OpenCode", ["Zainstaluj OpenCode", "安装 OpenCode", "OpenCode をインストール", "OpenCode installieren", "Instalar OpenCode"]),
+    ("Install and configure OpenCode to transform dictated text.", ["Zainstaluj i skonfiguruj OpenCode, aby przekształcać dyktowany tekst.", "安装并配置 OpenCode 以转换听写文本。", "OpenCode をインストールして設定すると、音声入力したテキストを変換できます。", "Installiere und konfiguriere OpenCode, um diktierten Text umzuwandeln.", "Instala y configura OpenCode para transformar el texto dictado."]),
+    ("Install and configure OpenCode to turn spoken instructions into paste-ready text.", ["Zainstaluj i skonfiguruj OpenCode, aby zamieniać wypowiedziane polecenia w tekst gotowy do wklejenia.", "安装并配置 OpenCode，将口述指令转换为可直接粘贴的文本。", "OpenCode をインストールして設定すると、話した指示を貼り付けられるテキストに変換できます。", "Installiere und konfiguriere OpenCode, um gesprochene Anweisungen in einfügefertigen Text zu verwandeln.", "Instala y configura OpenCode para convertir instrucciones habladas en texto listo para pegar."]),
+    ("Instructions", ["Instrukcje", "说明", "指示", "Anweisungen", "Instrucciones"]),
+    ("Keep Hex in the menu bar when Settings is closed", ["Zostaw Hex na pasku menu po zamknięciu Ustawień", "关闭设置后将 Hex 保留在菜单栏", "設定を閉じても Hex をメニューバーに表示", "Hex in der Menüleiste behalten, wenn die Einstellungen geschlossen sind", "Mantener Hex en la barra de menús al cerrar Ajustes"]),
+    ("Keep ready (fast)", ["Gotowy (szybko)", "保持就绪（快）", "常に待機（高速）", "Bereit halten (schnell)", "Listo (rápido)"]),
+    ("Keeps the microphone open for instant start and pre-roll", ["Utrzymuje otwarty mikrofon dla natychmiastowego startu i wstępnego nagrywania", "保持麦克风打开，以便立即开始并预录音", "マイクを開いたままにし、すぐに開始してプリロールを使います", "Hält das Mikrofon offen für sofortigen Start und Vorlauf", "Mantiene el micrófono abierto para empezar al instante con pregrabación"]),
+    ("Latency", ["Opóźnienie", "延迟", "レイテンシー", "Latenz", "Latencia"]),
+    ("Left", ["Lewy", "左", "左", "Links", "Izquierda"]),
+    ("Loading OpenCode…", ["Wczytywanie OpenCode…", "正在加载 OpenCode…", "OpenCode を読み込み中…", "OpenCode wird geladen…", "Cargando OpenCode…"]),
+    ("Loading registered TypeScript transformations…", ["Wczytywanie zarejestrowanych transformacji TypeScript…", "正在加载已注册的 TypeScript 转换…", "登録済みの TypeScript 変換を読み込み中…", "Registrierte TypeScript-Transformationen werden geladen…", "Cargando las transformaciones de TypeScript registradas…"]),
+    ("Local dictation model", ["Lokalny model dyktowania", "本地听写模型", "ローカル音声入力モデル", "Lokales Diktiermodell", "Modelo de dictado local"]),
+    ("Local models", ["Modele lokalne", "本地模型", "ローカルモデル", "Lokale Modelle", "Modelos locales"]),
+    ("Meeting recording requests Screen & System Audio Recording separately when you use it.", ["Nagrywanie spotkań poprosi osobno o nagrywanie ekranu i dźwięku systemu, gdy go użyjesz.", "使用会议录制时，会单独请求“屏幕与系统音频录制”权限。", "会議の録音を使うと、画面とシステムオーディオの収録の許可を別途求めます。", "Die Besprechungsaufnahme fragt bei der Nutzung separat nach Bildschirm- und Systemaudioaufnahme.", "La grabación de reuniones pide por separado la grabación de pantalla y audio del sistema cuando la usas."]),
+    ("Meetings", ["Spotkania", "会议", "会議", "Besprechungen", "Reuniones"]),
+    ("Microphone mode", ["Tryb mikrofonu", "麦克风模式", "マイクモード", "Mikrofonmodus", "Modo del micrófono"]),
+    ("Mode name", ["Nazwa trybu", "模式名称", "モード名", "Modusname", "Nombre del modo"]),
+    ("Mute or pause other audio during dictation", ["Wycisz lub wstrzymaj inne dźwięki podczas dyktowania", "听写时静音或暂停其他音频", "音声入力中はほかの音声をミュートまたは一時停止", "Andere Audiowiedergabe während des Diktierens stummschalten oder pausieren", "Silencia o pausa otros audios durante el dictado"]),
+    ("Names and terms Whisper should expect, e.g. OpenCode, Effect…", ["Nazwy i terminy, których Whisper ma się spodziewać, np. OpenCode, Effect…", "Whisper 应识别的名称和术语，例如 OpenCode、Effect…", "Whisper が想定すべき名前や用語（例: OpenCode、Effect…）", "Namen und Begriffe, die Whisper erwarten soll, z. B. OpenCode, Effect…", "Nombres y términos que Whisper debe esperar, p. ej. OpenCode, Effect…"]),
+    ("Names and terms to prime the speech model", ["Nazwy i terminy podpowiadane modelowi mowy", "用于提示语音模型的名称和术语", "音声モデルに与える名前や用語", "Namen und Begriffe als Hinweis für das Sprachmodell", "Nombres y términos para orientar al modelo de voz"]),
+    ("No applications found.", ["Nie znaleziono aplikacji.", "未找到应用。", "アプリが見つかりません。", "Keine Apps gefunden.", "No se encontraron aplicaciones."]),
+    ("Off by default. Its saved shortcut is not reserved until you enable Voice Action.", ["Domyślnie wyłączone. Zapisany skrót nie jest zajmowany, dopóki nie włączysz Voice Action.", "默认关闭。在你启用 Voice Action 之前，不会占用其已保存的快捷键。", "既定ではオフです。Voice Action を有効にするまで、保存したショートカットは予約されません。", "Standardmäßig aus. Das gespeicherte Kürzel wird erst belegt, wenn du Voice Action aktivierst.", "Desactivado de forma predeterminada. Su atajo guardado no se reserva hasta que actives Voice Action."]),
+    ("Open OpenCode setup", ["Otwórz konfigurację OpenCode", "打开 OpenCode 设置", "OpenCode のセットアップを開く", "OpenCode-Einrichtung öffnen", "Abrir configuración de OpenCode"]),
+    ("Open settings", ["Otwórz ustawienia", "打开设置", "設定を開く", "Einstellungen öffnen", "Abrir ajustes"]),
+    ("Open setup", ["Otwórz konfigurację", "打开设置向导", "セットアップを開く", "Einrichtung öffnen", "Abrir configuración"]),
+    ("OpenCode beta required", ["Wymagana beta OpenCode", "需要 OpenCode 测试版", "OpenCode ベータ版が必要です", "OpenCode-Beta erforderlich", "Se requiere OpenCode beta"]),
+    ("OpenCode is unavailable", ["OpenCode jest niedostępny", "OpenCode 不可用", "OpenCode を利用できません", "OpenCode ist nicht verfügbar", "OpenCode no está disponible"]),
+    ("OpenCode model", ["Model OpenCode", "OpenCode 模型", "OpenCode モデル", "OpenCode-Modell", "Modelo de OpenCode"]),
+    ("OpenCode reported:", ["OpenCode zgłosił:", "OpenCode 报告：", "OpenCode からの報告:", "OpenCode meldete:", "OpenCode informó:"]),
+    ("OpenCode transformation", ["Transformacja OpenCode", "OpenCode 转换", "OpenCode 変換", "OpenCode-Transformation", "Transformación de OpenCode"]),
+    ("OpenCode transformation will be available after Hex connects to OpenCode.", ["Transformacja OpenCode będzie dostępna, gdy Hex połączy się z OpenCode.", "Hex 连接到 OpenCode 后即可使用 OpenCode 转换。", "Hex が OpenCode に接続すると OpenCode 変換を使えます。", "Die OpenCode-Transformation ist verfügbar, sobald Hex mit OpenCode verbunden ist.", "La transformación de OpenCode estará disponible cuando Hex se conecte a OpenCode."]),
+    ("Opens only while holding the shortcut. Disables pre-roll and commands.", ["Otwiera się tylko podczas przytrzymania skrótu. Wyłącza wstępne nagrywanie i polecenia.", "仅在按住快捷键时打开。会停用预录音和命令。", "ショートカットを押している間だけ開きます。プリロールとコマンドは無効になります。", "Öffnet sich nur, solange das Kürzel gehalten wird. Deaktiviert Vorlauf und Befehle.", "Solo se abre mientras mantienes el atajo. Desactiva la pregrabación y los comandos."]),
+    ("Opens the microphone on shortcut press without pre-roll and turns Commands off.", ["Otwiera mikrofon po naciśnięciu skrótu, bez wstępnego nagrywania, i wyłącza polecenia.", "按下快捷键时打开麦克风，不预录音，并关闭命令。", "ショートカットを押したときにプリロールなしでマイクを開き、コマンドをオフにします。", "Öffnet das Mikrofon beim Drücken des Kürzels ohne Vorlauf und schaltet Befehle aus.", "Abre el micrófono al pulsar el atajo, sin pregrabación, y desactiva los comandos."]),
+    ("Opens the microphone on shortcut press without pre-roll. Commands remain off.", ["Otwiera mikrofon po naciśnięciu skrótu, bez wstępnego nagrywania. Polecenia pozostają wyłączone.", "按下快捷键时打开麦克风，不预录音。命令保持关闭。", "ショートカットを押したときにプリロールなしでマイクを開きます。コマンドはオフのままです。", "Öffnet das Mikrofon beim Drücken des Kürzels ohne Vorlauf. Befehle bleiben aus.", "Abre el micrófono al pulsar el atajo, sin pregrabación. Los comandos siguen desactivados."]),
+    ("Paste with Ctrl+Shift+V so terminals accept it", ["Wklejaj przez Ctrl+Shift+V, aby terminale to przyjmowały", "使用 Ctrl+Shift+V 粘贴，以便终端接受", "端末で受け付けられるよう Ctrl+Shift+V で貼り付け", "Mit Strg+Umschalt+V einfügen, damit Terminals es annehmen", "Pegar con Ctrl+Mayús+V para que los terminales lo acepten"]),
+    ("Permissions needed", ["Wymagane uprawnienia", "需要权限", "権限が必要です", "Berechtigungen erforderlich", "Se necesitan permisos"]),
+    ("Preparing speech model", ["Przygotowywanie modelu mowy", "正在准备语音模型", "音声モデルを準備中", "Sprachmodell wird vorbereitet", "Preparando el modelo de voz"]),
+    ("Preparing the TypeScript workspace and installing its dependencies…", ["Przygotowywanie obszaru roboczego TypeScript i instalowanie zależności…", "正在准备 TypeScript 工作区并安装其依赖…", "TypeScript ワークスペースを準備し、依存関係をインストール中…", "TypeScript-Arbeitsbereich wird vorbereitet und Abhängigkeiten werden installiert…", "Preparando el espacio de trabajo de TypeScript e instalando sus dependencias…"]),
+    ("Preparing voice commands", ["Przygotowywanie poleceń głosowych", "正在准备语音命令", "音声コマンドを準備中", "Sprachbefehle werden vorbereitet", "Preparando los comandos de voz"]),
+    ("Press a shortcut", ["Naciśnij skrót", "按下快捷键", "ショートカットを押してください", "Drücke ein Kürzel", "Pulsa un atajo"]),
+    ("Press shortcut", ["Naciśnij skrót", "按下快捷键", "ショートカットを押す", "Kürzel drücken", "Pulsa el atajo"]),
+    ("Press to start dictating, press again to transcribe", ["Naciśnij, aby zacząć dyktować, i ponownie, aby transkrybować", "按下开始听写，再按一次进行转写", "押すと音声入力を開始し、もう一度押すと文字起こし", "Drücken zum Diktieren, erneut drücken zum Transkribieren", "Pulsa para empezar a dictar y otra vez para transcribir"]),
+    ("Re-paste the most recent dictation", ["Wklej ponownie ostatnie dyktowanie", "再次粘贴最近一次听写", "最新の音声入力をもう一度貼り付け", "Letztes Diktat erneut einfügen", "Volver a pegar el dictado más reciente"]),
+    ("Recording, cancellation, and error tones", ["Dźwięki nagrywania, anulowania i błędów", "录音、取消和错误提示音", "録音・キャンセル・エラーの効果音", "Töne für Aufnahme, Abbruch und Fehler", "Tonos de grabación, cancelación y error"]),
+    ("Refresh", ["Odśwież", "刷新", "更新", "Aktualisieren", "Actualizar"]),
+    ("Registered TypeScript transformations are unavailable.", ["Zarejestrowane transformacje TypeScript są niedostępne.", "已注册的 TypeScript 转换不可用。", "登録済みの TypeScript 変換を利用できません。", "Registrierte TypeScript-Transformationen sind nicht verfügbar.", "Las transformaciones de TypeScript registradas no están disponibles."]),
+    ("Release microphone", ["Zwolnij mikrofon", "释放麦克风", "マイクを解放", "Mikrofon freigeben", "Liberar micrófono"]),
+    ("Release the microphone when idle?", ["Zwalniać mikrofon w bezczynności?", "空闲时释放麦克风？", "待機中はマイクを解放しますか？", "Mikrofon im Leerlauf freigeben?", "¿Liberar el micrófono en reposo?"]),
+    ("Release to save or add key", ["Puść, aby zapisać, lub dodaj klawisz", "松开以保存，或再添加按键", "離すと保存、またはキーを追加", "Loslassen zum Speichern oder Taste hinzufügen", "Suelta para guardar o añade una tecla"]),
+    ("Release when idle", ["Zwalniaj w bezczynności", "空闲时释放", "待機中は解放", "Im Leerlauf freigeben", "Liberar en reposo"]),
+    ("Replacement (e.g. OpenCode)", ["Zamiennik (np. OpenCode)", "替换为（例如 OpenCode）", "置換後（例: OpenCode）", "Ersetzung (z. B. OpenCode)", "Reemplazo (p. ej. OpenCode)"]),
+    ("Restart to update", ["Uruchom ponownie, aby zaktualizować", "重启以更新", "再起動してアップデート", "Zum Aktualisieren neu starten", "Reiniciar para actualizar"]),
+    ("Retry", ["Ponów", "重试", "再試行", "Erneut versuchen", "Reintentar"]),
+    ("Retry setup", ["Ponów konfigurację", "重试设置", "セットアップを再試行", "Einrichtung wiederholen", "Reintentar configuración"]),
+    ("Right", ["Prawy", "右", "右", "Rechts", "Derecha"]),
+    ("Saved", ["Zapisano", "已保存", "保存しました", "Gespeichert", "Guardado"]),
+    ("Saved for when Voice Action is enabled", ["Zapisany na czas włączenia Voice Action", "已保存，待启用 Voice Action 时生效", "Voice Action を有効にしたときのために保存済み", "Gespeichert für den Fall, dass Voice Action aktiviert wird", "Guardado para cuando actives Voice Action"]),
+    ("Saving…", ["Zapisywanie…", "正在保存…", "保存中…", "Wird gespeichert…", "Guardando…"]),
+    ("Search applications", ["Szukaj aplikacji", "搜索应用", "アプリを検索", "Apps suchen", "Buscar aplicaciones"]),
+    ("Search available models", ["Szukaj dostępnych modeli", "搜索可用模型", "利用可能なモデルを検索", "Verfügbare Modelle suchen", "Buscar modelos disponibles"]),
+    ("Search history", ["Szukaj w historii", "搜索历史记录", "履歴を検索", "Verlauf durchsuchen", "Buscar en el historial"]),
+    ("Seconds", ["Sekundy", "秒", "秒", "Sekunden", "Segundos"]),
+    ("Set up", ["Skonfiguruj", "设置", "セットアップ", "Einrichten", "Configurar"]),
+    ("Set up Hex", ["Skonfiguruj Hex", "设置 Hex", "Hex をセットアップ", "Hex einrichten", "Configurar Hex"]),
+    ("Settings error:", ["Błąd ustawień:", "设置错误：", "設定エラー:", "Einstellungsfehler:", "Error de ajustes:"]),
+    ("Shortcut mode", ["Tryb skrótu", "快捷键模式", "ショートカットモード", "Kürzelmodus", "Modo del atajo"]),
+    ("Show Dock icon", ["Pokaż ikonę w Docku", "显示程序坞图标", "Dock にアイコンを表示", "Dock-Symbol anzeigen", "Mostrar icono en el Dock"]),
+    ("Sound volume", ["Głośność dźwięków", "提示音音量", "効果音の音量", "Lautstärke der Töne", "Volumen de sonidos"]),
+    ("Spoken phrase (e.g. open code)", ["Wypowiadana fraza (np. open code)", "说出的短语（例如 open code）", "話すフレーズ（例: open code）", "Gesprochene Phrase (z. B. open code)", "Frase hablada (p. ej. open code)"]),
+    ("Start Hex when you log in", ["Uruchamiaj Hex po zalogowaniu", "登录时启动 Hex", "ログイン時に Hex を起動", "Hex beim Anmelden starten", "Iniciar Hex al iniciar sesión"]),
+    ("Switch when a domain is active in your browser", ["Przełącz, gdy domena jest aktywna w przeglądarce", "当浏览器中打开某个域名时切换", "ブラウザでドメインが開いているときに切り替え", "Wechseln, wenn eine Domain im Browser aktiv ist", "Cambiar cuando un dominio esté activo en tu navegador"]),
+    ("System instructions for rewriting dictation in this mode", ["Instrukcje systemowe do przepisywania dyktowania w tym trybie", "此模式下改写听写内容的系统说明", "このモードで音声入力を書き直すためのシステム指示", "Systemanweisungen zum Umschreiben von Diktaten in diesem Modus", "Instrucciones del sistema para reescribir el dictado en este modo"]),
+    ("Terminal paste", ["Wklejanie w terminalu", "终端粘贴", "端末への貼り付け", "Einfügen im Terminal", "Pegado en terminal"]),
+    ("The TypeScript workspace could not be prepared.", ["Nie udało się przygotować obszaru roboczego TypeScript.", "无法准备 TypeScript 工作区。", "TypeScript ワークスペースを準備できませんでした。", "Der TypeScript-Arbeitsbereich konnte nicht vorbereitet werden.", "No se pudo preparar el espacio de trabajo de TypeScript."]),
+    ("The Voice Action shortcut is already in use. Change it below or change the other shortcut before enabling Voice Action.", ["Skrót Voice Action jest już używany. Zmień go poniżej lub zmień drugi skrót przed włączeniem Voice Action.", "Voice Action 快捷键已被使用。请在下方更改，或先更改另一个快捷键再启用 Voice Action。", "Voice Action のショートカットはすでに使われています。下で変更するか、もう一方のショートカットを変更してから Voice Action を有効にしてください。", "Das Voice-Action-Kürzel ist bereits belegt. Ändere es unten oder ändere das andere Kürzel, bevor du Voice Action aktivierst.", "El atajo de Voice Action ya está en uso. Cámbialo abajo o cambia el otro atajo antes de activar Voice Action."]),
+    ("The dictation shortcut needs a local speech model. Choose one to download first.", ["Skrót dyktowania wymaga lokalnego modelu mowy. Najpierw wybierz model do pobrania.", "听写快捷键需要本地语音模型。请先选择一个下载。", "音声入力ショートカットにはローカル音声モデルが必要です。まずダウンロードするモデルを選んでください。", "Das Diktierkürzel braucht ein lokales Sprachmodell. Wähle zuerst eines zum Herunterladen.", "El atajo de dictado necesita un modelo de voz local. Elige uno para descargarlo primero."]),
+    ("The selected model transcribes speech entirely on this Mac.", ["Wybrany model transkrybuje mowę w całości na tym Macu.", "所选模型完全在这台 Mac 上转写语音。", "選択したモデルは、この Mac 上だけで音声を文字起こしします。", "Das gewählte Modell transkribiert Sprache vollständig auf diesem Mac.", "El modelo seleccionado transcribe la voz por completo en este Mac."]),
+    ("The selected model transcribes speech entirely on this computer.", ["Wybrany model transkrybuje mowę w całości na tym komputerze.", "所选模型完全在这台电脑上转写语音。", "選択したモデルは、このコンピューター上だけで音声を文字起こしします。", "Das gewählte Modell transkribiert Sprache vollständig auf diesem Computer.", "El modelo seleccionado transcribe la voz por completo en este equipo."]),
+    ("Thinking", ["Rozumowanie", "思考", "思考", "Denken", "Razonamiento"]),
+    ("Toggle", ["Przełącz", "切换", "トグル", "Umschalten", "Alternar"]),
+    ("Transformation requires OpenCode", ["Transformacja wymaga OpenCode", "转换需要 OpenCode", "変換には OpenCode が必要です", "Transformation erfordert OpenCode", "La transformación requiere OpenCode"]),
+    ("Transformations", ["Transformacje", "转换", "変換", "Transformationen", "Transformaciones"]),
+    ("Turn Hex on in every app whenever it opens", ["Włączaj Hex we wszystkich aplikacjach przy każdym uruchomieniu", "每次打开时在所有应用中启用 Hex", "起動するたびに、すべてのアプリで Hex をオンにする", "Hex bei jedem Start in allen Apps einschalten", "Activar Hex en todas las apps cada vez que se abra"]),
+    ("Up to date", ["Aktualne", "已是最新", "最新です", "Aktuell", "Actualizado"]),
+    ("Update", ["Aktualizuj", "更新", "アップデート", "Aktualisieren", "Actualizar"]),
+    ("Use OpenCode default", ["Użyj domyślnego OpenCode", "使用 OpenCode 默认值", "OpenCode の既定を使用", "OpenCode-Standard verwenden", "Usar el predeterminado de OpenCode"]),
+    ("Use the shortcut below with OpenCode to run spoken instructions", ["Użyj poniższego skrótu z OpenCode, aby wykonywać wypowiedziane polecenia", "使用下方快捷键配合 OpenCode 执行口述指令", "下のショートカットと OpenCode で、話した指示を実行します", "Nutze das Kürzel unten mit OpenCode, um gesprochene Anweisungen auszuführen", "Usa el atajo de abajo con OpenCode para ejecutar instrucciones habladas"]),
+    ("Voice Action requires OpenCode", ["Voice Action wymaga OpenCode", "Voice Action 需要 OpenCode", "Voice Action には OpenCode が必要です", "Voice Action erfordert OpenCode", "Voice Action requiere OpenCode"]),
+    ("Voice Action will be available after Hex connects to OpenCode.", ["Voice Action będzie dostępny, gdy Hex połączy się z OpenCode.", "Hex 连接到 OpenCode 后即可使用 Voice Action。", "Hex が OpenCode に接続すると Voice Action を使えます。", "Voice Action ist verfügbar, sobald Hex mit OpenCode verbunden ist.", "Voice Action estará disponible cuando Hex se conecte a OpenCode."]),
+    ("Wayland doesn't report the frontmost app; these apply under X11", ["Wayland nie podaje aktywnej aplikacji; te reguły działają w X11", "Wayland 不报告前台应用；这些规则仅在 X11 下生效", "Wayland は最前面のアプリを通知しないため、これは X11 でのみ有効です", "Wayland meldet die aktive App nicht; diese Regeln gelten unter X11", "Wayland no informa de la app en primer plano; esto se aplica en X11"]),
+    ("Sound effects", ["Efekty dźwiękowe", "音效", "効果音", "Soundeffekte", "Efectos de sonido"]),
+    ("Accessibility", ["Dostępność", "辅助功能", "アクセシビリティ", "Bedienungshilfen", "Accesibilidad"]),
+    ("Accessibility is off", ["Dostępność jest wyłączona", "辅助功能已关闭", "アクセシビリティがオフです", "Bedienungshilfen sind aus", "La accesibilidad está desactivada"]),
+    ("Allow", ["Zezwól", "允许", "許可", "Erlauben", "Permitir"]),
+    ("Grant access", ["Przyznaj dostęp", "授予访问权限", "アクセスを許可", "Zugriff erlauben", "Conceder acceso"]),
+    ("Hex cannot paste completed dictation into the foreground app.", ["Hex nie może wkleić gotowego dyktowania do aktywnej aplikacji.", "Hex 无法将完成的听写粘贴到前台应用。", "Hex は完了した音声入力を最前面のアプリに貼り付けられません。", "Hex kann fertige Diktate nicht in die aktive App einfügen.", "Hex no puede pegar el dictado terminado en la app en primer plano."]),
+    ("Hex cannot recognize the dictation shortcut in other apps.", ["Hex nie rozpozna skrótu dyktowania w innych aplikacjach.", "Hex 无法在其他应用中识别听写快捷键。", "Hex はほかのアプリで音声入力ショートカットを認識できません。", "Hex erkennt das Diktierkürzel in anderen Apps nicht.", "Hex no puede reconocer el atajo de dictado en otras apps."]),
+    ("Hex cannot record dictation until microphone access is restored.", ["Hex nie może nagrywać dyktowania, dopóki dostęp do mikrofonu nie zostanie przywrócony.", "在恢复麦克风访问权限之前，Hex 无法录制听写。", "マイクへのアクセスが戻るまで、Hex は音声入力を録音できません。", "Hex kann keine Diktate aufnehmen, bis der Mikrofonzugriff wiederhergestellt ist.", "Hex no puede grabar dictados hasta que se restablezca el acceso al micrófono."]),
+    ("Hear commands and dictation.", ["Słysz polecenia i dyktowanie.", "收听命令和听写。", "コマンドと音声入力を聞き取ります。", "Befehle und Diktate hören.", "Escucha comandos y dictado."]),
+    ("Input Monitoring", ["Monitorowanie wejścia", "输入监控", "入力監視", "Eingabeüberwachung", "Monitorización de entrada"]),
+    ("Input Monitoring is off", ["Monitorowanie wejścia jest wyłączone", "输入监控已关闭", "入力監視がオフです", "Eingabeüberwachung ist aus", "La monitorización de entrada está desactivada"]),
+    ("Microphone access is off", ["Dostęp do mikrofonu jest wyłączony", "麦克风访问已关闭", "マイクへのアクセスがオフです", "Mikrofonzugriff ist aus", "El acceso al micrófono está desactivado"]),
+    ("Paste completed dictation into the foreground app", ["Wklejaj gotowe dyktowanie do aktywnej aplikacji", "将完成的听写粘贴到前台应用", "完了した音声入力を最前面のアプリに貼り付け", "Fertige Diktate in die aktive App einfügen", "Pegar el dictado terminado en la app en primer plano"]),
+    ("Paste text and run keyboard commands.", ["Wklejaj tekst i wykonuj polecenia klawiatury.", "粘贴文本并执行键盘命令。", "テキストを貼り付け、キーボードコマンドを実行します。", "Text einfügen und Tastaturbefehle ausführen.", "Pega texto y ejecuta comandos de teclado."]),
+    ("Recognize the dictation shortcut anywhere", ["Rozpoznawaj skrót dyktowania wszędzie", "在任何地方识别听写快捷键", "どこでも音声入力ショートカットを認識", "Das Diktierkürzel überall erkennen", "Reconocer el atajo de dictado en cualquier lugar"]),
+    ("Record dictation while you hold the shortcut", ["Nagrywaj dyktowanie, gdy przytrzymujesz skrót", "按住快捷键时录制听写", "ショートカットを押している間、音声入力を録音", "Diktat aufnehmen, solange du das Kürzel hältst", "Grabar el dictado mientras mantienes el atajo"]),
+    ("The command model could not load. Retry or turn off commands; hotkey dictation is unaffected.", ["Nie udało się wczytać modelu poleceń. Ponów lub wyłącz polecenia; dyktowanie skrótem działa normalnie.", "无法加载命令模型。请重试或关闭命令；快捷键听写不受影响。", "コマンドモデルを読み込めませんでした。再試行するかコマンドをオフにしてください。ショートカットでの音声入力には影響しません。", "Das Befehlsmodell konnte nicht geladen werden. Versuche es erneut oder schalte Befehle aus; das Diktieren per Kürzel ist nicht betroffen.", "No se pudo cargar el modelo de comandos. Reinténtalo o desactiva los comandos; el dictado con atajo no se ve afectado."]),
+    ("The command model is loading. Hotkey dictation does not require it.", ["Model poleceń się wczytuje. Dyktowanie skrótem go nie wymaga.", "正在加载命令模型。快捷键听写不需要它。", "コマンドモデルを読み込み中です。ショートカットでの音声入力には不要です。", "Das Befehlsmodell wird geladen. Das Diktieren per Kürzel braucht es nicht.", "El modelo de comandos se está cargando. El dictado con atajo no lo necesita."]),
+    ("Voice commands are unavailable", ["Polecenia głosowe są niedostępne", "语音命令不可用", "音声コマンドを利用できません", "Sprachbefehle sind nicht verfügbar", "Los comandos de voz no están disponibles"]),
+    ("Turn off commands", ["Wyłącz polecenia", "关闭命令", "コマンドをオフにする", "Befehle ausschalten", "Desactivar comandos"]),
+    ("Keep microphone ready & enable commands", ["Utrzymuj mikrofon i włącz polecenia", "保持麦克风就绪并启用命令", "マイクを待機させてコマンドを有効にする", "Mikrofon bereit halten und Befehle aktivieren", "Mantener el micrófono listo y activar comandos"]),
+    ("Commands", ["Polecenia", "命令", "コマンド", "Befehle", "Comandos"]),
+    ("Copy agent prompt", ["Kopiuj prompt dla agenta", "复制智能体提示词", "エージェント用プロンプトをコピー", "Agenten-Prompt kopieren", "Copiar prompt para el agente"]),
+    ("Create config", ["Utwórz konfigurację", "创建配置", "設定を作成", "Konfiguration erstellen", "Crear configuración"]),
+    ("Creating config…", ["Tworzenie konfiguracji…", "正在创建配置…", "設定を作成中…", "Konfiguration wird erstellt…", "Creando configuración…"]),
+    ("Edit config", ["Edytuj konfigurację", "编辑配置", "設定を編集", "Konfiguration bearbeiten", "Editar configuración"]),
+    ("Personal commands are not loading.", ["Osobiste polecenia się nie wczytują.", "个人命令无法加载。", "個人コマンドを読み込めません。", "Persönliche Befehle werden nicht geladen.", "Los comandos personales no se cargan."]),
+    ("No commands yet.", ["Brak poleceń.", "暂无命令。", "コマンドはまだありません。", "Noch keine Befehle.", "Aún no hay comandos."]),
+    ("No matching commands.", ["Brak pasujących poleceń.", "没有匹配的命令。", "一致するコマンドはありません。", "Keine passenden Befehle.", "No hay comandos que coincidan."]),
+    ("Search commands", ["Szukaj poleceń", "搜索命令", "コマンドを検索", "Befehle suchen", "Buscar comandos"]),
+    ("Select a command.", ["Wybierz polecenie.", "选择一个命令。", "コマンドを選択してください。", "Wähle einen Befehl.", "Selecciona un comando."]),
+    ("Aliases", ["Aliasy", "别名", "エイリアス", "Aliasse", "Alias"]),
+    ("Context", ["Kontekst", "上下文", "コンテキスト", "Kontext", "Contexto"]),
+    ("Current context", ["Bieżący kontekst", "当前上下文", "現在のコンテキスト", "Aktueller Kontext", "Contexto actual"]),
+    ("Task", ["Zadanie", "任务", "タスク", "Aufgabe", "Tarea"]),
+    ("None", ["Brak", "无", "なし", "Keine", "Ninguno"]),
+    ("Keyboard", ["Klawiatura", "键盘", "キーボード", "Tastatur", "Teclado"]),
+    ("Browser navigation", ["Nawigacja w przeglądarce", "浏览器导航", "ブラウザーの移動", "Browsernavigation", "Navegación del navegador"]),
+    ("Application navigation", ["Nawigacja w aplikacji", "应用导航", "アプリ内の移動", "App-Navigation", "Navegación de la aplicación"]),
+    ("Open applications", ["Otwieranie aplikacji", "打开应用", "アプリを開く", "Apps öffnen", "Abrir aplicaciones"]),
+    ("Open websites", ["Otwieranie stron", "打开网站", "ウェブサイトを開く", "Websites öffnen", "Abrir sitios web"]),
+    ("Voice control", ["Sterowanie głosem", "语音控制", "音声操作", "Sprachsteuerung", "Control por voz"]),
+    ("Meetings (beta)", ["Spotkania (beta)", "会议（测试版）", "会議（ベータ）", "Besprechungen (Beta)", "Reuniones (beta)"]),
+    ("Offer to record calls and save local transcripts", ["Proponuj nagrywanie rozmów i zapisuj lokalne transkrypcje", "提供通话录音并保存本地转写", "通話の録音を提案し、ローカルに文字起こしを保存", "Aufnahme von Anrufen anbieten und lokale Transkripte speichern", "Ofrecer grabar llamadas y guardar transcripciones locales"]),
+    ("Screen & System Audio Recording", ["Nagrywanie ekranu i dźwięku systemu", "屏幕与系统音频录制", "画面とシステムオーディオの収録", "Bildschirm- und Systemaudioaufnahme", "Grabación de pantalla y audio del sistema"]),
+    ("Captures the other participants' audio", ["Nagrywa dźwięk pozostałych uczestników", "录制其他参与者的音频", "ほかの参加者の音声を収録します", "Nimmt den Ton der anderen Teilnehmenden auf", "Graba el audio de los demás participantes"]),
+    ("Required to hear the other participants. Allow Hex, then reopen it.", ["Wymagane, aby słyszeć pozostałych uczestników. Zezwól Hex, a potem otwórz go ponownie.", "需要此权限才能听到其他参与者。允许 Hex，然后重新打开它。", "ほかの参加者の声を聞くために必要です。Hex を許可してから開き直してください。", "Nötig, um die anderen Teilnehmenden zu hören. Erlaube Hex und öffne es dann erneut.", "Necesario para oír a los demás participantes. Permite Hex y vuelve a abrirlo."]),
+    ("Transcript folder", ["Folder transkrypcji", "转写文件夹", "文字起こしフォルダー", "Transkriptordner", "Carpeta de transcripciones"]),
+    ("Finished meetings are saved here as Markdown", ["Zakończone spotkania są zapisywane tu jako Markdown", "已结束的会议以 Markdown 格式保存在此处", "終了した会議はここに Markdown で保存されます", "Beendete Besprechungen werden hier als Markdown gespeichert", "Las reuniones terminadas se guardan aquí en Markdown"]),
+    ("Reveal", ["Pokaż", "显示", "表示", "Anzeigen", "Mostrar"]),
+    ("Use Folder", ["Użyj folderu", "使用此文件夹", "このフォルダーを使用", "Ordner verwenden", "Usar carpeta"]),
+    ("Summarize with Apple Intelligence", ["Podsumuj za pomocą Apple Intelligence", "使用 Apple 智能进行总结", "Apple Intelligence で要約", "Mit Apple Intelligence zusammenfassen", "Resumir con Apple Intelligence"]),
+    ("Start recording", ["Rozpocznij nagrywanie", "开始录音", "録音を開始", "Aufnahme starten", "Empezar a grabar"]),
+    ("Starting…", ["Uruchamianie…", "正在启动…", "開始中…", "Wird gestartet…", "Iniciando…"]),
+    ("Stop & transcribe", ["Zatrzymaj i transkrybuj", "停止并转写", "停止して文字起こし", "Stoppen und transkribieren", "Detener y transcribir"]),
+    ("Finalizing…", ["Kończenie…", "正在完成…", "仕上げ中…", "Wird abgeschlossen…", "Finalizando…"]),
+    ("Failed", ["Niepowodzenie", "失败", "失敗", "Fehlgeschlagen", "Fallido"]),
+    ("Interrupted", ["Przerwano", "已中断", "中断", "Unterbrochen", "Interrumpido"]),
+    ("Meeting title", ["Tytuł spotkania", "会议标题", "会議のタイトル", "Titel der Besprechung", "Título de la reunión"]),
+    ("Search meetings", ["Szukaj spotkań", "搜索会议", "会議を検索", "Besprechungen suchen", "Buscar reuniones"]),
+    ("No meetings match.", ["Brak pasujących spotkań.", "没有匹配的会议。", "一致する会議はありません。", "Keine passenden Besprechungen.", "No hay reuniones que coincidan."]),
+    ("No meetings yet.", ["Brak spotkań.", "暂无会议。", "会議はまだありません。", "Noch keine Besprechungen.", "Aún no hay reuniones."]),
+    ("Meetings could not be loaded.", ["Nie udało się wczytać spotkań.", "无法加载会议。", "会議を読み込めませんでした。", "Besprechungen konnten nicht geladen werden.", "No se pudieron cargar las reuniones."]),
+    ("Meeting could not be recorded.", ["Nie udało się nagrać spotkania.", "无法录制会议。", "会議を録音できませんでした。", "Die Besprechung konnte nicht aufgenommen werden.", "No se pudo grabar la reunión."]),
+    ("Meeting could not be updated.", ["Nie udało się zaktualizować spotkania.", "无法更新会议。", "会議を更新できませんでした。", "Die Besprechung konnte nicht aktualisiert werden.", "No se pudo actualizar la reunión."]),
+    ("Recording failed.", ["Nagrywanie nie powiodło się.", "录音失败。", "録音に失敗しました。", "Aufnahme fehlgeschlagen.", "La grabación falló."]),
+    ("Markdown not saved.", ["Nie zapisano pliku Markdown.", "未保存 Markdown。", "Markdown を保存できませんでした。", "Markdown nicht gespeichert.", "No se guardó el Markdown."]),
+    ("Notes could not be written.", ["Nie udało się zapisać notatek.", "无法写入笔记。", "メモを書き込めませんでした。", "Notizen konnten nicht geschrieben werden.", "No se pudieron escribir las notas."]),
+    ("Live draft unavailable.", ["Bieżący szkic jest niedostępny.", "实时草稿不可用。", "ライブ下書きを利用できません。", "Live-Entwurf nicht verfügbar.", "El borrador en vivo no está disponible."]),
+    ("Select a meeting.", ["Wybierz spotkanie.", "选择一个会议。", "会議を選択してください。", "Wähle eine Besprechung.", "Selecciona una reunión."]),
+    ("Record a call to see its notes and transcript here.", ["Nagraj rozmowę, aby zobaczyć tu jej notatki i transkrypcję.", "录制通话后，可在此处查看其笔记和转写。", "通話を録音すると、ここにメモと文字起こしが表示されます。", "Nimm einen Anruf auf, um hier Notizen und Transkript zu sehen.", "Graba una llamada para ver aquí sus notas y transcripción."]),
+    ("Copy summary", ["Kopiuj podsumowanie", "复制摘要", "要約をコピー", "Zusammenfassung kopieren", "Copiar resumen"]),
+    ("Copy transcript", ["Kopiuj transkrypcję", "复制转写", "文字起こしをコピー", "Transkript kopieren", "Copiar transcripción"]),
+    ("Rename", ["Zmień nazwę", "重命名", "名前を変更", "Umbenennen", "Cambiar nombre"]),
+    ("Save", ["Zapisz", "保存", "保存", "Speichern", "Guardar"]),
+    ("Reveal Markdown", ["Pokaż plik Markdown", "显示 Markdown", "Markdown を表示", "Markdown anzeigen", "Mostrar Markdown"]),
+    ("Reveal files", ["Pokaż pliki", "显示文件", "ファイルを表示", "Dateien anzeigen", "Mostrar archivos"]),
+    ("Delete…", ["Usuń…", "删除…", "削除…", "Löschen…", "Eliminar…"]),
+    ("Trash recording", ["Przenieś nagranie do kosza", "将录音移到废纸篓", "録音をゴミ箱に入れる", "Aufnahme in den Papierkorb", "Mover la grabación a la papelera"]),
+    ("Trash recording & Markdown", ["Przenieś nagranie i Markdown do kosza", "将录音和 Markdown 移到废纸篓", "録音と Markdown をゴミ箱に入れる", "Aufnahme und Markdown in den Papierkorb", "Mover la grabación y el Markdown a la papelera"]),
+    ("Regenerate summary", ["Wygeneruj podsumowanie ponownie", "重新生成摘要", "要約を再生成", "Zusammenfassung neu erstellen", "Regenerar resumen"]),
+    ("Summarize", ["Podsumuj", "总结", "要約", "Zusammenfassen", "Resumir"]),
+    ("Summarizing…", ["Podsumowywanie…", "正在总结…", "要約中…", "Wird zusammengefasst…", "Resumiendo…"]),
+    ("Summary", ["Podsumowanie", "摘要", "要約", "Zusammenfassung", "Resumen"]),
+    ("Nothing to summarize.", ["Nie ma czego podsumować.", "没有可总结的内容。", "要約する内容がありません。", "Nichts zum Zusammenfassen.", "No hay nada que resumir."]),
+    ("Writing a title and summary with Apple Intelligence…", ["Tworzenie tytułu i podsumowania za pomocą Apple Intelligence…", "正在使用 Apple 智能撰写标题和摘要…", "Apple Intelligence でタイトルと要約を作成中…", "Titel und Zusammenfassung werden mit Apple Intelligence geschrieben…", "Escribiendo un título y un resumen con Apple Intelligence…"]),
+    ("Building the final transcript…", ["Tworzenie końcowej transkrypcji…", "正在生成最终转写…", "最終的な文字起こしを作成中…", "Endgültiges Transkript wird erstellt…", "Creando la transcripción final…"]),
+    ("Listening for speech…", ["Nasłuchiwanie mowy…", "正在聆听语音…", "音声を待機中…", "Warte auf Sprache…", "Escuchando…"]),
+    ("Preparing local audio capture…", ["Przygotowywanie lokalnego nagrywania dźwięku…", "正在准备本地音频捕获…", "ローカル音声の収録を準備中…", "Lokale Audioaufnahme wird vorbereitet…", "Preparando la captura de audio local…"]),
+    ("Live transcription is unavailable. Audio is still recording safely.", ["Transkrypcja na żywo jest niedostępna. Dźwięk nadal jest bezpiecznie nagrywany.", "实时转写不可用。音频仍在安全录制中。", "ライブ文字起こしは利用できません。音声は引き続き安全に録音されています。", "Live-Transkription ist nicht verfügbar. Der Ton wird weiterhin sicher aufgenommen.", "La transcripción en vivo no está disponible. El audio se sigue grabando de forma segura."]),
+    ("No recoverable transcript is available.", ["Brak transkrypcji do odzyskania.", "没有可恢复的转写。", "復元できる文字起こしはありません。", "Kein wiederherstellbares Transkript verfügbar.", "No hay ninguna transcripción recuperable."]),
+    ("No speech was transcribed.", ["Nie przetranskrybowano żadnej mowy.", "没有转写到任何语音。", "文字起こしされた音声はありません。", "Es wurde keine Sprache transkribiert.", "No se transcribió ninguna voz."]),
+    ("No transcript selected.", ["Nie wybrano transkrypcji.", "未选择转写。", "文字起こしが選択されていません。", "Kein Transkript ausgewählt.", "No hay ninguna transcripción seleccionada."]),
+    ("Draft transcript", ["Szkic transkrypcji", "转写草稿", "文字起こしの下書き", "Transkriptentwurf", "Borrador de la transcripción"]),
+    ("Live transcript", ["Transkrypcja na żywo", "实时转写", "ライブ文字起こし", "Live-Transkript", "Transcripción en vivo"]),
+    ("Recovered draft", ["Odzyskany szkic", "已恢复的草稿", "復元した下書き", "Wiederhergestellter Entwurf", "Borrador recuperado"]),
+    ("Transcript", ["Transkrypcja", "转写", "文字起こし", "Transkript", "Transcripción"]),
+    ("Transcript unavailable.", ["Transkrypcja jest niedostępna.", "转写不可用。", "文字起こしを利用できません。", "Transkript nicht verfügbar.", "La transcripción no está disponible."]),
+    ("Listening…", ["Słucham…", "正在聆听…", "聞き取り中…", "Hört zu…", "Escuchando…"]),
+    ("< 1 min", ["< 1 min", "< 1 分钟", "1 分未満", "< 1 Min.", "< 1 min"]),
+    ("{} min", ["{} min", "{} 分钟", "{} 分", "{} Min.", "{} min"]),
+    ("{hours} h {minutes} min", ["{hours} godz. {minutes} min", "{hours} 小时 {minutes} 分钟", "{hours} 時間 {minutes} 分", "{hours} Std. {minutes} Min.", "{hours} h {minutes} min"]),
+    ("{} pause", ["{} pauzy", "暂停 {}", "{} の休止", "{} Pause", "{} de pausa"]),
+    ("Size", ["Rozmiar", "大小", "サイズ", "Größe", "Tamaño"]),
+    ("Speed", ["Szybkość", "速度", "速度", "Geschwindigkeit", "Velocidad"]),
+    ("Model could not be deleted.", ["Nie udało się usunąć modelu.", "无法删除模型。", "モデルを削除できませんでした。", "Das Modell konnte nicht gelöscht werden.", "No se pudo eliminar el modelo."]),
+    ("Delete {}?", ["Usunąć {}?", "删除 {}？", "{} を削除しますか？", "{} löschen?", "¿Eliminar {}?"]),
+    ("100 languages", ["100 języków", "100 种语言", "100 言語", "100 Sprachen", "100 idiomas"]),
+    ("14 languages", ["14 języków", "14 种语言", "14 言語", "14 Sprachen", "14 idiomas"]),
+    ("25 languages", ["25 języków", "25 种语言", "25 言語", "25 Sprachen", "25 idiomas"]),
+    ("30 languages", ["30 języków", "30 种语言", "30 言語", "30 Sprachen", "30 idiomas"]),
+    ("5 languages", ["5 języków", "5 种语言", "5 言語", "5 Sprachen", "5 idiomas"]),
+    ("English", ["Angielski", "英语", "英語", "Englisch", "Inglés"]),
+    ("System locales", ["Języki systemu", "系统区域设置", "システムのロケール", "Systemsprachen", "Idiomas del sistema"]),
+    ("Apple managed", ["Zarządzany przez Apple", "由 Apple 管理", "Apple が管理", "Von Apple verwaltet", "Gestionado por Apple"]),
+    ("English benchmark", ["Test dla angielskiego", "英语基准测试", "英語ベンチマーク", "Englisch-Benchmark", "Prueba en inglés"]),
+    ("Mandarin benchmark", ["Test dla mandaryńskiego", "普通话基准测试", "中国語（普通話）ベンチマーク", "Mandarin-Benchmark", "Prueba en mandarín"]),
+    ("On device", ["Na urządzeniu", "设备端", "デバイス上", "Auf dem Gerät", "En el dispositivo"]),
+    ("No timestamps", ["Bez znaczników czasu", "无时间戳", "タイムスタンプなし", "Keine Zeitstempel", "Sin marcas de tiempo"]),
+    ("Segment timestamps", ["Znaczniki czasu segmentów", "分段时间戳", "セグメントのタイムスタンプ", "Segment-Zeitstempel", "Marcas de tiempo por segmento"]),
+    ("Token timestamps", ["Znaczniki czasu tokenów", "词元时间戳", "トークンのタイムスタンプ", "Token-Zeitstempel", "Marcas de tiempo por token"]),
+    ("Show Hex", ["Pokaż Hex", "显示 Hex", "Hex を表示", "Hex anzeigen", "Mostrar Hex"]),
+    ("Enable / Disable Hex", ["Włącz / wyłącz Hex", "启用 / 停用 Hex", "Hex を有効 / 無効にする", "Hex aktivieren / deaktivieren", "Activar / desactivar Hex"]),
+    ("Quit Hex", ["Zakończ Hex", "退出 Hex", "Hex を終了", "Hex beenden", "Salir de Hex"]),
+    ("Hex Dictation", ["Dyktowanie Hex", "Hex 听写", "Hex 音声入力", "Hex-Diktat", "Dictado de Hex"]),
+    ("Enabled", ["Włączony", "已启用", "有効", "Aktiviert", "Activado"]),
+    ("Sleeping", ["Uśpiony", "休眠中", "スリープ中", "Schläft", "En reposo"]),
+    ("Enabling…", ["Włączanie…", "正在启用…", "有効化中…", "Wird aktiviert…", "Activando…"]),
+    ("Disabling…", ["Wyłączanie…", "正在停用…", "無効化中…", "Wird deaktiviert…", "Desactivando…"]),
+    ("Applying settings…", ["Stosowanie ustawień…", "正在应用设置…", "設定を適用中…", "Einstellungen werden angewendet…", "Aplicando ajustes…"]),
+    ("Couldn't enable", ["Nie udało się włączyć", "无法启用", "有効にできませんでした", "Aktivierung fehlgeschlagen", "No se pudo activar"]),
+    ("Saving settings", ["Zapisywanie ustawień", "正在保存设置", "設定を保存中", "Einstellungen werden gespeichert", "Guardando ajustes"]),
+    ("Service disconnected", ["Usługa rozłączona", "服务已断开", "サービスとの接続が切れました", "Dienst getrennt", "Servicio desconectado"]),
+    ("Use two modifiers or add a key", ["Użyj dwóch modyfikatorów lub dodaj klawisz", "使用两个修饰键或再添加一个按键", "修飾キーを 2 つ使うか、キーを追加してください", "Nutze zwei Sondertasten oder füge eine Taste hinzu", "Usa dos modificadores o añade una tecla"]),
+    ("Unsupported key", ["Nieobsługiwany klawisz", "不支持的按键", "未対応のキー", "Nicht unterstützte Taste", "Tecla no compatible"]),
+    ("Choose from Finder…", ["Wybierz w Finderze…", "从访达中选择…", "Finder から選択…", "Im Finder auswählen…", "Elegir en el Finder…"]),
+    ("Choose an .exe…", ["Wybierz plik .exe…", "选择 .exe 文件…", ".exe を選択…", ".exe auswählen…", "Elegir un .exe…"]),
+    ("Choose a file…", ["Wybierz plik…", "选择文件…", "ファイルを選択…", "Datei auswählen…", "Elegir un archivo…"]),
+    ("Downloading {}%", ["Pobieranie {}%", "正在下载 {}%", "ダウンロード中 {}%", "Wird geladen {} %", "Descargando {} %"]),
+    ("Loading model · {}s", ["Wczytywanie modelu · {} s", "正在加载模型 · {} 秒", "モデルを読み込み中 · {} 秒", "Modell wird geladen · {} s", "Cargando modelo · {} s"]),
+    ("Enable Hex to dictate into any app with {}", ["Włącz Hex, aby dyktować w dowolnej aplikacji za pomocą {}", "启用 Hex 后，可用 {} 在任意应用中听写", "Hex を有効にすると、{} でどのアプリにも音声入力できます", "Aktiviere Hex, um mit {} in jede App zu diktieren", "Activa Hex para dictar en cualquier app con {}"]),
+    ("Ready anywhere · Hold {} to dictate", ["Gotowy wszędzie · Przytrzymaj {}, aby dyktować", "随处可用 · 按住 {} 进行听写", "どこでも使えます · {} を押している間に音声入力", "Überall bereit · {} halten zum Diktieren", "Listo en cualquier lugar · Mantén {} para dictar"]),
+    ("Ready anywhere · Press {} to start and stop dictating", ["Gotowy wszędzie · Naciśnij {}, aby zacząć i zakończyć dyktowanie", "随处可用 · 按 {} 开始和停止听写", "どこでも使えます · {} を押して音声入力を開始・停止", "Überall bereit · {} drücken zum Starten und Beenden des Diktats", "Listo en cualquier lugar · Pulsa {} para empezar y terminar de dictar"]),
+    ("Keep: {}", ["Przechowuj: {}", "保留：{}", "保持: {}", "Behalten: {}", "Conservar: {}"]),
+    ("No applications match \"{}\".", ["Żadna aplikacja nie pasuje do „{}”.", "没有与“{}”匹配的应用。", "「{}」に一致するアプリはありません。", "Keine App passt zu „{}“.", "Ninguna aplicación coincide con «{}»."]),
+    ("OpenCode default: {}", ["Domyślny OpenCode: {}", "OpenCode 默认：{}", "OpenCode の既定: {}", "OpenCode-Standard: {}", "Predeterminado de OpenCode: {}"]),
+    ("OpenCode models unavailable: {}", ["Modele OpenCode są niedostępne: {}", "OpenCode 模型不可用：{}", "OpenCode のモデルを利用できません: {}", "OpenCode-Modelle nicht verfügbar: {}", "Modelos de OpenCode no disponibles: {}"]),
+    ("{} available models", ["Dostępne modele: {}", "{} 个可用模型", "利用可能なモデル {} 件", "{} verfügbare Modelle", "{} modelos disponibles"]),
+    ("Mode {}", ["Tryb {}", "模式 {}", "モード {}", "Modus {}", "Modo {}"]),
+    ("{name} already activates {conflict}. Remove it there before reassigning it.", ["{name} już aktywuje tryb {conflict}. Usuń go tam przed ponownym przypisaniem.", "{name} 已用于激活 {conflict}。请先从那里移除再重新分配。", "{name} はすでに {conflict} を有効にしています。割り当て直す前にそちらから削除してください。", "{name} aktiviert bereits {conflict}. Entferne es dort, bevor du es neu zuweist.", "{name} ya activa {conflict}. Quítalo de allí antes de reasignarlo."]),
+    ("Could not load app settings: {}", ["Nie udało się wczytać ustawień aplikacji: {}", "无法加载应用设置：{}", "アプリの設定を読み込めませんでした: {}", "App-Einstellungen konnten nicht geladen werden: {}", "No se pudieron cargar los ajustes de la app: {}"]),
+    ("Could not load settings: {}", ["Nie udało się wczytać ustawień: {}", "无法加载设置：{}", "設定を読み込めませんでした: {}", "Einstellungen konnten nicht geladen werden: {}", "No se pudieron cargar los ajustes: {}"]),
+    ("Could not restart Hex: {}", ["Nie udało się ponownie uruchomić Hex: {}", "无法重启 Hex：{}", "Hex を再起動できませんでした: {}", "Hex konnte nicht neu gestartet werden: {}", "No se pudo reiniciar Hex: {}"]),
+    ("Could not start listener: {}", ["Nie udało się uruchomić nasłuchiwania: {}", "无法启动监听：{}", "リスナーを開始できませんでした: {}", "Listener konnte nicht gestartet werden: {}", "No se pudo iniciar la escucha: {}"]),
+    ("Finding applications on this Mac…", ["Wyszukiwanie aplikacji na tym Macu…", "正在查找这台 Mac 上的应用…", "この Mac のアプリを検索中…", "Apps auf diesem Mac werden gesucht…", "Buscando aplicaciones en este Mac…"]),
+    ("{audio} ms audio · {inference} ms inference", ["{audio} ms dźwięku · {inference} ms wnioskowania", "音频 {audio} 毫秒 · 推理 {inference} 毫秒", "音声 {audio} ms · 推論 {inference} ms", "{audio} ms Audio · {inference} ms Inferenz", "{audio} ms de audio · {inference} ms de inferencia"]),
+    ("{} ms total", ["łącznie {} ms", "总计 {} 毫秒", "合計 {} ms", "{} ms gesamt", "{} ms en total"]),
+    ("fell back: {}", ["użyto oryginału: {}", "已回退为原文：{}", "元のテキストを使用: {}", "Rohtext verwendet: {}", "se usó el texto original: {}"]),
+    ("Other", ["Inne", "其他", "その他", "Sonstige", "Otros"]),
 ];
 
 #[cfg(test)]
@@ -374,6 +673,88 @@ mod tests {
                     assert!(
                         translation.contains("{}"),
                         "translation of {english:?} lost its placeholder: {translation:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every string the shared window translates, in every OS's source.
+    const SOURCES: &[&str] = &[
+        include_str!("app_window.rs"),
+        include_str!("app_window/macos.rs"),
+        include_str!("app_window/windows.rs"),
+        include_str!("app_window/linux.rs"),
+        include_str!("desktop_transcription_picker.rs"),
+        include_str!("windows_app.rs"),
+    ];
+
+    /// The string literals passed to `tr`, `tr_fill`, and `tr_named`.
+    fn translated_literals(source: &str) -> Vec<String> {
+        let mut literals = Vec::new();
+        for call in ["tr(", "tr_fill(", "tr_named("] {
+            for (start, _) in source.match_indices(call) {
+                let preceded_by_ident = source[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|character| character.is_alphanumeric() || character == '_');
+                if preceded_by_ident {
+                    continue;
+                }
+                let rest = source[start + call.len()..].trim_start();
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let mut literal = String::new();
+                let mut characters = rest.chars();
+                while let Some(character) = characters.next() {
+                    match character {
+                        '"' => break,
+                        '\\' => literal.extend(characters.next()),
+                        other => literal.push(other),
+                    }
+                }
+                literals.push(literal);
+            }
+        }
+        literals
+    }
+
+    #[test]
+    fn every_translated_string_has_every_language() {
+        let table: std::collections::HashMap<_, _> = TRANSLATIONS.iter().copied().collect();
+        let mut checked = 0;
+        for source in SOURCES {
+            for literal in translated_literals(source) {
+                let translations = table
+                    .get(literal.as_str())
+                    .unwrap_or_else(|| panic!("{literal:?} has no translations"));
+                assert!(
+                    translations
+                        .iter()
+                        .all(|translation| !translation.is_empty()),
+                    "{literal:?} is missing a language"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 300, "only {checked} translated strings found");
+    }
+
+    #[test]
+    fn named_placeholders_survive_translation() {
+        for (english, translated) in TRANSLATIONS {
+            let names = english
+                .split('{')
+                .skip(1)
+                .filter_map(|part| part.split_once('}'))
+                .map(|(name, _)| name)
+                .filter(|name| !name.is_empty());
+            for name in names {
+                for translation in translated {
+                    assert!(
+                        translation.contains(&format!("{{{name}}}")),
+                        "translation of {english:?} lost {{{name}}}: {translation:?}"
                     );
                 }
             }

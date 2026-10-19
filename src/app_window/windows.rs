@@ -176,7 +176,7 @@ pub(super) fn hotkey_modifiers(modifiers: GpuiModifiers) -> HotkeyModifiers {
 pub(super) fn hotkey_key(key: &str) -> std::result::Result<HotkeyKey, &'static str> {
     crate::windows_input::virtual_key(key)
         .map(|_| HotkeyKey::named(key))
-        .map_err(|_| "Unsupported key")
+        .map_err(|_| tr("Unsupported key"))
 }
 
 /// The keyboard hook cannot tell a single modifier from ordinary typing,
@@ -186,11 +186,11 @@ pub(super) fn validate_hotkey(
     binding: &HotkeyBinding,
 ) -> std::result::Result<(), &'static str> {
     if kind != HotkeyKind::Dictation && binding.key.is_none() {
-        return Err("Add a key");
+        return Err(tr("Add a key"));
     }
     WindowsHotkey::from(binding)
         .validate()
-        .map_err(|_| "Use two modifiers or add a key")
+        .map_err(|_| tr("Use two modifiers or add a key"))
 }
 
 impl AppWindow {

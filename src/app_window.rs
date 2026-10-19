@@ -19,6 +19,7 @@ use crate::app_settings::{
 use crate::application_catalog::InstalledApplication;
 use crate::design_tokens::*;
 use crate::desktop_activity::DesktopActivity;
+use crate::desktop_i18n::{event_age, tr, tr_fill, tr_named};
 use crate::desktop_transcription_picker::{
     ModelDeletion, TranscriptionPickerDelegate, TranscriptionPickerModel,
     TranscriptionPickerProgress, TranscriptionPickerStatus, TranscriptionPickerView,
@@ -37,8 +38,10 @@ use crate::desktop_ui::{
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
+#[cfg(target_os = "macos")]
+use crate::events::now_ms;
 use crate::events::{
-    CommandOutcome, DictationPhase, EventReader, TranscriptPhase, VoiceEvent, VoiceState, now_ms,
+    CommandOutcome, DictationPhase, EventReader, TranscriptPhase, VoiceEvent, VoiceState,
 };
 use crate::history::{History, HistoryEntry, HistoryKind, HistoryRetention};
 use crate::login_item::{LoginItemRequest, LoginItemResponse, LoginItemStatus, LoginItemWorker};
@@ -140,7 +143,7 @@ fn microphone_picker_menu(
         .on_mouse_down_out(dismiss)
         .children(choices.into_iter().enumerate().map(|(index, device)| {
             let is_selected = selected == device;
-            let label = device.clone().unwrap_or_else(|| "Automatic".into());
+            let label = device.clone().unwrap_or_else(|| tr("Automatic").into());
             let choose = choose.clone();
             menu_item(is_selected)
                 .id(("microphone-choice", index))
@@ -157,7 +160,7 @@ fn microphone_picker_menu(
 /// The sidebar's Update button, shown while an update is available.
 fn sidebar_update_button() -> gpui::Stateful<Div> {
     button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
-        .child("Update")
+        .child(tr("Update"))
         .id("check-for-updates-sidebar")
 }
 
@@ -313,13 +316,13 @@ impl Pane {
     fn label(self) -> &'static str {
         match self {
             Self::HudLab => "HUD Lab",
-            Self::Meetings => "Meetings",
-            Self::Commands => "Commands",
-            Self::Activity => "Activity",
-            Self::History => "History",
-            Self::Modes => "Modes",
-            Self::VoiceAction => "Voice Action",
-            Self::Settings => "Settings",
+            Self::Meetings => tr("Meetings"),
+            Self::Commands => tr("Commands"),
+            Self::Activity => tr("Activity"),
+            Self::History => tr("History"),
+            Self::Modes => tr("Modes"),
+            Self::VoiceAction => tr("Voice Action"),
+            Self::Settings => tr("Settings"),
         }
     }
 
@@ -535,44 +538,44 @@ fn opencode_unavailable_copy(
 ) -> Option<OpenCodeUnavailableCopy> {
     match state {
         ModelCatalogState::Loading => Some(OpenCodeUnavailableCopy {
-            title: "Checking for OpenCode",
+            title: tr("Checking for OpenCode"),
             description: match feature {
                 OpenCodeFeature::VoiceAction => {
-                    "Voice Action will be available after Hex connects to OpenCode."
+                    tr("Voice Action will be available after Hex connects to OpenCode.")
                 }
                 OpenCodeFeature::Transformation => {
-                    "OpenCode transformation will be available after Hex connects to OpenCode."
+                    tr("OpenCode transformation will be available after Hex connects to OpenCode.")
                 }
             },
             error: None,
             can_retry: false,
-            retry_label: "Retry",
+            retry_label: tr("Retry"),
             can_open_setup: false,
         }),
         ModelCatalogState::Missing => Some(OpenCodeUnavailableCopy {
             title: match feature {
-                OpenCodeFeature::VoiceAction => "Voice Action requires OpenCode",
-                OpenCodeFeature::Transformation => "Transformation requires OpenCode",
+                OpenCodeFeature::VoiceAction => tr("Voice Action requires OpenCode"),
+                OpenCodeFeature::Transformation => tr("Transformation requires OpenCode"),
             },
             description: match feature {
-                OpenCodeFeature::VoiceAction => {
-                    "Install and configure OpenCode to turn spoken instructions into paste-ready text."
-                }
+                OpenCodeFeature::VoiceAction => tr(
+                    "Install and configure OpenCode to turn spoken instructions into paste-ready text.",
+                ),
                 OpenCodeFeature::Transformation => {
-                    "Install and configure OpenCode to transform dictated text."
+                    tr("Install and configure OpenCode to transform dictated text.")
                 }
             },
             error: None,
             can_retry: true,
-            retry_label: "Check again",
+            retry_label: tr("Check again"),
             can_open_setup: true,
         }),
         ModelCatalogState::Failed(error) => Some(OpenCodeUnavailableCopy {
-            title: "OpenCode is unavailable",
-            description: "Hex could not load the OpenCode model catalog.",
+            title: tr("OpenCode is unavailable"),
+            description: tr("Hex could not load the OpenCode model catalog."),
             error: Some(error.clone()),
             can_retry: true,
-            retry_label: "Retry",
+            retry_label: tr("Retry"),
             can_open_setup: false,
         }),
         ModelCatalogState::Loaded(_) => None,
@@ -944,7 +947,10 @@ impl AppWindow {
                     tracing::error!(%error, "could not load app settings");
                     (
                         AppSettings::default(),
-                        Some(format!("Could not load app settings: {error:#}")),
+                        Some(tr_fill(
+                            "Could not load app settings: {}",
+                            &format!("{error:#}"),
+                        )),
                     )
                 }
             }
@@ -1807,7 +1813,7 @@ impl AppWindow {
     }
 
     fn history_search_input(cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search history", ""));
+        let entity = cx.new(|cx| TextInput::picker(cx, tr("Search history"), ""));
         let changed = cx.subscribe(&entity, |this, _, _: &TextChanged, cx| {
             this.reload_history(cx);
             cx.notify();
@@ -1905,7 +1911,7 @@ impl AppWindow {
             .child(self.history_search.entity.clone());
         let retention_control = button(
             ButtonKind::Secondary,
-            format!("Keep: {}", retention.label()),
+            tr_fill("Keep: {}", tr(retention.label())),
         )
         .id("history-retention")
         .child(icon(Icon::ChevronDown, TEXT_TERTIARY))
@@ -1929,7 +1935,7 @@ impl AppWindow {
                             |(index, choice)| {
                                 menu_item(choice == retention)
                                     .id(("history-retention-choice", index))
-                                    .child(choice.label())
+                                    .child(tr(choice.label()))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
                                         this.history_retention_open = false;
@@ -1942,9 +1948,9 @@ impl AppWindow {
             },
         );
         let clear = if self.history_clear_armed {
-            button(ButtonKind::Danger, "Really clear all?")
+            button(ButtonKind::Danger, tr("Really clear all?"))
         } else {
-            button(ButtonKind::Secondary, "Clear all")
+            button(ButtonKind::Secondary, tr("Clear all"))
         }
         .id("history-clear")
         .on_click(cx.listener(|this, _, _, cx| this.clear_history(cx)))
@@ -1966,7 +1972,7 @@ impl AppWindow {
                 let selected = self.selected_history == Some(id);
                 let age = event_age(entry.timestamp_ms);
                 let preview = entry.final_text.replace('\n', " ");
-                let mut meta = entry.kind.label().to_string();
+                let mut meta = tr(entry.kind.label()).to_string();
                 if let Some(application) = &entry.application {
                     meta.push_str(" · ");
                     meta.push_str(application);
@@ -1997,7 +2003,7 @@ impl AppWindow {
             .size_full()
             .flex()
             .flex_col()
-            .child(pane_header_with_action("History", Some(header_action)))
+            .child(pane_header_with_action(tr("History"), Some(header_action)))
             .child(
                 pane_body().child(
                     pane_content()
@@ -2007,15 +2013,15 @@ impl AppWindow {
                             "history-list",
                             PANE_LIST_WIDTH,
                             if retention_off {
-                                Some("History is off. New dictations are not retained.")
+                                Some(tr("History is off. New dictations are not retained."))
                             } else if self.history_entries.is_empty()
                                 && self.history_error.is_none()
                             {
-                                Some("No dictations retained yet.")
+                                Some(tr("No dictations retained yet."))
                             } else {
                                 None
                             },
-                            "History could not be loaded.",
+                            tr("History could not be loaded."),
                             self.history_error.clone(),
                             rows,
                         ))
@@ -2030,7 +2036,7 @@ impl AppWindow {
             .selected_history
             .and_then(|id| self.history_entries.iter().find(|entry| entry.id == id))
         else {
-            return detail_placeholder("Select a history entry.");
+            return detail_placeholder(tr("Select a history entry."));
         };
         let id = entry.id;
         let copied = self.history_copied == Some(id);
@@ -2039,12 +2045,18 @@ impl AppWindow {
             button(ButtonKind::Secondary, label)
                 .id(SharedString::from(format!("history-action-{id_suffix}")))
         };
-        let mut latency = format!(
-            "{} ms audio · {} ms inference",
-            entry.audio_ms, entry.inference_ms
+        let mut latency = tr_named(
+            "{audio} ms audio · {inference} ms inference",
+            &[
+                ("audio", &entry.audio_ms.to_string()),
+                ("inference", &entry.inference_ms.to_string()),
+            ],
         );
         if entry.total_ms > 0 {
-            latency.push_str(&format!(" · {} ms total", entry.total_ms));
+            latency.push_str(&format!(
+                " · {}",
+                tr_fill("{} ms total", &entry.total_ms.to_string())
+            ));
         }
         let section = |label: &'static str, first: bool| {
             div()
@@ -2061,15 +2073,15 @@ impl AppWindow {
             .flex()
             .flex_col()
             .child(detail_header(
-                detail_title(entry.kind.label()),
+                detail_title(tr(entry.kind.label())),
                 vec![event_age(entry.timestamp_ms).into_any_element()],
                 vec![
-                    action_button(if copied { "Copied" } else { "Copy" }, "copy")
+                    action_button(if copied { tr("Copied") } else { tr("Copy") }, "copy")
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.copy_history_entry(id, cx)),
                         )
                         .into_any_element(),
-                    action_button("Delete", "delete")
+                    action_button(tr("Delete"), "delete")
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.delete_history_entry(id, cx)),
                         )
@@ -2079,7 +2091,7 @@ impl AppWindow {
             .child(
                 detail_body("history-detail")
                     .child(
-                        section("Final text", true).child(
+                        section(tr("Final text"), true).child(
                             div()
                                 .pt_2()
                                 .text_body()
@@ -2089,7 +2101,7 @@ impl AppWindow {
                     )
                     .when(show_raw, |detail| {
                         detail.child(
-                            section("Raw transcript", false).child(
+                            section(tr("Raw transcript"), false).child(
                                 div()
                                     .pt_2()
                                     .text_body()
@@ -2107,7 +2119,7 @@ impl AppWindow {
                             .border_t_1()
                             .border_color(rgb(LINE))
                             .when_some(entry.application.clone(), |rows, application| {
-                                rows.child(detail_row("Application", application))
+                                rows.child(detail_row(tr("Application"), application))
                             })
                             .when_some(entry.processing.clone(), |rows, processing| {
                                 let mut summary = format!(
@@ -2115,11 +2127,14 @@ impl AppWindow {
                                     processing.profile, processing.latency_ms
                                 );
                                 if let Some(fallback) = &processing.fallback {
-                                    summary.push_str(&format!(" · fell back: {fallback}"));
+                                    summary.push_str(&format!(
+                                        " · {}",
+                                        tr_fill("fell back: {}", fallback)
+                                    ));
                                 }
-                                rows.child(detail_row("Processing", summary))
+                                rows.child(detail_row(tr("Processing"), summary))
                             })
-                            .child(detail_row("Latency", latency)),
+                            .child(detail_row(tr("Latency"), latency)),
                     ),
             )
             .into_any_element()
@@ -2161,7 +2176,7 @@ impl AppWindow {
                             .pl_3()
                             .text_caption()
                             .text_color(rgb(TEXT_TERTIARY))
-                            .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                            .child(tr_fill("Version {}", env!("CARGO_PKG_VERSION"))),
                     )
                     .children(self.platform_update_button(cx)),
             )
@@ -2175,7 +2190,7 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let binding_keycaps = hotkey_binding(&self.settings, kind)
-            .map_or_else(|| vec!["Off".into()], HotkeyBinding::keycaps);
+            .map_or_else(|| vec![tr("Off").into()], HotkeyBinding::keycaps);
         let idle_width =
             hotkey_idle_width(binding_keycaps.len()) + hotkey_label_overflow(&binding_keycaps);
         if matches!(
@@ -2233,9 +2248,9 @@ impl AppWindow {
                 ..
             } if *active == kind => {
                 let label = message.unwrap_or(if modifiers.is_empty() {
-                    "Press shortcut"
+                    tr("Press shortcut")
                 } else {
-                    "Release to save or add key"
+                    tr("Release to save or add key")
                 });
                 div()
                     .flex()
@@ -2266,7 +2281,7 @@ impl AppWindow {
                             .child(label),
                     )
                     .child(
-                        small_button(ButtonKind::Secondary, "Cancel")
+                        small_button(ButtonKind::Secondary, tr("Cancel"))
                             .id(match kind {
                                 HotkeyKind::Dictation => "cancel-dictation-hotkey-capture",
                                 HotkeyKind::Edit => "cancel-edit-hotkey-capture",
@@ -2284,7 +2299,7 @@ impl AppWindow {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(tag(Tone::Success, "Saved"))
+                .child(tag(Tone::Success, tr("Saved")))
                 .child(hotkey_keycaps(binding_keycaps.clone(), 1.0))
                 .into_any_element(),
             HotkeyCaptureState::Idle
@@ -2298,7 +2313,7 @@ impl AppWindow {
                     div()
                         .text_footnote()
                         .text_color(rgb(TEXT_SECONDARY))
-                        .child("Change shortcut"),
+                        .child(tr("Change shortcut")),
                 )
                 .into_any_element(),
         };
@@ -2378,9 +2393,9 @@ impl AppWindow {
                     .w(px(HOTKEY_SIDE_SELECTOR_WIDTH))
                     .children(
                         [
-                            ("Left", ModifierSide::Left),
-                            ("Either", ModifierSide::Either),
-                            ("Right", ModifierSide::Right),
+                            (tr("Left"), ModifierSide::Left),
+                            (tr("Either"), ModifierSide::Either),
+                            (tr("Right"), ModifierSide::Right),
                         ]
                         .into_iter()
                         .enumerate()
@@ -2475,7 +2490,7 @@ impl AppWindow {
             }
         };
         if modifiers.is_empty() && !is_function_key(&key.label) {
-            self.set_hotkey_capture_message("Add a modifier", cx);
+            self.set_hotkey_capture_message(tr("Add a modifier"), cx);
             return;
         }
         let binding = HotkeyBinding {
@@ -2544,7 +2559,7 @@ impl AppWindow {
 
     fn save_hotkey_binding(&mut self, binding: HotkeyBinding, cx: &mut Context<Self>) {
         if binding.is_empty() {
-            self.set_hotkey_capture_message("Press a shortcut", cx);
+            self.set_hotkey_capture_message(tr("Press a shortcut"), cx);
             return;
         }
         let kind = match self.hotkey_capture {
@@ -2556,18 +2571,18 @@ impl AppWindow {
             return;
         }
         if hotkey_binding_conflicts(&self.settings, kind, &binding) {
-            self.set_hotkey_capture_message("Already in use", cx);
+            self.set_hotkey_capture_message(tr("Already in use"), cx);
             return;
         }
         if !self.preview && self.platform_save_hotkey(kind, &binding) {
-            self.set_hotkey_capture_message("Saving…", cx);
+            self.set_hotkey_capture_message(tr("Saving…"), cx);
             return;
         }
         let keycaps = binding.keycaps();
         let keycap_count = keycaps.len();
         let label_overflow = hotkey_label_overflow(&keycaps);
         if !self.update_settings(cx, |settings| set_hotkey_binding(settings, kind, binding)) {
-            self.set_hotkey_capture_message("Could not save shortcut. Try again.", cx);
+            self.set_hotkey_capture_message(tr("Could not save shortcut. Try again."), cx);
             return;
         }
         self.hotkey_width_spring
@@ -2653,7 +2668,7 @@ impl AppWindow {
             .into_any_element();
 
         panel()
-            .child(panel_header("Corrections", Some(add)))
+            .child(panel_header(tr("Corrections"), Some(add)))
             .when(replacement_count == 0, |panel| {
                 panel.child(
                     div()
@@ -2661,7 +2676,7 @@ impl AppWindow {
                         .py_3()
                         .text_footnote()
                         .text_color(rgb(TEXT_TERTIARY))
-                        .child("No corrections in this mode."),
+                        .child(tr("No corrections in this mode.")),
                 )
             })
             .children(replacement_rows)
@@ -2700,12 +2715,12 @@ impl AppWindow {
                             .started
                             .map_or(0.0, |started| (started.elapsed().as_secs_f32() % 1.6) / 1.6);
                         TranscriptionPickerStatus::Preparing {
-                            label: format!("Loading model · {elapsed}s"),
+                            label: tr_fill("Loading model · {}s", &elapsed.to_string()),
                             progress: Some(TranscriptionPickerProgress::Loading(progress)),
                         }
                     } else {
                         TranscriptionPickerStatus::Preparing {
-                            label: format!("Downloading {:.0}%", progress * 100.0),
+                            label: tr_fill("Downloading {}%", &format!("{:.0}", progress * 100.0)),
                             progress: matches!(model.runtime, ModelRuntime::Gguf(_))
                                 .then_some(TranscriptionPickerProgress::Downloading(progress)),
                         }
@@ -2788,7 +2803,7 @@ impl AppWindow {
         let dictation_notice =
             dictation_model_notice(self.setup_status, self.transcription_status.model.is_some());
         let (title, description, action) = if let Some((title, description)) = dictation_notice {
-            let action = button(ButtonKind::Primary, "Choose model")
+            let action = button(ButtonKind::Primary, tr("Choose model"))
                 .id("choose-required-model")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.transcription_picker_language =
@@ -2837,17 +2852,18 @@ impl AppWindow {
         let running = listener.running;
         let shortcut = self.settings.dictation_hotkey.keycaps().join("+");
         let hint = match (running, self.settings.shortcut_mode) {
-            (true, crate::dictation::ShortcutMode::Toggle) => {
-                format!("Ready anywhere · Press {shortcut} to start and stop dictating")
-            }
+            (true, crate::dictation::ShortcutMode::Toggle) => tr_fill(
+                "Ready anywhere · Press {} to start and stop dictating",
+                &shortcut,
+            ),
             (true, crate::dictation::ShortcutMode::Hold) => {
-                format!("Ready anywhere · Hold {shortcut} to dictate")
+                tr_fill("Ready anywhere · Hold {} to dictate", &shortcut)
             }
-            (false, _) => format!("Enable Hex to dictate into any app with {shortcut}"),
+            (false, _) => tr_fill("Enable Hex to dictate into any app with {}", &shortcut),
         };
         let action = button(
             ButtonKind::Secondary,
-            if running { "Disable" } else { "Enable" },
+            if running { tr("Disable") } else { tr("Enable") },
         )
         .id("toggle-listening")
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2891,14 +2907,17 @@ impl AppWindow {
                                                 div()
                                                     .text_body()
                                                     .text_color(rgb(TEXT_PRIMARY))
-                                                    .child(listener.status),
+                                                    .child(tr(&listener.status).to_string()),
                                             )
                                             .child(truncated_line(FOOTNOTE, hint))
                                             .when_some(listener.last_failure, |column, failure| {
                                                 column.child(
                                                     truncated_line(
                                                         FOOTNOTE,
-                                                        format!("Last dictation failed: {failure}"),
+                                                        tr_fill(
+                                                            "Last dictation failed: {}",
+                                                            &failure,
+                                                        ),
                                                     )
                                                     .text_color(rgb(DANGER)),
                                                 )
@@ -2909,7 +2928,7 @@ impl AppWindow {
                     ),
                 )
                 .when_some(listener.error, |card, error| {
-                    card.child(error_message("Hex could not apply this change.", error))
+                    card.child(error_message(tr("Hex could not apply this change."), error))
                 })
                 .into_any_element(),
         )
@@ -2917,7 +2936,7 @@ impl AppWindow {
 
     fn render_interface_language_control(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.settings.ui_language.clone();
-        let label = crate::desktop_i18n::choice_name(selected.as_deref());
+        let label = tr(crate::desktop_i18n::choice_name(selected.as_deref()));
         let menu = self.interface_language_open.then(|| {
             dropdown_menu()
                 .id("interface-language-picker")
@@ -2937,7 +2956,7 @@ impl AppWindow {
                             let code = code.map(str::to_string);
                             menu_item(selected == code)
                                 .id(("interface-language-choice", index))
-                                .child(truncated_line(FOOTNOTE, *name))
+                                .child(truncated_line(FOOTNOTE, tr(name)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     this.interface_language_open = false;
@@ -2968,9 +2987,10 @@ impl AppWindow {
 
     fn render_software_update_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let control = match self.platform_software_update()? {
-            SoftwareUpdate::Checking => busy_label("Checking").into_any_element(),
+            SoftwareUpdate::Checking => busy_label(tr("Checking")).into_any_element(),
             SoftwareUpdate::Available { version } => {
-                let label = version.map_or_else(|| "Update".into(), |v| format!("Update to {v}"));
+                let label =
+                    version.map_or_else(|| tr("Update").into(), |v| tr_fill("Update to {}", &v));
                 button(ButtonKind::Secondary, label)
                     .id("software-update")
                     .debug_selector(|| "software-update".into())
@@ -2983,8 +3003,8 @@ impl AppWindow {
             }
             SoftwareUpdate::ReadyToRestart { version } => {
                 let label = version.map_or_else(
-                    || "Restart to update".into(),
-                    |v| format!("Restart into {v}"),
+                    || tr("Restart to update").into(),
+                    |v| tr_fill("Restart into {}", &v),
                 );
                 button(ButtonKind::Secondary, label)
                     .id("software-update")
@@ -2998,15 +3018,15 @@ impl AppWindow {
             SoftwareUpdate::Current if !platform::MANUAL_UPDATE_CHECK => div()
                 .text_footnote()
                 .text_color(rgb(TEXT_TERTIARY))
-                .child("Up to date")
+                .child(tr("Up to date"))
                 .into_any_element(),
             SoftwareUpdate::Failed if !platform::MANUAL_UPDATE_CHECK => div()
                 .text_footnote()
                 .text_color(rgb(TEXT_TERTIARY))
-                .child("Check failed; retrying later")
+                .child(tr("Check failed; retrying later"))
                 .into_any_element(),
             SoftwareUpdate::Current | SoftwareUpdate::Failed => {
-                button(ButtonKind::Secondary, "Check now")
+                button(ButtonKind::Secondary, tr("Check now"))
                     .id("software-update")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.check_for_updates();
@@ -3063,9 +3083,9 @@ impl AppWindow {
             .debug_selector(|| "indicator-position".into())
             .children(
                 [
-                    ("Top", IndicatorPosition::Top),
-                    ("Bottom", IndicatorPosition::Bottom),
-                    ("Off", IndicatorPosition::Hidden),
+                    (tr("Top"), IndicatorPosition::Top),
+                    (tr("Bottom"), IndicatorPosition::Bottom),
+                    (tr("Off"), IndicatorPosition::Hidden),
                 ]
                 .into_iter()
                 .enumerate()
@@ -3096,7 +3116,7 @@ impl AppWindow {
             .settings
             .microphone
             .clone()
-            .unwrap_or_else(|| "Automatic".into());
+            .unwrap_or_else(|| tr("Automatic").into());
         let microphone_picker = self
             .microphone_picker_open
             .then(|| self.render_microphone_picker(cx));
@@ -3109,7 +3129,7 @@ impl AppWindow {
                 .map(|(index, (label, volume))| {
                     sliding_segmented_item(34.0, selected_volume == index)
                         .id(("sound-volume", index))
-                        .child(label)
+                        .child(tr(label))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.update_settings(cx, |settings| {
                                 settings.sound_effects = volume > 0.0;
@@ -3131,13 +3151,13 @@ impl AppWindow {
                 .text_footnote()
                 .text_color(rgb(TEXT_TERTIARY))
                 .child(if self.login_item_worker.is_some() {
-                    "Checking…"
+                    tr("Checking…")
                 } else {
-                    "Unavailable"
+                    tr("Unavailable")
                 })
                 .into_any_element()
         } else if self.launch_at_login_status == Some(LoginItemStatus::RequiresApproval) {
-            button(ButtonKind::Secondary, "Open settings")
+            button(ButtonKind::Secondary, tr("Open settings"))
                 .id("launch-at-login-approval")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.request_login_item(LoginItemRequest::OpenSettings);
@@ -3155,7 +3175,7 @@ impl AppWindow {
                     let selected = self.settings.recording_audio_behavior == behavior;
                     sliding_segmented_item(audio_widths[index], selected)
                         .id(("recording-audio-behavior", index))
-                        .child(behavior.label())
+                        .child(tr(behavior.label()))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.settings.recording_audio_behavior == behavior {
                                 return;
@@ -3173,8 +3193,8 @@ impl AppWindow {
             .id("shortcut-mode")
             .children(
                 [
-                    ("Hold", crate::dictation::ShortcutMode::Hold),
-                    ("Toggle", crate::dictation::ShortcutMode::Toggle),
+                    (tr("Hold"), crate::dictation::ShortcutMode::Hold),
+                    (tr("Toggle"), crate::dictation::ShortcutMode::Toggle),
                 ]
                 .into_iter()
                 .enumerate()
@@ -3190,35 +3210,38 @@ impl AppWindow {
         let microphone_mode = sliding_segmented_control(release_microphone_position, &[114.0; 2])
             .id("microphone-mode")
             .children(
-                [("Keep ready (fast)", false), ("Release when idle", true)]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (label, release))| {
-                        sliding_segmented_item(
-                            114.0,
-                            self.settings.release_microphone_while_idle == release,
-                        )
-                        .id(("microphone-mode", index))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if release && !this.settings.release_microphone_while_idle {
-                                this.pending_microphone_policy =
-                                    Some(MicrophonePolicyChange::DisableCommandsAndRelease);
-                                cx.notify();
-                                return;
-                            }
-                            this.pending_microphone_policy = None;
-                            if this.settings.release_microphone_while_idle != release
-                                && let Err(error) = this.update_microphone_policy(
-                                    MicrophonePolicyChange::SetReleaseWhileIdle(release),
-                                    cx,
-                                )
-                            {
-                                tracing::error!(%error, "could not update microphone policy");
-                            }
+                [
+                    (tr("Keep ready (fast)"), false),
+                    (tr("Release when idle"), true),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (label, release))| {
+                    sliding_segmented_item(
+                        114.0,
+                        self.settings.release_microphone_while_idle == release,
+                    )
+                    .id(("microphone-mode", index))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if release && !this.settings.release_microphone_while_idle {
+                            this.pending_microphone_policy =
+                                Some(MicrophonePolicyChange::DisableCommandsAndRelease);
                             cx.notify();
-                        }))
-                    }),
+                            return;
+                        }
+                        this.pending_microphone_policy = None;
+                        if this.settings.release_microphone_while_idle != release
+                            && let Err(error) = this.update_microphone_policy(
+                                MicrophonePolicyChange::SetReleaseWhileIdle(release),
+                                cx,
+                            )
+                        {
+                            tracing::error!(%error, "could not update microphone policy");
+                        }
+                        cx.notify();
+                    }))
+                }),
             );
         let microphone_confirmation = (self.pending_microphone_policy
             == Some(MicrophonePolicyChange::DisableCommandsAndRelease))
@@ -3235,11 +3258,11 @@ impl AppWindow {
                 .bg(rgb(CANVAS))
                 .child(
                     div().flex_1().min_w_0().child(settings_copy(
-                        "Release the microphone when idle?",
+                        tr("Release the microphone when idle?"),
                         if self.settings.commands_enabled {
-                            "Opens the microphone on shortcut press without pre-roll and turns Commands off."
+                            tr("Opens the microphone on shortcut press without pre-roll and turns Commands off.")
                         } else {
-                            "Opens the microphone on shortcut press without pre-roll. Commands remain off."
+                            tr("Opens the microphone on shortcut press without pre-roll. Commands remain off.")
                         },
                     )),
                 )
@@ -3250,7 +3273,7 @@ impl AppWindow {
                         .items_center()
                         .gap_2()
                         .child(
-                            button(ButtonKind::Secondary, "Cancel")
+                            button(ButtonKind::Secondary, tr("Cancel"))
                                 .id("cancel-release-microphone")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.pending_microphone_policy = None;
@@ -3258,7 +3281,7 @@ impl AppWindow {
                                 })),
                         )
                         .child(
-                            button(ButtonKind::Primary, "Release microphone")
+                            button(ButtonKind::Primary, tr("Release microphone"))
                                 .id("confirm-release-microphone")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if let Err(error) = this.update_microphone_policy(
@@ -3272,22 +3295,22 @@ impl AppWindow {
                 )
         });
         settings_pane(
-            "Settings",
+            tr("Settings"),
             "settings-scroll",
             div()
                 .children(platform_notice)
                 .children(listener_card)
-                .child(settings_section_label("Dictation"))
+                .child(settings_section_label(tr("Dictation")))
                 .child(
                     panel()
                         .child(settings_row(
-                            "Local transcription",
-                            "Language and on-device speech model",
+                            tr("Local transcription"),
+                            tr("Language and on-device speech model"),
                             transcription_control,
                         ))
                         .child(settings_row(
-                            "Microphone",
-                            "Input device for dictation and commands",
+                            tr("Microphone"),
+                            tr("Input device for dictation and commands"),
                             div()
                                 .relative()
                                 .flex_none()
@@ -3304,8 +3327,8 @@ impl AppWindow {
                             transcription_model.supports_recognition_hints,
                             |settings| {
                                 settings.child(settings_row(
-                                    "Recognition hints",
-                                    "Names and terms to prime the speech model",
+                                    tr("Recognition hints"),
+                                    tr("Names and terms to prime the speech model"),
                                     div()
                                         .w(px(320.0))
                                         .flex_none()
@@ -3316,32 +3339,32 @@ impl AppWindow {
                             },
                         )
                         .child(settings_row(
-                            "Shortcut mode",
+                            tr("Shortcut mode"),
                             if toggle_mode {
-                                "Press to start dictating, press again to transcribe"
+                                tr("Press to start dictating, press again to transcribe")
                             } else {
-                                "Hold to dictate, release to transcribe"
+                                tr("Hold to dictate, release to transcribe")
                             },
                             shortcut_mode,
                         ))
                         .child(
                             settings_row(
-                                "Dictation shortcut",
-                                "Click to record a new shortcut",
+                                tr("Dictation shortcut"),
+                                tr("Click to record a new shortcut"),
                                 hotkey_control,
                             )
                             .border_b_0()
                             .id("dictation-hotkey-setting"),
                         ),
                 )
-                .child(settings_section_label("Behavior"))
+                .child(settings_section_label(tr("Behavior")))
                 .child(
                     panel()
                         .when(capabilities.recording_audio, |panel| {
                             panel.child(
                                 settings_row(
-                                    "While dictating",
-                                    "Mute or pause other audio during dictation",
+                                    tr("While dictating"),
+                                    tr("Mute or pause other audio during dictation"),
                                     audio_behavior,
                                 )
                                 .id("recording-audio-setting"),
@@ -3350,11 +3373,11 @@ impl AppWindow {
                         .when(capabilities.release_microphone, |panel| {
                             panel
                                 .child(settings_row(
-                                    "Microphone mode",
+                                    tr("Microphone mode"),
                                     if self.settings.release_microphone_while_idle {
-                                        "Opens only while holding the shortcut. Disables pre-roll and commands."
+                                        tr("Opens only while holding the shortcut. Disables pre-roll and commands.")
                                     } else {
-                                        "Keeps the microphone open for instant start and pre-roll"
+                                        tr("Keeps the microphone open for instant start and pre-roll")
                                     },
                                     microphone_mode,
                                 ))
@@ -3363,8 +3386,8 @@ impl AppWindow {
                         .when(!toggle_mode, |panel| {
                             panel.child(
                                 settings_row(
-                                    "Double-tap to lock",
-                                    "Double-tap the shortcut for hands-free dictation",
+                                    tr("Double-tap to lock"),
+                                    tr("Double-tap the shortcut for hands-free dictation"),
                                     toggle(double_tap_position),
                                 )
                                 .id("double-tap-setting")
@@ -3381,8 +3404,8 @@ impl AppWindow {
                                 .opacity(double_tap_only_visibility)
                                 .child(
                                     settings_row(
-                                        "Double-tap only",
-                                        "Wait for two complete shortcut taps before recording",
+                                        tr("Double-tap only"),
+                                        tr("Wait for two complete shortcut taps before recording"),
                                         toggle(if self.settings.double_tap_only { 1.0 } else { 0.0 }),
                                     )
                                     .id("double-tap-only-setting")
@@ -3395,8 +3418,8 @@ impl AppWindow {
                         .when(capabilities.indicator_position, |panel| {
                             panel.child(
                                 settings_row(
-                                    "Recording indicator",
-                                    "Show the dictation pill at the top or bottom of the screen",
+                                    tr("Recording indicator"),
+                                    tr("Show the dictation pill at the top or bottom of the screen"),
                                     indicator_control,
                                 )
                                 .when(!capabilities.terminal_paste && !capabilities.paste_last, |row| {
@@ -3408,8 +3431,8 @@ impl AppWindow {
                         .when(capabilities.terminal_paste, |panel| {
                             panel.child(
                                 settings_row(
-                                    "Terminal paste",
-                                    "Paste with Ctrl+Shift+V so terminals accept it",
+                                    tr("Terminal paste"),
+                                    tr("Paste with Ctrl+Shift+V so terminals accept it"),
                                     toggle(terminal_paste_position),
                                 )
                                 .when(!capabilities.paste_last, |row| row.border_b_0())
@@ -3426,8 +3449,8 @@ impl AppWindow {
                         })
                         .when(capabilities.paste_last, |panel| panel.child(
                             settings_row(
-                                "Paste last dictation",
-                                "Re-paste the most recent dictation",
+                                tr("Paste last dictation"),
+                                tr("Re-paste the most recent dictation"),
                                 div()
                                     .flex()
                                     .items_center()
@@ -3435,7 +3458,7 @@ impl AppWindow {
                                     .child(paste_last_control)
                                     .when(self.settings.paste_last_hotkey.is_some(), |row| {
                                         row.child(
-                                            button(ButtonKind::Secondary, "Clear")
+                                            button(ButtonKind::Secondary, tr("Clear"))
                                                 .id("disable-paste-last-hotkey")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.update_settings(cx, |settings| settings.paste_last_hotkey = None);
@@ -3448,13 +3471,13 @@ impl AppWindow {
                         ))
                 )
                 .children(platform_section)
-                .child(settings_section_label("Application"))
+                .child(settings_section_label(tr("Application")))
                 .child(
                     panel()
                         .when(capabilities.launch_at_login, |panel| panel.child(
                             settings_row(
-                                "Launch at login",
-                                "Start Hex when you log in",
+                                tr("Launch at login"),
+                                tr("Start Hex when you log in"),
                                 launch_at_login_control,
                             )
                             .id("launch-at-login-setting")
@@ -3479,8 +3502,8 @@ impl AppWindow {
                         )
                         .when(capabilities.listener_control, |panel| panel.child(
                             settings_row(
-                                "Enable on launch",
-                                "Turn Hex on in every app whenever it opens",
+                                tr("Enable on launch"),
+                                tr("Turn Hex on in every app whenever it opens"),
                                 toggle(enable_on_launch_position),
                             )
                             .id("enable-on-launch-setting")
@@ -3495,8 +3518,8 @@ impl AppWindow {
                         ))
                         .when(capabilities.dock_icon, |panel| panel.child(
                             settings_row(
-                                "Show Dock icon",
-                                "Keep Hex in the menu bar when Settings is closed",
+                                tr("Show Dock icon"),
+                                tr("Keep Hex in the menu bar when Settings is closed"),
                                 toggle(dock_icon_position),
                             )
                             .id("dock-icon-setting")
@@ -3511,8 +3534,8 @@ impl AppWindow {
                         .when_some(interface_language_control, |panel, control| {
                             panel.child(
                                 settings_row(
-                                    "Interface language",
-                                    "Language of the Hex interface",
+                                    tr("Interface language"),
+                                    tr("Language of the Hex interface"),
                                     control,
                                 )
                                 .id("interface-language-setting"),
@@ -3520,8 +3543,8 @@ impl AppWindow {
                         })
                         .child(
                             settings_row(
-                                "Sound volume",
-                                "Recording, cancellation, and error tones",
+                                tr("Sound volume"),
+                                tr("Recording, cancellation, and error tones"),
                                 sound_volume,
                             )
                             .when(software_update_control.is_none(), |row| row.border_b_0())
@@ -3530,8 +3553,8 @@ impl AppWindow {
                         .when_some(software_update_control, |panel, control| {
                             panel.child(
                                 settings_row(
-                                    "Software updates",
-                                    "Checks for new Hex releases in the background",
+                                    tr("Software updates"),
+                                    tr("Checks for new Hex releases in the background"),
                                     control,
                                 )
                                 .border_b_0()
@@ -3572,9 +3595,9 @@ impl AppWindow {
         let model_notice =
             dictation_model_notice(status, self.transcription_status.model.is_some());
         let models = if models_ready {
-            tag(Tone::Success, "Ready").into_any_element()
+            tag(Tone::Success, tr("Ready")).into_any_element()
         } else {
-            button(ButtonKind::Primary, "Choose model")
+            button(ButtonKind::Primary, tr("Choose model"))
                 .id("setup-models")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.transcription_picker_language =
@@ -3613,15 +3636,15 @@ impl AppWindow {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().text_headline().child("Set up Hex"))
+                            .child(div().text_headline().child(tr("Set up Hex")))
                             .child(
                                 div()
                                     .text_footnote()
                                     .text_color(rgb(TEXT_TERTIARY))
                                     .child(if platform::CAPABILITIES.permissions {
-                                        "Grant permissions and choose a local model to start dictating."
+                                        tr("Grant permissions and choose a local model to start dictating.")
                                     } else {
-                                        "Choose a local model to start dictating."
+                                        tr("Choose a local model to start dictating.")
                                     }),
                             ),
                     )
@@ -3631,7 +3654,7 @@ impl AppWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(section_label("Permissions needed").px_4())
+                                .child(section_label(tr("Permissions needed")).px_4())
                                 .child(panel().children(permission_rows)),
                         )
                     })
@@ -3640,21 +3663,21 @@ impl AppWindow {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(section_label("Local models").px_4())
+                            .child(section_label(tr("Local models")).px_4())
                             .child(
                                 panel().child(
                                     settings_row(
                                         if let Some((title, _)) = model_notice {
                                             title
                                         } else {
-                                            "Local dictation model"
+                                            tr("Local dictation model")
                                         },
                                         if let Some((_, description)) = model_notice {
                                             description
                                         } else if platform::CAPABILITIES.permissions {
-                                            "The selected model transcribes speech entirely on this Mac."
+                                            tr("The selected model transcribes speech entirely on this Mac.")
                                         } else {
-                                            "The selected model transcribes speech entirely on this computer."
+                                            tr("The selected model transcribes speech entirely on this computer.")
                                         },
                                         models,
                                     )
@@ -3667,7 +3690,7 @@ impl AppWindow {
                             div()
                                 .text_footnote()
                                 .text_color(rgb(TEXT_TERTIARY))
-                                .child("Meeting recording requests Screen & System Audio Recording separately when you use it."),
+                                .child(tr("Meeting recording requests Screen & System Audio Recording separately when you use it.")),
                         )
                     }),
             )
@@ -3718,7 +3741,7 @@ impl AppWindow {
                 &copy,
                 "retry-opencode",
                 "open-opencode-setup",
-                "Open OpenCode setup",
+                tr("Open OpenCode setup"),
                 cx,
             )
             .mt_4();
@@ -3727,7 +3750,7 @@ impl AppWindow {
                     .p_4()
                     .child(settings_copy(copy.title, copy.description))
                     .when_some(copy.error, |card, error| {
-                        card.child(error_panel("OpenCode reported:", error).mt_3())
+                        card.child(error_panel(tr("OpenCode reported:"), error).mt_3())
                     })
                     .when(show_actions, |card| card.child(actions))
                     .into_any_element(),
@@ -3736,24 +3759,27 @@ impl AppWindow {
             Some(self.render_voice_action_processing(window, cx))
         };
         settings_pane(
-            "Voice Action",
+            tr("Voice Action"),
             "voice-action-scroll",
             div()
-                .child(panel().mt_6().child(
-                    settings_row("Enable Voice Action", description, enabled_control).border_b_0(),
-                ))
+                .child(
+                    panel().mt_6().child(
+                        settings_row(tr("Enable Voice Action"), description, enabled_control)
+                            .border_b_0(),
+                    ),
+                )
                 .when_some(self.voice_action_inputs.error.clone(), |column, error| {
-                    column.child(error_message("Could not update Voice Action:", error))
+                    column.child(error_message(tr("Could not update Voice Action:"), error))
                 })
-                .child(settings_section_label("Capture"))
+                .child(settings_section_label(tr("Capture")))
                 .child(
                     panel().child(
                         settings_row(
-                            "Shortcut",
+                            tr("Shortcut"),
                             if enabled {
-                                "Hold to speak; selected text is included automatically"
+                                tr("Hold to speak; selected text is included automatically")
                             } else {
-                                "Saved for when Voice Action is enabled"
+                                tr("Saved for when Voice Action is enabled")
                             },
                             hotkey,
                         )
@@ -3763,7 +3789,7 @@ impl AppWindow {
                 )
                 .when_some(processing, |column, processing| {
                     column
-                        .child(settings_section_label("Processing"))
+                        .child(settings_section_label(tr("Processing")))
                         .child(processing)
                 }),
         )
@@ -3877,11 +3903,15 @@ impl AppWindow {
     ) -> ReplacementInputs {
         ReplacementInputs {
             matched_phrase: Self::processing_input(
-                "Spoken phrase (e.g. open code)",
+                tr("Spoken phrase (e.g. open code)"),
                 &replacement.matched_phrase,
                 cx,
             ),
-            output: Self::processing_input("Replacement (e.g. OpenCode)", &replacement.output, cx),
+            output: Self::processing_input(
+                tr("Replacement (e.g. OpenCode)"),
+                &replacement.output,
+                cx,
+            ),
         }
     }
 
@@ -3889,7 +3919,7 @@ impl AppWindow {
         let entity = cx.new(|cx| {
             TextInput::multiline(
                 cx,
-                "Names and terms Whisper should expect, e.g. OpenCode, Effect…",
+                tr("Names and terms Whisper should expect, e.g. OpenCode, Effect…"),
                 initial,
             )
         });
@@ -3937,7 +3967,7 @@ impl AppWindow {
         target: fn(&Self) -> ModelPickerTarget,
         cx: &mut Context<Self>,
     ) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search available models", initial));
+        let entity = cx.new(|cx| TextInput::picker(cx, tr("Search available models"), initial));
         let changed = cx.subscribe(&entity, |this, _, _: &TextChanged, cx| {
             this.model_picker_highlight = 0;
             cx.notify();
@@ -3967,7 +3997,7 @@ impl AppWindow {
     }
 
     fn application_search_input(cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search applications", ""));
+        let entity = cx.new(|cx| TextInput::picker(cx, tr("Search applications"), ""));
         let changed = cx.subscribe(&entity, |this, _, _: &TextChanged, cx| {
             this.application_picker_highlight = 0;
             cx.notify();
@@ -4011,14 +4041,14 @@ impl AppWindow {
     fn mode_inputs(mode: &DictationMode, cx: &mut Context<Self>) -> ModeInputs {
         let processing = &mode.post_processing;
         ModeInputs {
-            name: Self::processing_input("Mode name", &mode.name, cx),
+            name: Self::processing_input(tr("Mode name"), &mode.name, cx),
             browser_hosts: Self::processing_input(
                 "github.com, x.com",
                 &mode.browser_hosts.join(", "),
                 cx,
             ),
             prompt: Self::multiline_processing_input(
-                "Describe how OpenCode should rewrite your dictation…",
+                tr("Describe how OpenCode should rewrite your dictation…"),
                 &processing.prompt,
                 cx,
             ),
@@ -4085,7 +4115,7 @@ impl AppWindow {
 
     fn add_mode(&mut self, cx: &mut Context<Self>) -> Option<ModeSelection> {
         let mut mode = self.mode_editors.default_mode.settings.clone();
-        mode.name = format!("Mode {}", self.mode_editors.modes.len() + 1);
+        mode.name = tr_fill("Mode {}", &(self.mode_editors.modes.len() + 1).to_string());
         mode.applications.clear();
         mode.browser_hosts.clear();
         let mut candidate = self.settings_candidate();
@@ -4144,8 +4174,8 @@ impl AppWindow {
         let default_selected = self.selected_mode == ModeSelection::Default;
         let mut rows = vec![
             mode_row(
-                "Global",
-                "Fallback for everything",
+                tr("Global"),
+                tr("Fallback for everything"),
                 default_selected,
                 &[],
                 &[],
@@ -4168,7 +4198,7 @@ impl AppWindow {
                     let selected = self.selected_mode == ModeSelection::Custom(index);
                     mode_row(
                         name,
-                        "No activation rules",
+                        tr("No activation rules"),
                         selected,
                         &mode.applications,
                         &mode.browser_hosts,
@@ -4197,7 +4227,7 @@ impl AppWindow {
             .flex()
             .flex_col()
             .child(pane_header_with_action(
-                "Modes",
+                tr("Modes"),
                 Some(add.into_any_element()),
             ))
             .child(
@@ -4230,7 +4260,7 @@ impl AppWindow {
                 .child(
                     danger_menu_item()
                         .id("context-delete-mode")
-                        .child("Delete mode…")
+                        .child(tr("Delete mode…"))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
@@ -4278,8 +4308,8 @@ impl AppWindow {
                         .flex_col()
                         .justify_center()
                         .child(settings_copy(
-                            "Global",
-                            "Used unless a more specific mode matches.",
+                            tr("Global"),
+                            tr("Used unless a more specific mode matches."),
                         )),
                 )
                 .into_any_element()
@@ -4300,7 +4330,7 @@ impl AppWindow {
                             div()
                                 .text_body()
                                 .font_weight(FontWeight::MEDIUM)
-                                .child("Name"),
+                                .child(tr("Name")),
                         )
                         .child(div().max_w(px(MODE_FIELD_WIDTH)).flex_1().child(name)),
                 )
@@ -4323,7 +4353,7 @@ impl AppWindow {
                             .items_center()
                             .justify_between()
                             .gap_4()
-                            .child(settings_copy("Web pages", description))
+                            .child(settings_copy(tr("Web pages"), tr(description)))
                             .child(
                                 div()
                                     .max_w(px(MODE_FIELD_WIDTH))
@@ -4373,7 +4403,7 @@ impl AppWindow {
                 &copy,
                 "retry-mode-opencode",
                 "open-mode-opencode-setup",
-                "Open setup",
+                tr("Open setup"),
                 cx,
             )
             .items_center();
@@ -4414,7 +4444,7 @@ impl AppWindow {
         });
         let processing = panel()
             .child(
-                panel_header("OpenCode transformation", Some(processing_toggle)).when(
+                panel_header(tr("OpenCode transformation"), Some(processing_toggle)).when(
                     !processing_enabled && processing_unavailable.is_none(),
                     |header| header.border_b_0(),
                 ),
@@ -4434,7 +4464,7 @@ impl AppWindow {
                     .items_center()
                     .gap_2()
                     .child(
-                        button(ButtonKind::Secondary, "Cancel")
+                        button(ButtonKind::Secondary, tr("Cancel"))
                             .id("cancel-remove-mode")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.mode_delete_armed = false;
@@ -4442,7 +4472,7 @@ impl AppWindow {
                             })),
                     )
                     .child(
-                        button(ButtonKind::Danger, "Confirm delete")
+                        button(ButtonKind::Danger, tr("Confirm delete"))
                             .id("confirm-remove-mode")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let ModeSelection::Custom(index) = this.selected_mode else {
@@ -4453,7 +4483,7 @@ impl AppWindow {
                     )
                     .into_any_element()
             } else {
-                button(ButtonKind::Danger, "Delete mode")
+                button(ButtonKind::Danger, tr("Delete mode"))
                     .id("remove-selected-mode")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.mode_delete_armed = true;
@@ -4483,7 +4513,7 @@ impl AppWindow {
                     .flex_col()
                     .gap_2()
                     .child(basics)
-                    .child(section_label("Text processing").pt_2().px_4())
+                    .child(section_label(tr("Text processing")).pt_2().px_4())
                     .child(corrections)
                     .child(processing)
                     .child(transformations)
@@ -4621,7 +4651,7 @@ impl AppWindow {
                                     )
                                 }),
                         )
-                        .child(small_button(ButtonKind::Secondary, "Add"))
+                        .child(small_button(ButtonKind::Secondary, tr("Add")))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.update_mode_settings(selection, cx, |mode| {
                                 mode.transformations.push(id.clone());
@@ -4637,7 +4667,7 @@ impl AppWindow {
         let catalog_empty = catalog.is_empty();
         let add = (!catalog_empty).then(|| {
             let control = if self.transformation_picker_open {
-                small_button(ButtonKind::Secondary, "Done")
+                small_button(ButtonKind::Secondary, tr("Done"))
             } else {
                 icon_button(ButtonKind::Ghost, Icon::Plus).mr(px(-SPACE_2))
             };
@@ -4654,7 +4684,7 @@ impl AppWindow {
             .then(|| self.render_transformation_workspace(cx))
             .flatten();
         panel()
-            .child(panel_header("Transformations", add).when(
+            .child(panel_header(tr("Transformations"), add).when(
                 selected.is_empty() && !self.transformation_picker_open && workspace.is_none(),
                 |header| header.border_b_0(),
             ))
@@ -4670,7 +4700,7 @@ impl AppWindow {
                                 .py_3()
                                 .text_footnote()
                                 .text_color(rgb(TEXT_TERTIARY))
-                                .child("Every registered transformation is already included."),
+                                .child(tr("Every registered transformation is already included.")),
                         )
                     })
                     .children(available_rows)
@@ -4689,32 +4719,34 @@ impl AppWindow {
         let status = &self.personal_commands_status;
         let (description, error, action) = if self.personal_workspace_receiver.is_some() {
             (
-                "Preparing the TypeScript workspace and installing its dependencies…",
+                tr("Preparing the TypeScript workspace and installing its dependencies…"),
                 None,
                 None,
             )
         } else if let Some(error) = self.personal_workspace_error.clone() {
             (
-                "The TypeScript workspace could not be prepared.",
+                tr("The TypeScript workspace could not be prepared."),
                 Some(error),
-                Some("Retry setup"),
+                Some(tr("Retry setup")),
             )
         } else if !crate::personal_commands::workspace_configured() {
             (
-                "Create a TypeScript workspace to define reusable transformations.",
+                tr("Create a TypeScript workspace to define reusable transformations."),
                 None,
-                Some("Set up"),
+                Some(tr("Set up")),
             )
         } else {
             match status.host_state {
                 HostState::Active if status.last_reload_error.is_none() => return None,
-                HostState::Starting => {
-                    ("Loading registered TypeScript transformations…", None, None)
-                }
+                HostState::Starting => (
+                    tr("Loading registered TypeScript transformations…"),
+                    None,
+                    None,
+                ),
                 _ => (
-                    "Registered TypeScript transformations are unavailable.",
+                    tr("Registered TypeScript transformations are unavailable."),
                     status.last_reload_error.clone(),
-                    Some("Retry"),
+                    Some(tr("Retry")),
                 ),
             }
         };
@@ -4733,7 +4765,7 @@ impl AppWindow {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(settings_copy("Custom transformations", description))
+                        .child(settings_copy(tr("Custom transformations"), description))
                         .when_some(error, |copy, error| {
                             copy.child(inline_error(bounded_opencode_error(&error)))
                         }),
@@ -4841,12 +4873,12 @@ impl AppWindow {
                         )
                 });
         let picker_status = match &self.application_catalog {
-            ApplicationCatalogState::Loading => Some("Finding applications on this Mac…".into()),
+            ApplicationCatalogState::Loading => Some(tr("Finding applications…").into()),
             ApplicationCatalogState::Loaded(applications) if applications.is_empty() => {
-                Some("No applications found.".into())
+                Some(tr("No applications found.").into())
             }
             ApplicationCatalogState::Loaded(_) if no_matches && !query.is_empty() => {
-                Some(format!("No applications match \"{query}\"."))
+                Some(tr_fill("No applications match \"{}\".", &query))
             }
             _ => None,
         };
@@ -4887,14 +4919,19 @@ impl AppWindow {
                         .items_center()
                         .justify_between()
                         .child(
-                            small_button(ButtonKind::Secondary, platform::CHOOSE_APPLICATION_FILE)
-                                .id("choose-application-bundle")
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            small_button(
+                                ButtonKind::Secondary,
+                                tr(platform::CHOOSE_APPLICATION_FILE),
+                            )
+                            .id("choose-application-bundle")
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     this.choose_application(selection, cx);
-                                })),
+                                },
+                            )),
                         )
                         .child(
-                            small_button(ButtonKind::Secondary, "Done")
+                            small_button(ButtonKind::Secondary, tr("Done"))
                                 .id("close-application-picker")
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.close_application_picker(cx);
@@ -4917,11 +4954,11 @@ impl AppWindow {
                     .justify_between()
                     .gap_4()
                     .child(settings_copy(
-                        "Applications",
+                        tr("Applications"),
                         if platform::focused_application_known() {
-                            "Switch when an app is frontmost"
+                            tr("Switch when an app is frontmost")
                         } else {
-                            "Wayland doesn't report the frontmost app; these apply under X11"
+                            tr("Wayland doesn't report the frontmost app; these apply under X11")
                         },
                     ))
                     .child(
@@ -5021,8 +5058,9 @@ impl AppWindow {
             })
             .map(|(_, row)| row.settings.name.clone())
         {
-            self.application_picker_error = Some(format!(
-                "{name} already activates {conflict}. Remove it there before reassigning it."
+            self.application_picker_error = Some(tr_named(
+                "{name} already activates {conflict}. Remove it there before reassigning it.",
+                &[("name", &name), ("conflict", &conflict)],
             ));
             cx.notify();
             return;
@@ -5057,7 +5095,7 @@ impl AppWindow {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Add Application".into()),
+            prompt: Some(tr("Add Application").into()),
         });
         cx.spawn(async move |window, cx| {
             let path = match receiver
@@ -5126,16 +5164,16 @@ impl AppWindow {
         let presentation = model_presentation(&self.model_catalog, selected_model);
         let (catalog_status, default_label, matches, variants) = match &self.model_catalog {
             ModelCatalogState::Loading => {
-                ("Loading OpenCode…".into(), None, Vec::new(), Vec::new())
+                (tr("Loading OpenCode…").into(), None, Vec::new(), Vec::new())
             }
             ModelCatalogState::Missing => (
-                "OpenCode beta required".into(),
+                tr("OpenCode beta required").into(),
                 None,
                 Vec::new(),
                 Vec::new(),
             ),
             ModelCatalogState::Failed(error) => (
-                format!("OpenCode models unavailable: {error}"),
+                tr_fill("OpenCode models unavailable: {}", &error.to_string()),
                 None,
                 Vec::new(),
                 Vec::new(),
@@ -5161,13 +5199,15 @@ impl AppWindow {
                             .default_name
                             .as_ref()
                             .map(|name| match &catalog.default_key {
-                                Some(key) => format!("OpenCode default: {name} ({key})"),
-                                None => format!("OpenCode default: {name}"),
+                                Some(key) => {
+                                    tr_fill("OpenCode default: {}", &format!("{name} ({key})"))
+                                }
+                                None => tr_fill("OpenCode default: {}", name),
                             })
                     })
                     .flatten();
                 (
-                    format!("{} available models", catalog.models.len()),
+                    tr_fill("{} available models", &catalog.models.len().to_string()),
                     default_label,
                     matches,
                     variants,
@@ -5181,7 +5221,7 @@ impl AppWindow {
                     .when_some(default_label.clone(), |list, label| {
                         list.child(
                             model_choice_row(
-                                "Use OpenCode default",
+                                tr("Use OpenCode default"),
                                 label,
                                 self.model_picker_highlight == 0,
                             )
@@ -5231,7 +5271,7 @@ impl AppWindow {
                 .mt_1()
                 .children(choices.into_iter().enumerate().map(|(index, variant)| {
                     let selected = effective_variant == variant.as_deref();
-                    let label = variant.clone().unwrap_or_else(|| "Default".into());
+                    let label = variant.clone().unwrap_or_else(|| tr("Default").into());
                     menu_item(selected)
                         .id(("model-variant", index))
                         .child(label)
@@ -5245,7 +5285,7 @@ impl AppWindow {
             .w(px(160.0))
             .flex_none()
             .child(
-                disclosure_button(effective_variant.unwrap_or("Default").to_string())
+                disclosure_button(effective_variant.unwrap_or(tr("Default")).to_string())
                     .id("model-variant-trigger")
                     .w(px(160.0))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -5278,7 +5318,7 @@ impl AppWindow {
                         .child(presentation.provider),
                 )
                 .when(presentation.is_default, |control| {
-                    control.child(tag(Tone::Neutral, "Default"))
+                    control.child(tag(Tone::Neutral, tr("Default")))
                 })
                 .child(icon(Icon::ChevronDown, TEXT_TERTIARY))
                 .on_click(cx.listener(move |_, _, window, cx| {
@@ -5291,7 +5331,7 @@ impl AppWindow {
         };
         let refresh_control =
             matches!(&self.model_catalog, ModelCatalogState::Loaded(_)).then(|| {
-                button(ButtonKind::Secondary, "Refresh")
+                button(ButtonKind::Secondary, tr("Refresh"))
                     .id("refresh-opencode-models")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.reload_model_catalog();
@@ -5370,14 +5410,14 @@ impl AppWindow {
             .when_some(suggestions, |field, suggestions| field.child(suggestions));
         panel()
             .child(
-                settings_row("OpenCode model", catalog_status, model_field)
+                settings_row(tr("OpenCode model"), catalog_status, model_field)
                     .when(!has_variants, |row| row.border_b_0()),
             )
             .when(has_variants, |panel| {
                 panel.child(
                     settings_row(
-                        "Thinking",
-                        "Choose how much reasoning the model should use",
+                        tr("Thinking"),
+                        tr("Choose how much reasoning the model should use"),
                         div().w(px(160.0)).flex_none().child(variant_control),
                     )
                     .border_b_0(),
@@ -5419,7 +5459,7 @@ impl AppWindow {
                             .flex_1()
                             .min_w(px(0.0))
                             .child(settings_control(
-                                "Model",
+                                tr("Model"),
                                 &catalog_status,
                                 div()
                                     .flex()
@@ -5433,7 +5473,7 @@ impl AppWindow {
                                 matches!(&self.model_catalog, ModelCatalogState::Missing),
                                 |field| {
                                     field.child(
-                                        button(ButtonKind::Secondary, "Install OpenCode")
+                                        button(ButtonKind::Secondary, tr("Install OpenCode"))
                                             .mt_2()
                                             .id("install-opencode-beta")
                                             .on_click(|_, _, _| open_opencode_beta_docs()),
@@ -5446,7 +5486,7 @@ impl AppWindow {
                         div()
                             .when(!compact, |field| field.w(px(150.0)).flex_none())
                             .when(compact, |field| field.w_full())
-                            .child(settings_control("Deadline", "Seconds", deadline)),
+                            .child(settings_control(tr("Deadline"), tr("Seconds"), deadline)),
                     ),
             )
             .when(has_variants, |processing| {
@@ -5455,13 +5495,13 @@ impl AppWindow {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(field_label("Thinking"))
+                        .child(field_label(tr("Thinking")))
                         .child(div().flex().child(variant_control)),
                 )
             })
             .child(settings_control(
-                "Instructions",
-                "System instructions for rewriting dictation in this mode",
+                tr("Instructions"),
+                tr("System instructions for rewriting dictation in this mode"),
                 prompt,
             ))
             .into_any_element()
@@ -5616,7 +5656,7 @@ impl AppWindow {
     }
 
     fn render_activity(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let refresh = button(ButtonKind::Secondary, "Refresh")
+        let refresh = button(ButtonKind::Secondary, tr("Refresh"))
             .id("refresh-activity")
             .on_click(cx.listener(|this, _, _, cx| {
                 this.reload_events();
@@ -5675,7 +5715,7 @@ impl AppWindow {
             .size_full()
             .flex()
             .flex_col()
-            .child(pane_header_with_action("Activity", Some(header_action)))
+            .child(pane_header_with_action(tr("Activity"), Some(header_action)))
             .child(
                 pane_body().child(
                     pane_content()
@@ -5886,7 +5926,7 @@ impl Render for AppWindow {
                                 .px(px(PANE_GUTTER))
                                 .py_2()
                                 .debug_selector(|| "settings-error".into())
-                                .child(error_message("Settings error:", error)),
+                                .child(error_message(tr("Settings error:"), error)),
                         )
                     })
                     .child(div().flex_1().min_h_0().child(content)),
@@ -5972,17 +6012,17 @@ fn preview_history() -> Option<History> {
 
 fn voice_action_description(enabled: bool) -> &'static str {
     if enabled {
-        "Use the shortcut below with OpenCode to run spoken instructions"
+        tr("Use the shortcut below with OpenCode to run spoken instructions")
     } else {
-        "Off by default. Its saved shortcut is not reserved until you enable Voice Action."
+        tr("Off by default. Its saved shortcut is not reserved until you enable Voice Action.")
     }
 }
 
 fn set_voice_action_enabled(settings: &mut AppSettings, enabled: bool) -> Result<(), &'static str> {
     if enabled && hotkey_binding_conflicts(settings, HotkeyKind::Edit, &settings.edit_hotkey) {
-        return Err(
+        return Err(tr(
             "The Voice Action shortcut is already in use. Change it below or change the other shortcut before enabling Voice Action.",
-        );
+        ));
     }
     settings.voice_action.enabled = enabled;
     Ok(())
@@ -6506,7 +6546,7 @@ fn reorder_transformation(values: &mut Vec<String>, id: &str, target_index: usiz
 
 fn apply_mode_inputs(inputs: &ModeInputs, mode: &mut DictationMode, is_default: bool, cx: &App) {
     mode.name = if is_default {
-        "Global".into()
+        tr("Global").into()
     } else {
         input_text(&inputs.name, cx)
     };
@@ -6540,13 +6580,13 @@ fn dictation_model_notice(
     }
     Some(if preparing {
         (
-            "Preparing speech model",
-            "Dictation will be available once your local speech model is ready.",
+            tr("Preparing speech model"),
+            tr("Dictation will be available once your local speech model is ready."),
         )
     } else {
         (
-            "Download a speech model to start dictating",
-            "The dictation shortcut needs a local speech model. Choose one to download first.",
+            tr("Download a speech model to start dictating"),
+            tr("The dictation shortcut needs a local speech model. Choose one to download first."),
         )
     })
 }
@@ -6613,16 +6653,6 @@ fn activity_context(reader: &EventReader) -> (Option<String>, Option<String>) {
             )
         })
         .unwrap_or_default()
-}
-
-fn event_age(timestamp_ms: u64) -> String {
-    let seconds = now_ms().saturating_sub(timestamp_ms) / 1_000;
-    match seconds {
-        0..=59 => format!("{seconds}s ago"),
-        60..=3_599 => format!("{}m ago", seconds / 60),
-        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
-        _ => format!("{}d ago", seconds / 86_400),
-    }
 }
 
 fn event_summary(event: &VoiceEvent) -> String {
