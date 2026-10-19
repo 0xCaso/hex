@@ -179,6 +179,9 @@ struct HotkeyState {
     /// Every press acts as the second tap of a double-tap: releasing locks.
     toggle: bool,
     paste_last: Option<(KeyCode, [bool; 4])>,
+    voice_action: Option<(KeyCode, [bool; 4])>,
+    /// The Voice Action shortcut is held.
+    voice_held: bool,
     capture: Capture,
     last_release: Option<Instant>,
     modifiers: WaylandModifierState,
@@ -225,6 +228,8 @@ impl HotkeyState {
             double_tap_only: false,
             toggle: false,
             paste_last: None,
+            voice_action: None,
+            voice_held: false,
             capture: Capture::Idle,
             last_release: None,
             modifiers,
@@ -232,7 +237,9 @@ impl HotkeyState {
     }
 
     fn cancel(&mut self) -> Option<HotkeyEvent> {
-        let active = matches!(self.capture, Capture::Held { .. } | Capture::Locked);
+        let active =
+            matches!(self.capture, Capture::Held { .. } | Capture::Locked) || self.voice_held;
+        self.voice_held = false;
         self.capture = Capture::Idle;
         self.last_release = None;
         active.then_some(HotkeyEvent::Cancel)
@@ -257,6 +264,23 @@ impl HotkeyState {
             self.capture = Capture::Idle;
             self.last_release = Some(now);
             return None;
+        }
+        if self.voice_held {
+            let (voice, required) = self.voice_action?;
+            if !self.pressed.contains(voice) || modifiers != required {
+                self.voice_held = false;
+                return Some(HotkeyEvent::VoiceFinish);
+            }
+            return None;
+        }
+        if down
+            && self.capture == Capture::Idle
+            && self
+                .voice_action
+                .is_some_and(|(voice, required)| key == voice && modifiers == required)
+        {
+            self.voice_held = true;
+            return Some(HotkeyEvent::VoiceStart);
         }
         if down
             && self.capture == Capture::Idle
@@ -574,6 +598,13 @@ pub(crate) fn run(
     let mut state = HotkeyState::with_modifiers(&binding, options.double_tap, modifiers)?;
     state.toggle = options.toggle;
     state.double_tap_only = options.double_tap_only;
+    state.voice_action = match &options.voice_action {
+        Some(voice) => Some((
+            key_code(&voice.key)?,
+            [voice.control, voice.alt, voice.shift, voice.super_key],
+        )),
+        None => None,
+    };
     state.paste_last = match &options.paste_last {
         Some(paste) => Some((
             key_code(&paste.key)?,
@@ -678,7 +709,7 @@ fn should_monitor_input(is_mouse: bool, supports_hotkeys: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use HotkeyEvent::{Cancel, Finish, PasteLast, Start};
+    use HotkeyEvent::{Cancel, Finish, PasteLast, Start, VoiceFinish, VoiceStart};
 
     struct Test {
         state: HotkeyState,
@@ -809,6 +840,21 @@ mod tests {
         assert!(test.state.capture == Capture::Locked);
         test.tap();
         assert_eq!(test.events, [Start, Finish]);
+    }
+
+    #[test]
+    fn voice_action_records_while_its_chord_is_held() {
+        let mut test = Test::new(true);
+        test.state.voice_action = Some((KeyCode::KEY_I, [true, true, false, false]));
+        test.key(KeyCode::KEY_LEFTCTRL, 1);
+        test.key(KeyCode::KEY_LEFTALT, 1);
+        test.key(KeyCode::KEY_I, 1);
+        test.key(KeyCode::KEY_I, 2);
+        test.key(KeyCode::KEY_I, 0);
+        assert_eq!(test.events, [VoiceStart, VoiceFinish]);
+        test.key(KeyCode::KEY_I, 1);
+        test.key(KeyCode::KEY_ESC, 1);
+        assert_eq!(test.events, [VoiceStart, VoiceFinish, VoiceStart, Cancel]);
     }
 
     #[test]

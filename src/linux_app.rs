@@ -630,7 +630,9 @@ impl LinuxDesktopHost {
             || settings.release_microphone_while_idle
                 != self.settings.release_microphone_while_idle
             || settings.recording_audio_behavior != self.settings.recording_audio_behavior
-            || settings.indicator_position != self.settings.indicator_position;
+            || settings.indicator_position != self.settings.indicator_position
+            || settings.voice_action.enabled != self.settings.voice_action.enabled
+            || settings.edit_hotkey != self.settings.edit_hotkey;
         if restart && self.is_running() && self.settings_edit.is_none() {
             self.begin_settings_edit(SettingsChange::Reload(Box::new(settings)));
             return Ok(());
@@ -724,6 +726,7 @@ impl LinuxDesktopHost {
                     match target {
                         ShortcutTarget::Dictation => settings.dictation_hotkey = binding,
                         ShortcutTarget::PasteLast => settings.paste_last_hotkey = Some(binding),
+                        ShortcutTarget::VoiceAction => settings.edit_hotkey = binding,
                     }
                 })
             }));
