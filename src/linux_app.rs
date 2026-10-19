@@ -21,7 +21,9 @@ use crate::desktop_host::{
 };
 use crate::events::EventReader;
 use crate::linux_input::LinuxHotkey;
-use crate::linux_service::{self, Event as ServiceEvent, Request, Snapshot as ServiceSnapshot};
+use crate::linux_service::{
+    self, Event as ServiceEvent, Request, ShortcutTarget, Snapshot as ServiceSnapshot,
+};
 use crate::linux_session::LinuxSession;
 use crate::linux_updater::InstalledUpdate;
 
@@ -43,10 +45,10 @@ struct TranscriptionPreparation {
     worker: JoinHandle<PreparationResult>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum SettingsChange {
-    Capture,
-    Hotkey(LinuxHotkey),
+    Capture(ShortcutTarget),
+    Hotkey(ShortcutTarget, LinuxHotkey),
     /// Settings the Settings window already saved.
     Reload(Box<AppSettings>),
 }
@@ -206,7 +208,9 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
                         } else if matches!(
                             request,
                             Request::CaptureShortcut
+                                | Request::CaptureShortcutFor(_)
                                 | Request::CancelShortcut
+                                | Request::SetShortcut { .. }
                                 | Request::Desktop(DesktopAction::SetDictationShortcut(_))
                         ) {
                             return Err(color_eyre::eyre::eyre!(
@@ -217,13 +221,20 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
                     match request {
                         Request::Snapshot => {}
                         Request::Desktop(action) => host.dispatch(action)?,
-                        Request::CaptureShortcut => {
-                            host.begin_settings_edit(SettingsChange::Capture);
+                        Request::CaptureShortcut | Request::CaptureShortcutFor(_) => {
+                            let target = match request {
+                                Request::CaptureShortcutFor(target) => target,
+                                _ => ShortcutTarget::Dictation,
+                            };
+                            host.begin_settings_edit(SettingsChange::Capture(target));
                             if host.capturing_hotkey() {
                                 editor = Some((client, Instant::now() + Duration::from_secs(3)));
                             }
                         }
                         Request::CancelShortcut => host.cancel_settings_edit(),
+                        Request::SetShortcut { target, shortcut } => {
+                            host.set_hotkey(target, shortcut)?
+                        }
                         Request::ChooseModel { model, language } => {
                             host.choose_transcription(model, language)?
                         }
@@ -538,7 +549,7 @@ impl LinuxDesktopHost {
         self.listener.is_some()
     }
 
-    fn set_dictation_hotkey(&mut self, shortcut: DesktopShortcut) -> Result<()> {
+    fn set_hotkey(&mut self, target: ShortcutTarget, shortcut: DesktopShortcut) -> Result<()> {
         if shortcut.function {
             self.error = Some("The Fn modifier cannot be registered on Linux".into());
             self.cancel_settings_edit();
@@ -558,11 +569,11 @@ impl LinuxDesktopHost {
             },
         };
         if let Some(edit) = &mut self.settings_edit {
-            if matches!(edit.change, SettingsChange::Capture) && edit.worker.is_none() {
-                edit.change = SettingsChange::Hotkey(binding);
+            if edit.change == SettingsChange::Capture(target) && edit.worker.is_none() {
+                edit.change = SettingsChange::Hotkey(target, binding);
             }
         } else {
-            self.begin_settings_edit(SettingsChange::Hotkey(binding));
+            self.begin_settings_edit(SettingsChange::Hotkey(target, binding));
         }
         Ok(())
     }
@@ -612,7 +623,9 @@ impl LinuxDesktopHost {
             || settings.double_tap_lock != self.settings.double_tap_lock
             || settings.shortcut_mode != self.settings.shortcut_mode
             || settings.paste_with_shift != self.settings.paste_with_shift
-            || settings.microphone != self.settings.microphone;
+            || settings.microphone != self.settings.microphone
+            || settings.paste_last_hotkey != self.settings.paste_last_hotkey
+            || settings.double_tap_only != self.settings.double_tap_only;
         if restart && self.is_running() && self.settings_edit.is_none() {
             self.begin_settings_edit(SettingsChange::Reload(Box::new(settings)));
             return Ok(());
@@ -629,7 +642,8 @@ impl LinuxDesktopHost {
 
     fn capturing_hotkey(&self) -> bool {
         self.settings_edit.as_ref().is_some_and(|edit| {
-            !edit.canceled.load(Ordering::Acquire) && matches!(edit.change, SettingsChange::Capture)
+            !edit.canceled.load(Ordering::Acquire)
+                && matches!(edit.change, SettingsChange::Capture(_))
         })
     }
 
@@ -674,7 +688,7 @@ impl LinuxDesktopHost {
             }
         } else if !canceled {
             let wayland = LinuxSession::detect().is_wayland();
-            if !wayland && matches!(edit.change, SettingsChange::Capture) {
+            if !wayland && matches!(edit.change, SettingsChange::Capture(_)) {
                 // X11 uses focused GPUI keystrokes, never raw input-device access.
                 self.status = "Press a shortcut".into();
                 return;
@@ -682,11 +696,12 @@ impl LinuxDesktopHost {
             let change = edit.change.clone();
             let canceled = edit.canceled.clone();
             edit.worker = Some(std::thread::spawn(move || {
-                let binding = match change {
-                    SettingsChange::Capture => {
-                        crate::linux_input::capture_wayland_binding(&canceled)?
-                    }
-                    SettingsChange::Hotkey(binding) => binding,
+                let (target, binding) = match change {
+                    SettingsChange::Capture(target) => (
+                        target,
+                        crate::linux_input::capture_wayland_binding(&canceled)?,
+                    ),
+                    SettingsChange::Hotkey(target, binding) => (target, binding),
                     SettingsChange::Reload(settings) => return Ok(*settings),
                 };
                 binding.validate()?;
@@ -699,7 +714,13 @@ impl LinuxDesktopHost {
                 if canceled.load(Ordering::Acquire) {
                     return Err(color_eyre::eyre::eyre!("Shortcut edit canceled"));
                 }
-                save_with(|settings| settings.dictation_hotkey = HotkeyBinding::from(&binding))
+                save_with(|settings| {
+                    let binding = HotkeyBinding::from(&binding);
+                    match target {
+                        ShortcutTarget::Dictation => settings.dictation_hotkey = binding,
+                        ShortcutTarget::PasteLast => settings.paste_last_hotkey = Some(binding),
+                    }
+                })
             }));
             self.status = if self.capturing_hotkey() {
                 "Press a shortcut"
@@ -914,7 +935,7 @@ impl LinuxDesktopHost {
                 }
             }
             DesktopAction::SetDictationShortcut(shortcut) => {
-                self.set_dictation_hotkey(shortcut)?;
+                self.set_hotkey(ShortcutTarget::Dictation, shortcut)?;
             }
             DesktopAction::StartListening => {
                 self.error = None;
@@ -1165,7 +1186,7 @@ mod tests {
             for cancel in [false, true] {
                 let mut host = host_for_edit(running);
                 let original = host.settings.clone();
-                host.begin_settings_edit(SettingsChange::Capture);
+                host.begin_settings_edit(SettingsChange::Capture(ShortcutTarget::Dictation));
                 assert!(host.capturing_hotkey());
                 host.listener = None;
                 if cancel {
@@ -1189,7 +1210,7 @@ mod tests {
     #[test]
     fn cancel_signals_worker_and_does_not_wait_or_restart_until_it_finishes() {
         let mut host = host_for_edit(true);
-        host.begin_settings_edit(SettingsChange::Capture);
+        host.begin_settings_edit(SettingsChange::Capture(ShortcutTarget::Dictation));
         host.listener = None;
         let (release, held) = mpsc::channel();
         host.settings_edit.as_mut().unwrap().worker = Some(std::thread::spawn(move || {
@@ -1221,7 +1242,7 @@ mod tests {
     #[test]
     fn client_disconnect_cancels_its_edit_and_restores_previous_listening() {
         let mut host = host_for_edit(true);
-        host.begin_settings_edit(SettingsChange::Capture);
+        host.begin_settings_edit(SettingsChange::Capture(ShortcutTarget::Dictation));
         let mut editor = Some((1, Instant::now()));
         disconnect_editor(&mut host, &mut editor, 2);
         assert!(

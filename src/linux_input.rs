@@ -159,6 +159,18 @@ pub enum HotkeyEvent {
     Start,
     Finish,
     Cancel,
+    PasteLast,
+}
+
+/// How the dictation shortcut behaves, and the shortcuts registered
+/// beside it.
+#[derive(Clone, Debug, Default)]
+pub struct HotkeyOptions {
+    pub double_tap: bool,
+    /// Only a double-tap starts recording, which then stays locked.
+    pub double_tap_only: bool,
+    pub toggle: bool,
+    pub paste_last: Option<LinuxHotkey>,
 }
 
 pub(crate) const ESCAPE_CANCEL_WARNING: &str =
@@ -197,19 +209,25 @@ impl LinuxHotkeyMonitor {
         toggle: bool,
         status: HotkeyStatus,
     ) -> Result<Self> {
-        Self::start_for(
-            binding,
-            double_tap_enabled,
+        let options = HotkeyOptions {
+            double_tap: double_tap_enabled,
             toggle,
-            LinuxSession::detect(),
-            status,
-        )
+            ..HotkeyOptions::default()
+        };
+        Self::start_for(binding, options, LinuxSession::detect(), status)
+    }
+
+    pub fn start_with(
+        binding: LinuxHotkey,
+        options: HotkeyOptions,
+        status: HotkeyStatus,
+    ) -> Result<Self> {
+        Self::start_for(binding, options, LinuxSession::detect(), status)
     }
 
     fn start_for(
         binding: LinuxHotkey,
-        double_tap_enabled: bool,
-        toggle: bool,
+        options: HotkeyOptions,
         session: LinuxSession,
         status: HotkeyStatus,
     ) -> Result<Self> {
@@ -229,8 +247,7 @@ impl LinuxHotkeyMonitor {
                     worker_stop,
                     ready_sender.clone(),
                     binding,
-                    double_tap_enabled,
-                    toggle,
+                    options,
                     worker_started.clone(),
                     status,
                 ),
@@ -239,8 +256,7 @@ impl LinuxHotkeyMonitor {
                     worker_stop,
                     ready_sender.clone(),
                     binding,
-                    double_tap_enabled,
-                    toggle,
+                    options,
                     worker_started.clone(),
                     worker_modifiers.expect("Wayland modifier state exists"),
                 ),
@@ -282,17 +298,21 @@ impl Drop for LinuxHotkeyMonitor {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run(
     sender: SyncSender<HotkeyEvent>,
     stop: Arc<AtomicBool>,
     ready: SyncSender<Result<()>>,
     binding: LinuxHotkey,
-    double_tap_enabled: bool,
-    toggle: bool,
+    options: HotkeyOptions,
     started: Arc<AtomicBool>,
     status: HotkeyStatus,
 ) -> Result<()> {
+    let HotkeyOptions {
+        double_tap: double_tap_enabled,
+        double_tap_only,
+        toggle,
+        paste_last,
+    } = options;
     let (connection, root, keymap) = connect_x11()?;
     let trigger = keymap.keycode(keysym(&binding.key)?)?;
     let escape = keymap.keycode(XK_ESCAPE)?;
@@ -308,11 +328,31 @@ fn run(
             binding.label()
         )
     })?;
+    let paste_last = match paste_last {
+        Some(paste) => {
+            let key = keymap.keycode(keysym(&paste.key)?)?;
+            let mask = paste.modifier_mask(&connection, &keymap)?;
+            let variants = lock_variants(mask, num_lock);
+            if let Err(error) = grab_variants(&connection, root, key, &variants) {
+                for modifiers in trigger_modifiers {
+                    let _ = connection.ungrab_key(trigger, root, modifiers);
+                }
+                return Err(error).wrap_err_with(|| {
+                    format!("{} is already in use by another X11 client", paste.label())
+                });
+            }
+            Some((key, u16::from(mask), variants))
+        }
+        None => None,
+    };
+    let lock_bits = u16::from(ModMask::LOCK) | u16::from(num_lock);
     connection.flush()?;
     started.store(true, Ordering::Release);
     ready.try_send(Ok(())).ok();
 
     let mut active = false;
+    // Double-tap-only: the first tap is down and waits for the second.
+    let mut armed = false;
     let mut second_tap = false;
     let mut locked = false;
     let mut dirty = false;
@@ -342,6 +382,15 @@ fn run(
             continue;
         };
         match event {
+            Event::KeyPress(event)
+                if paste_last.as_ref().is_some_and(|(key, mask, _)| {
+                    event.detail == *key && u16::from(event.state) & !lock_bits == *mask
+                }) =>
+            {
+                if !active && !locked && !send_event(&sender, HotkeyEvent::PasteLast)? {
+                    break;
+                }
+            }
             Event::KeyPress(event) if event.detail == trigger => {
                 if pending_release.take().is_some() {
                     continue;
@@ -353,13 +402,18 @@ fn run(
                     if !send_event(&sender, HotkeyEvent::Finish)? {
                         break;
                     }
-                } else if !active && !dirty {
-                    active = true;
+                } else if !active && !dirty && !armed {
                     // Toggle mode treats every press as the second tap of a double-tap.
-                    second_tap = toggle
+                    let is_second_tap = toggle
                         || last_release.take().is_some_and(|released: Instant| {
                             released.elapsed() < DOUBLE_TAP_WINDOW
                         });
+                    if double_tap_only && !is_second_tap {
+                        armed = true;
+                        continue;
+                    }
+                    active = true;
+                    second_tap = is_second_tap;
                     escape_grabbed = grab_escape(&connection, root, escape, &escape_modifiers)?;
                     if status.update_escape_availability(!escape_grabbed.is_empty()) {
                         tracing::warn!("{ESCAPE_CANCEL_WARNING}; continuing without Escape-cancel");
@@ -368,6 +422,10 @@ fn run(
                         break;
                     }
                 }
+            }
+            Event::KeyRelease(event) if event.detail == trigger && armed => {
+                armed = false;
+                last_release = Some(Instant::now());
             }
             Event::KeyRelease(event) if event.detail == trigger && active => {
                 pending_release = Some(Instant::now());
@@ -400,6 +458,11 @@ fn run(
     }
     for modifiers in trigger_modifiers {
         let _ = connection.ungrab_key(trigger, root, modifiers);
+    }
+    if let Some((key, _, variants)) = paste_last {
+        for modifiers in variants {
+            let _ = connection.ungrab_key(key, root, modifiers);
+        }
     }
     let _ = connection.flush();
     Ok(())
@@ -771,8 +834,10 @@ mod tests {
         let harness = X11TestHarness::new();
         let monitor = LinuxHotkeyMonitor::start_for(
             LinuxHotkey::default(),
-            true,
-            false,
+            HotkeyOptions {
+                double_tap: true,
+                ..HotkeyOptions::default()
+            },
             LinuxSession::X11,
             Default::default(),
         )
@@ -788,8 +853,10 @@ mod tests {
         let harness = X11TestHarness::new();
         let monitor = LinuxHotkeyMonitor::start_for(
             LinuxHotkey::default(),
-            true,
-            false,
+            HotkeyOptions {
+                double_tap: true,
+                ..HotkeyOptions::default()
+            },
             LinuxSession::X11,
             Default::default(),
         )
@@ -821,8 +888,10 @@ mod tests {
         };
         let monitor = LinuxHotkeyMonitor::start_for(
             binding,
-            false,
-            false,
+            HotkeyOptions {
+                double_tap: false,
+                ..HotkeyOptions::default()
+            },
             LinuxSession::X11,
             Default::default(),
         )
@@ -850,8 +919,10 @@ mod tests {
         let status = HotkeyStatus::default();
         let monitor = LinuxHotkeyMonitor::start_for(
             LinuxHotkey::default(),
-            false,
-            false,
+            HotkeyOptions {
+                double_tap: false,
+                ..HotkeyOptions::default()
+            },
             LinuxSession::X11,
             status.clone(),
         )
@@ -899,8 +970,10 @@ mod tests {
         let status = HotkeyStatus::default();
         let monitor = LinuxHotkeyMonitor::start_for(
             LinuxHotkey::default(),
-            true,
-            false,
+            HotkeyOptions {
+                double_tap: true,
+                ..HotkeyOptions::default()
+            },
             LinuxSession::X11,
             status.clone(),
         )

@@ -5,7 +5,7 @@
 use super::*;
 use crate::desktop_host::{DesktopAction, DesktopShortcut, DesktopUpdateStatus};
 use crate::linux_input::LinuxHotkey;
-use crate::linux_service::{Client, Request};
+use crate::linux_service::{Client, Request, ShortcutTarget};
 
 pub(super) const CAPABILITIES: Capabilities = Capabilities {
     meetings: false,
@@ -18,10 +18,10 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     dock_icon: false,
     launch_at_login: false,
     listener_control: true,
-    paste_last: false,
+    paste_last: true,
     recording_audio: false,
     release_microphone: false,
-    double_tap_only: false,
+    double_tap_only: true,
     modifier_sides: false,
     indicator_position: false,
     interface_language: false,
@@ -58,8 +58,19 @@ pub(super) struct Platform {
     /// What the window last showed of the service, to redraw only on change.
     shown: Option<(crate::desktop_host::DesktopSnapshot, Option<String>)>,
     capture: CapturePhase,
+    /// The shortcut the service is recording or saving.
+    capture_target: ShortcutTarget,
     /// The model the service is preparing, and since when.
     preparing: Option<(crate::transcription_models::TranscriptionModelId, Instant)>,
+}
+
+/// The service registers the dictation and Paste last shortcuts.
+fn shortcut_target(kind: HotkeyKind) -> Option<ShortcutTarget> {
+    match kind {
+        HotkeyKind::Dictation => Some(ShortcutTarget::Dictation),
+        HotkeyKind::PasteLast => Some(ShortcutTarget::PasteLast),
+        HotkeyKind::Edit => None,
+    }
 }
 
 /// The service's side of a shortcut change the window asked for.
@@ -84,6 +95,7 @@ impl Platform {
             client: Client::new(),
             shown: None,
             capture: CapturePhase::Idle,
+            capture_target: ShortcutTarget::Dictation,
             preparing: None,
         }
     }
@@ -272,7 +284,14 @@ impl AppWindow {
         if self.preview {
             return;
         }
-        self.send(Request::CaptureShortcut);
+        let HotkeyCaptureState::Listening { kind, .. } = self.hotkey_capture else {
+            return;
+        };
+        let Some(target) = shortcut_target(kind) else {
+            return;
+        };
+        self.send(Request::CaptureShortcutFor(target));
+        self.platform.capture_target = target;
         self.platform.capture = CapturePhase::Requested(Instant::now());
     }
 
@@ -284,10 +303,18 @@ impl AppWindow {
     }
 
     /// The service validates, registers, and saves the chord recorded on X11.
-    pub(super) fn platform_save_hotkey(&mut self, _: HotkeyKind, binding: &HotkeyBinding) -> bool {
+    pub(super) fn platform_save_hotkey(
+        &mut self,
+        kind: HotkeyKind,
+        binding: &HotkeyBinding,
+    ) -> bool {
+        let Some(target) = shortcut_target(kind) else {
+            return false;
+        };
         let modifiers = binding.modifiers;
-        self.send(Request::Desktop(DesktopAction::SetDictationShortcut(
-            DesktopShortcut {
+        self.send(Request::SetShortcut {
+            target,
+            shortcut: DesktopShortcut {
                 alt: modifiers.option.is_some(),
                 control: modifiers.control.is_some(),
                 function: false,
@@ -299,7 +326,7 @@ impl AppWindow {
                 platform: modifiers.command.is_some(),
                 shift: modifiers.shift.is_some(),
             },
-        )));
+        });
         true
     }
 
@@ -355,14 +382,28 @@ impl AppWindow {
             return false;
         }
         self.platform.capture = CapturePhase::Idle;
-        let saved = state.settings.dictation_hotkey.clone();
-        if saved != self.settings.dictation_hotkey {
-            let keycaps = saved.keycaps();
-            self.settings.dictation_hotkey = saved;
+        let (saved, current, kind) = match self.platform.capture_target {
+            ShortcutTarget::Dictation => (
+                Some(state.settings.dictation_hotkey.clone()),
+                Some(self.settings.dictation_hotkey.clone()),
+                HotkeyKind::Dictation,
+            ),
+            ShortcutTarget::PasteLast => (
+                state.settings.paste_last_hotkey.clone(),
+                self.settings.paste_last_hotkey.clone(),
+                HotkeyKind::PasteLast,
+            ),
+        };
+        if let Some(binding) = saved.filter(|saved| Some(saved) != current.as_ref()) {
+            let keycaps = binding.keycaps();
+            match kind {
+                HotkeyKind::PasteLast => self.settings.paste_last_hotkey = Some(binding),
+                _ => self.settings.dictation_hotkey = binding,
+            }
             self.hotkey_width_spring
                 .set_target(hotkey_saved_width(keycaps.len()) + hotkey_label_overflow(&keycaps));
             self.hotkey_capture = HotkeyCaptureState::Saved {
-                kind: HotkeyKind::Dictation,
+                kind,
                 saved_at: Instant::now(),
             };
         } else if !matches!(self.hotkey_capture, HotkeyCaptureState::Idle) {
