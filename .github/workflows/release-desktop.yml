@@ -1,8 +1,9 @@
 name: Release desktop
 
-# Builds the Linux and Windows releases from one exact commit, signs their
-# update feeds in a job that never compiles code, and publishes artifacts
-# first and feeds last. macOS is released locally with scripts/release-app.sh.
+# Builds the Linux and Windows releases from one exact commit and signs their
+# update feeds in a job that never compiles code. The signed artifacts are
+# published from the release Mac with scripts/publish-desktop-release.sh, as
+# macOS is released with scripts/release-app.sh.
 on:
   workflow_dispatch:
     inputs:
@@ -10,10 +11,6 @@ on:
         description: Commit, tag, or branch to release
         required: true
         default: main
-      dry_run:
-        description: Build, sign, and validate without publishing
-        type: boolean
-        default: true
   push:
     tags: ["app-v*"]
     branches: [ci/release-desktop] # TEMPORARY: dry run before the workflow reaches main
@@ -21,7 +18,6 @@ on:
 permissions:
   contents: read
 
-# Never run two publishes against the same feeds at once.
 concurrency:
   group: release-desktop
   cancel-in-progress: false
@@ -32,7 +28,6 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       version: ${{ steps.resolve.outputs.version }}
-      publish: ${{ steps.resolve.outputs.publish }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -41,7 +36,6 @@ jobs:
       - id: resolve
         env:
           EVENT: ${{ github.event_name }}
-          DRY_RUN: ${{ inputs.dry_run }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
         run: |
@@ -51,25 +45,15 @@ jobs:
             echo "::error::Stable releases need a non-prerelease version, not $version."
             exit 1
           fi
-          publish=false
-          case "$EVENT:$REF_TYPE" in
-            workflow_dispatch:*)
-              if [ "$DRY_RUN" = false ]; then publish=true; fi
-              ;;
-            push:tag)
-              if [ "$REF_NAME" != "app-v$version" ]; then
-                echo "::error::Tag $REF_NAME does not match version $version."
-                exit 1
-              fi
-              publish=true
-              ;;
-          esac
+          if [ "$EVENT:$REF_TYPE" = push:tag ] && [ "$REF_NAME" != "app-v$version" ]; then
+            echo "::error::Tag $REF_NAME does not match version $version."
+            exit 1
+          fi
           {
             echo "sha=$sha"
             echo "version=$version"
-            echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
-          echo "Releasing $version from $sha (publish: $publish)." >> "$GITHUB_STEP_SUMMARY"
+          echo "Building $version from $sha." >> "$GITHUB_STEP_SUMMARY"
 
   linux:
     name: Linux x86_64
@@ -236,8 +220,11 @@ jobs:
           HEX_RELEASE_SIGNING_KEY: ${{ secrets.HEX_RELEASE_SIGNING_KEY }}
         run: tools/scripts/release-feed.sh sign dist $FEEDS
       - name: Verify signatures, artifacts, and version order
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           tools/scripts/release-feed.sh verify dist $FEEDS
+          jq -n --arg commit "$SHA" --arg version "$HEX_VERSION" '{commit:$commit,version:$version}' > dist/release.json
           for feed in $FEEDS; do
             jq -r .payload "dist/$feed" | base64 -d | jq -c . | tee -a "$GITHUB_STEP_SUMMARY"
           done
@@ -247,49 +234,5 @@ jobs:
           path: |
             dist/HEX-*
             dist/*-update.json
+            dist/release.json
           if-no-files-found: error
-
-  publish:
-    needs: [resolve, sign]
-    if: needs.resolve.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
-    environment: release
-    env:
-      HEX_VERSION: ${{ needs.resolve.outputs.version }}
-      FEEDS: linux-update.json windows-update.json windows-aarch64-update.json
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-          path: source
-          persist-credentials: false
-      - uses: actions/checkout@v7
-        with:
-          path: tools
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: signed-release
-          path: dist
-      - name: Publish artifacts, installers, then feeds
-        env:
-          # An R2 API token limited to object read and write on hex-releases.
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          HEX_RELEASE_SOURCE: ${{ github.workspace }}/source
-        run: tools/scripts/release-feed.sh publish dist $FEEDS
-      - name: Re-download and verify every published object
-        run: |
-          base=https://downloads.hex.kitlangton.dev
-          tools/scripts/release-feed.sh verify dist $FEEDS
-          for feed in $FEEDS; do
-            curl -fsS -H 'Cache-Control: no-cache' "$base/$feed?verify=$GITHUB_RUN_ID" -o "fresh-$feed"
-            cmp "dist/$feed" "fresh-$feed"
-            payload=$(jq -r .payload "fresh-$feed" | base64 -d)
-            artifact=$(printf '%s' "$payload" | jq -r .artifact)
-            curl -fsS "$base/releases/$artifact?verify=$GITHUB_RUN_ID" -o fresh-artifact
-            test "$(sha256sum fresh-artifact | awk '{ print $1 }')" = "$(printf '%s' "$payload" | jq -r .sha256)"
-            test "$(wc -c < fresh-artifact)" = "$(printf '%s' "$payload" | jq -r .bytes)"
-            echo "$base/$feed serves $(printf '%s' "$payload" | jq -r .version) -> $artifact" | tee -a "$GITHUB_STEP_SUMMARY"
-          done

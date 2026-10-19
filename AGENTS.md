@@ -671,17 +671,26 @@ Verify both registration and unregistration with `sfltool dumpbtm`, and restore
 the user's original login-item state after the test. Do not add release test
 hooks or persist a second launch-at-login flag.
 
-Linux and Windows releases are published by `.github/workflows/release-desktop.yml`.
-Pushing an `app-v<VERSION>` tag publishes that commit; `workflow_dispatch` takes
-a `ref` and `dry_run` (default true, which builds, signs, and validates only).
-It builds Linux x86_64 in an Arch container and Windows x64 and ARM64 on native
-runners with each script's `build` mode, then a job that compiles nothing signs
-all three feeds with `scripts/release-feed.sh`. Publishing uploads
-content-addressed artifacts first (never replacing different bytes), then the
-installers, then the feeds, and re-downloads each object. The `release`
-environment holds `HEX_RELEASE_SIGNING_KEY` and an R2 API token limited to
-object read and write on `hex-releases` (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
-`R2_SECRET_ACCESS_KEY`), used through R2's S3 API.
+Linux and Windows releases are built and signed by
+`.github/workflows/release-desktop.yml`, then published from the release Mac.
+Run the workflow with `workflow_dispatch` and a `ref` (or push an
+`app-v<VERSION>` tag, which must match the crate version). It builds Linux
+x86_64 in an Arch container and Windows x64 and ARM64 on native runners with
+each script's `build` mode. A job that compiles nothing then signs all three
+feeds with `scripts/release-feed.sh` and validates signatures, sizes, SHA-256,
+version order against the live feeds, and the absence of Visual C++ runtime
+imports. The `release` environment, limited to `main` and `app-v*` tags, holds
+only `HEX_RELEASE_SIGNING_KEY`. The run's `signed-release` artifact holds the
+executables, the signed feeds, and `release.json` (commit and version).
+
+Publish a successful run from `main` or a tag on the Pro, whose Wrangler login is
+the personal account that owns `hex-releases`:
+`scripts/publish-desktop-release.sh <run-id>`. It downloads the signed artifact,
+re-verifies it, uploads content-addressed artifacts first (never replacing
+different bytes), then the installers as committed at the release commit, then
+the feeds after rechecking that the version is newer, and re-downloads each
+object from `downloads.hex.kitlangton.dev`. Rerunning it after an interruption
+is safe.
 
 Both scripts still work locally: `prepare` builds and signs with the Ed25519
 private PEM in `HEX_RELEASE_SIGNING_KEY` (or `HEX_LINUX_SIGNING_KEY`), and

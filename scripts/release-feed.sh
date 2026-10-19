@@ -10,9 +10,7 @@
 # <feed> is linux-update.json, windows-update.json, or
 # windows-aarch64-update.json. `sign` reads the unsigned payload a build left
 # at <dist>/<feed>.payload.json. Set HEX_VERSION to pin the expected version.
-# `publish` uploads through Wrangler's login, or through R2's S3 API when
-# R2_ACCOUNT_ID, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY are set, as in CI
-# with a token scoped to the bucket.
+# `publish` uploads through the local Wrangler login.
 set -eu
 
 script_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -47,13 +45,7 @@ for command in cmp curl jq openssl sort xxd; do
   require "$command"
 done
 if [ "$mode" = publish ]; then
-  if [ -n "${R2_ACCOUNT_ID:-}" ]; then
-    require aws
-    export AWS_DEFAULT_REGION=auto AWS_REQUEST_CHECKSUM_CALCULATION=when_required \
-      AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
-  else
-    require "${wrangler%% *}"
-  fi
+  require "${wrangler%% *}"
 fi
 
 sha256_of() {
@@ -226,23 +218,11 @@ for feed_name in "$@"; do
 done
 [ "$mode" = publish ] || exit 0
 
-# put <new|replace> <key> <file> <content-type> <cache-control> [disposition]
-# A `new` S3 upload is conditional, so it can never replace an object that
-# appeared after the existence check.
+# put <key> <file> <content-type> <cache-control> [content-disposition]
 put() {
-  condition=$1 key=$2 file=$3 type=$4 cache=$5 disposition=${6:-}
-  if [ -n "${R2_ACCOUNT_ID:-}" ]; then
-    set -- --bucket "$bucket" --key "$key" --body "$file" \
-      --content-type "$type" --cache-control "$cache"
-    if [ -n "$disposition" ]; then set -- "$@" --content-disposition "$disposition"; fi
-    if [ "$condition" = new ]; then set -- "$@" --if-none-match '*'; fi
-    aws s3api put-object --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" \
-      "$@" >/dev/null
-  else
-    set -- --remote --file "$file" --content-type "$type" --cache-control "$cache"
-    if [ -n "$disposition" ]; then set -- "$@" --content-disposition "$disposition"; fi
-    $wrangler r2 object put "$bucket/$key" "$@"
-  fi
+  key=$1 file=$2
+  set -- --remote --file "$file" --content-type "$3" --cache-control "$4" ${5:+--content-disposition} ${5:+"$5"}
+  $wrangler r2 object put "$bucket/$key" "$@"
 }
 
 # Artifacts are content-addressed and immutable: an existing object must hold
@@ -262,7 +242,7 @@ for feed_name in "$@"; do
       echo "releases/$artifact is already published." >&2
       ;;
     404)
-      put new "releases/$artifact" "$artifact_path" application/octet-stream \
+      put "releases/$artifact" "$artifact_path" application/octet-stream \
         'public, max-age=31536000, immutable'
       fetch "$base_url/releases/$artifact" "$remote_artifact" 600
       cmp -s "$artifact_path" "$remote_artifact"
@@ -281,7 +261,7 @@ for feed_name in "$@"; do
     *" $installer "*) continue ;;
   esac
   installer_path="$source_root/$installer_source"
-  put replace "$installer" "$installer_path" "$installer_type" 'public, max-age=300' \
+  put "$installer" "$installer_path" "$installer_type" 'public, max-age=300' \
     "attachment; filename=\"$installer\""
   fetch "$base_url/$installer?check=$(date +%s)" "$temporary/remote-$installer"
   cmp -s "$installer_path" "$temporary/remote-$installer"
@@ -293,7 +273,7 @@ for feed_name in "$@"; do
   verify_feed "$feed_name"
   require_newer_than_published
   if [ "$already_published" = 0 ]; then
-    put replace "$feed_name" "$dist/$feed_name" application/json no-cache
+    put "$feed_name" "$dist/$feed_name" application/json no-cache
   fi
   fetch "$base_url/$feed_name?check=$(date +%s)" "$temporary/published-$feed_name"
   cmp -s "$dist/$feed_name" "$temporary/published-$feed_name"
