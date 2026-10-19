@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use url::Url;
 
+use crate::dictation_modes::normalize_host;
+
 /// Executable stems whose foreground document exposes the page URL.
 const BROWSER_STEMS: &[&str] = &[
     "arc",
@@ -86,27 +88,6 @@ fn browser_url(url: &str) -> Option<Url> {
 #[cfg(test)]
 fn host_of(url: &str) -> Option<String> {
     browser_url(url).and_then(|url| url.host_str().map(normalize_host))
-}
-
-/// Hosts compare case-insensitively with any trailing dot removed,
-/// matching the macOS browser-host semantics.
-pub fn normalize_host(host: &str) -> String {
-    host.trim_end_matches('.').to_lowercase()
-}
-
-/// A website rule entry reduced to its comparable host: bare hosts,
-/// pasted URLs, host:port forms, and IDN text all work, matching the
-/// macOS Websites field.
-pub fn canonical_host(entry: &str) -> Option<String> {
-    let entry = entry.trim();
-    if entry.is_empty() {
-        return None;
-    }
-    let parsed = Url::parse(entry)
-        .ok()
-        .filter(|url| url.host_str().is_some())
-        .or_else(|| Url::parse(&format!("https://{entry}")).ok())?;
-    parsed.host_str().map(normalize_host)
 }
 
 /// At most one UIA read runs at a time: a hung accessibility provider
@@ -211,6 +192,7 @@ fn read_foreground_document_url() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dictation_modes::canonical_host;
 
     fn capture() -> WindowsContext {
         begin_capture().finish()
