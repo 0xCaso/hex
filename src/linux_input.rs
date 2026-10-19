@@ -169,6 +169,7 @@ impl Drop for LinuxHotkeyMonitor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     sender: SyncSender<HotkeyEvent>,
     stop: Arc<AtomicBool>,
