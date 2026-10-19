@@ -83,6 +83,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ../resources
       ../assets
       ../packaging
+      ../vendor
     ];
   };
 
