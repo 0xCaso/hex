@@ -84,18 +84,17 @@ with tempfile.TemporaryDirectory(prefix="hex-service-", dir=os.environ.get("TMPD
         # A Settings client can leave and reconnect without replacing the service.
         with connection() as client:
             assert call(client)["state"]["pid"] == service.pid
-            assert call(client, {"SetVolume": 0.0})["error"] is None
         assert snapshot()["pid"] == service.pid
-        assert json.loads((support / "settings.json").read_text())["sound_effects"] is False
 
         # Settings saves settings.json itself and asks the service to adopt it.
-        saved = json.loads((support / "settings.json").read_text())
-        saved["paste_with_shift"] = not saved["paste_with_shift"]
-        (support / "settings.json").write_text(json.dumps(saved))
+        (support / "settings.json").write_text(
+            json.dumps({"sound_effects": False, "paste_with_shift": True})
+        )
         with connection() as client:
             reply = call(client, "ReloadSettings")
             assert reply["error"] is None
-            assert reply["state"]["settings"]["paste_with_shift"] == saved["paste_with_shift"]
+            assert reply["state"]["settings"]["sound_effects"] is False
+            assert reply["state"]["settings"]["paste_with_shift"] is True
 
         # Disconnecting an uncommitted focused shortcut capture releases only that edit.
         with connection() as client:
@@ -128,7 +127,7 @@ with tempfile.TemporaryDirectory(prefix="hex-service-", dir=os.environ.get("TMPD
         service = launch()
         state = wait_for(snapshot)
         assert state["pid"] == service.pid
-        assert state["settings"]["sound_effect_volume"] == 0
+        assert state["settings"]["sound_effects"] is False
         subprocess.run([binary, "stop"], env=env, check=True, capture_output=True)
         assert service.wait(timeout=8) == 0
         assert not path.exists()

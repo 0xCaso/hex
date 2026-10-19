@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
-use gpui::{App, Application, Timer, prelude::*};
+use gpui::{App, Application, Timer};
 
 use crate::app_settings::{AppSettings, HotkeyBinding};
 use crate::desktop_activity::DesktopActivity;

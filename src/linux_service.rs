@@ -625,13 +625,19 @@ mod tests {
             &mut client,
             &Message {
                 version: VERSION,
-                request: Request::SetVolume(0.25),
+                request: Request::ChooseModel {
+                    model: TranscriptionModelId::default(),
+                    language: "pl".into(),
+                },
             },
         )
         .unwrap();
         let message: Message = read_frame(&mut server).unwrap();
         assert_eq!(message.version, VERSION);
-        assert!(matches!(message.request, Request::SetVolume(0.25)));
+        assert!(matches!(
+            message.request,
+            Request::ChooseModel { language, .. } if language == "pl"
+        ));
         client
             .write_all(&((MAX_FRAME + 1) as u32).to_be_bytes())
             .unwrap();
