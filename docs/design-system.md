@@ -95,7 +95,8 @@ focus ring.
 Saturated colour is spent on meaning, never decoration:
 
 - **Accent fill:** at most one Primary button per screen, for the main action
-  (Meetings "Start recording", setup "Choose model", a dialog's confirm). A
+  (Meetings "Start recording", the onboarding setup screen's next unfinished
+  row and then "Continue" once every row is ready, a dialog's confirm). A
   meeting capsule is its own screen: "Record", "Stop & transcribe" after the
   call ends, "Reveal" when ready. Never in persistent chrome like the sidebar.
 - **States are not actions:** an ongoing state uses a Secondary button with a
@@ -115,7 +116,7 @@ The window frame sets `BODY`, so text with no step inherits 13 px.
 | `FOOTNOTE` | 12 / 16 | inherited | descriptions, control and button labels, menu items |
 | `BODY` | 13 / 18 | inherited | window default, values, inputs, list and row titles, reading text |
 | `HEADLINE` | 15 / 20 | semibold | detail, card, and dialog titles |
-| `TITLE` | 20 / 26 | semibold | pane titles only (`pane_header`) |
+| `TITLE` | 20 / 26 | semibold | pane titles (`pane_header`), onboarding page titles, hero keycaps |
 
 Apply steps with the `Typography` trait: `.text_caption()`,
 `.text_footnote()`, `.text_body()`, `.text_headline()`, `.text_title()`, or
@@ -150,6 +151,9 @@ SIDEBAR_WIDTH 220 · PANE_CONTENT_WIDTH 940
 PANE_LIST_WIDTH 320 · PANE_LIST_WIDTH_COMPACT 220 (Modes)
 DISCLOSURE_WIDTH 220 · SEARCH_FIELD_WIDTH 220 · MODE_FIELD_WIDTH 300
 ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
+ONBOARDING_WIDTH 520 · ONBOARDING_BODY_WIDTH 440 · ONBOARDING_ART_HEIGHT 148
+HERO_KEYCAP_SIZE 56 · HERO_KEYCAP_DEPTH 3 · ONBOARDING_BADGE_SIZE 28
+ONBOARDING_PRIMARY_WIDTH 180 · STEP_DOT_SIZE 6 · STEP_DOT_ACTIVE_WIDTH 16
 ```
 
 ## Components
@@ -183,7 +187,9 @@ ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
 | A few exclusive choices | `segmented_control` + `segmented_item`, or the sliding variants |
 | Status (never clickable) | `tag(Tone::{Neutral, Accent, Success, Danger}, label)` |
 | Live / recorded state | `status_dot(colour)` |
-| Shortcut | `hotkey_keycaps` |
+| Shortcut | `hotkey_keycaps`; drawn large in onboarding art: `hero_keycaps(parts, pressed)` |
+| Progress | `progress_track(indicator)` with its label beside it |
+| Position in a multi-step flow | `step_dots(index, count)` |
 | Text entry | `TextInput` ([`text_input.rs`](../src/text_input.rs)): `BODY`, `CONTROL_HEIGHT`, `RADIUS_CONTROL` |
 | Nothing to show | `empty_state`; centred in a card: `detail_placeholder` (`pane_list` centres its own) |
 | Errors | `error_panel` (card), `error_message` (inside a card), `inline_error` (under a control) |

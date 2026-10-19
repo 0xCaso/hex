@@ -216,6 +216,8 @@ pub(crate) const ONBOARDING_BODY_WIDTH: f32 = 440.0;
 pub(crate) const ONBOARDING_ART_COLUMN: f32 = 112.0;
 /// A setup row's download progress, track and percentage together.
 pub(crate) const ONBOARDING_PROGRESS_WIDTH: f32 = 140.0;
+/// The tour's main button, centred under each page.
+pub(crate) const ONBOARDING_PRIMARY_WIDTH: f32 = 180.0;
 /// The round badge holding a setup row's icon.
 pub(crate) const ONBOARDING_BADGE_SIZE: f32 = 28.0;
 /// The tour's step dots; the current one stretches to the wide width.

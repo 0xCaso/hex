@@ -83,10 +83,28 @@ Executed hosting checks and deployment details are recorded in
 with 2.1.17; the initial 2.1.16 mirror preserves that release's original bytes.
 
 ```ts
-Launch Hex                               // setup
-  -> Grant Microphone / Input Monitoring / Accessibility
-  -> Choose language and local model
-  -> Ready for ordinary dictation         // no Bun, OpenCode, or Commands required
+Launch Hex, setup incomplete              // setup.tour; full-window, own column
+├── Welcome -> Get started                // looping keycap + listening rings
+├── How Hex works -> hold, speak, release // follows the shortcut and Hold/Toggle mode
+├── Setup: one screen, every requirement  // setup.checklist
+│   ├── Microphone -> Allow -> macOS prompt; denied -> Open settings
+│   ├── Input Monitoring / Accessibility -> Allow -> Privacy pane + drag guide
+│   │   └── Asked -> "Waiting for macOS" + drag/switch hint; reopen the pane
+│   ├── Speech model -> Download (progress %) | Change -> picker; failure -> Retry
+│   ├── Rows re-read every 400 ms and flip to a check as macOS grants
+│   ├── The first unfinished row carries the screen's one accent
+│   └── All ready -> listener starts, completion recorded -> Continue
+├── Give it a try                         // setup.practice; macOS only
+│   ├── Focused practice field; hold the shortcut, speak, release
+│   ├── Started -> "Listening…" ; Transcribing -> "Transcribing…"
+│   ├── Discarded before transcribing -> quick-tap hint
+│   ├── Discarded after transcribing -> nothing-heard hint (mic, distance)
+│   ├── Pasted -> words land in the field + success -> Continue
+│   └── Skip -> Done                      // practice is never required
+├── Listener cannot start after setup     // setup.relaunch; event tap refused
+│   ├── First time -> Hex records a marker, reopens itself, resumes at Give it a try
+│   └── Within 2 min of that relaunch -> "Reopen Hex" button; dev binaries ask to reopen
+└── Done -> paste last, Voice Action, Modes tips -> Start using Hex
 
 Settings > Local transcription
   -> Prepare candidate
@@ -154,6 +172,16 @@ Checks start in [onboarding.rs](../../src/onboarding.rs),
 [transcription.rs](../../src/transcription.rs), and
 [transcription_models.rs](../../src/transcription_models.rs). Setup/picker previews
 prove rendering, not clean-account permission grants or model preparation.
+
+The tour is the pure `onboarding::Flow` (steps, row states, practice hints,
+one-relaunch guard) drawn by [tour.rs](../../src/app_window/tour.rs). Its unit
+tests (`onboarding::tests`) cover step order, live row flips, denied and failed
+recovery, platforms without permissions or practice, practice hints, resume, and
+the relaunch guard and resume marker. Every step is capturable with
+`voice-control preview onboarding --step <welcome|how-it-works|setup|setup-progress|setup-ready|try-it|try-it-listening|try-it-short|try-it-silent|try-it-landed|try-it-reopen|done>`.
+Not yet observed: a clean-account run with real grants, a real practice paste
+into the field, or a real self-relaunch after an event-tap refusal. Windows and
+Linux show the model row only and skip the practice step.
 
 ```ts
 Menu bar > Transcription Model            // setup.quick-model-switch; macOS

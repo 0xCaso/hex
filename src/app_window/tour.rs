@@ -245,14 +245,20 @@ impl AppWindow {
         let trailing = match primary {
             Some((label, true)) => button(ButtonKind::Primary, label)
                 .id("tour-continue")
+                .flex_1()
+                .justify_center()
                 .on_click(cx.listener(|this, _, _, cx| this.tour_input(Input::Continue, cx)))
                 .into_any_element(),
             Some((label, false)) => button(ButtonKind::Secondary, label)
                 .id("tour-continue")
+                .flex_1()
+                .justify_center()
                 .opacity(DISABLED_OPACITY)
                 .into_any_element(),
             None => button(ButtonKind::Secondary, tr("Skip"))
                 .id("tour-skip")
+                .flex_1()
+                .justify_center()
                 .on_click(cx.listener(|this, _, _, cx| this.tour_input(Input::Skip, cx)))
                 .into_any_element(),
         };
@@ -264,14 +270,29 @@ impl AppWindow {
         div()
             .w(px(ONBOARDING_WIDTH))
             .flex_none()
-            .pb_8()
+            .pb_6()
             .flex()
+            .flex_col()
             .items_center()
-            .child(div().flex_1().flex().children(back))
-            .when(view.step != Step::Done, |footer| {
-                footer.child(step_dots(view.index, view.count))
-            })
-            .child(div().flex_1().flex().justify_end().child(trailing))
+            .gap_5()
+            .child(
+                div()
+                    .min_w(px(ONBOARDING_PRIMARY_WIDTH))
+                    .flex()
+                    .child(trailing),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(CONTROL_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .child(div().flex_1().flex().children(back))
+                    .when(view.step != Step::Done, |row| {
+                        row.child(step_dots(view.index, view.count))
+                    })
+                    .child(div().flex_1()),
+            )
     }
 
     fn shortcut_parts(&self) -> Vec<String> {
