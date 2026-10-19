@@ -53,7 +53,7 @@ pub fn run(
     event_path: &Path,
     device: Option<&str>,
     shutdown: &AtomicBool,
-    settings: crate::linux_settings::LinuxSettings,
+    settings: &crate::app_settings::AppSettings,
     transcriber: Option<LocalTranscriber>,
     hotkey_status: HotkeyStatus,
 ) -> Result<()> {
@@ -71,25 +71,19 @@ pub fn run(
         Some(name) => AudioInput::open_matching(name)?,
         None => AudioInput::open(&[])?,
     };
-    let hotkey_label = settings.dictation_hotkey.label();
+    let binding = crate::linux_input::LinuxHotkey::from(&settings.dictation_hotkey);
+    let hotkey_label = binding.label();
     let toggle = settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
-    let hotkey = LinuxHotkeyMonitor::start(
-        settings.dictation_hotkey,
-        settings.double_tap_lock,
-        toggle,
-        hotkey_status,
-    )?;
+    let paste_with_shift = settings.paste_with_shift;
+    let hotkey =
+        LinuxHotkeyMonitor::start(binding, settings.double_tap_lock, toggle, hotkey_status)?;
     let wayland_modifiers = hotkey.wayland_modifiers();
     let indicator = LinuxIndicator::new();
     let (jobs, job_receiver) = mpsc::sync_channel::<Job>(2);
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
     output.worker = Some(thread::spawn(move || {
-        let mut paster = LinuxPaster::new(
-            worker_stop.clone(),
-            settings.paste_with_shift,
-            wayland_modifiers,
-        );
+        let mut paster = LinuxPaster::new(worker_stop.clone(), paste_with_shift, wayland_modifiers);
         while let Ok(job) = job_receiver.recv() {
             if worker_stop.load(Ordering::Acquire) {
                 break;
@@ -254,8 +248,10 @@ pub fn run(
     Ok(())
 }
 
-pub(crate) fn initialize_feedback(volume: f32) {
-    feedback::set_volume(volume);
+/// Applies the saved sound settings and preloads the tones.
+pub(crate) fn initialize_feedback(settings: &crate::app_settings::AppSettings) {
+    feedback::set_enabled(settings.sound_effects);
+    feedback::set_volume(settings.sound_effect_volume.clamp(0.0, 1.0));
     if let Err(error) = feedback::preload() {
         tracing::warn!(%error, "recording sounds are unavailable; continuing without feedback");
     }

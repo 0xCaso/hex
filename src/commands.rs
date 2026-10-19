@@ -11,7 +11,7 @@ use color_eyre::eyre::{Result, eyre};
 #[cfg(test)]
 pub use crate::command_grammar::CapturedCount;
 pub(crate) use crate::command_grammar::phrase_placeholder;
-#[cfg_attr(target_os = "windows", allow(unused_imports))]
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
 pub use crate::command_grammar::{
     CapturedValue, CapturedValues, Command, ConfiguredCommand, Count, Digit, Direction,
     PersonalCapture,
@@ -504,6 +504,31 @@ pub fn execute(action: Action) -> Result<()> {
         }
         Action::TypeText(_) | Action::Keystroke { .. } | Action::RepeatedKeystroke { .. } => {
             Err(eyre!("keystroke actions are not available on Windows"))
+        }
+    }
+}
+
+/// Opens URLs and paths with the desktop's handler; Linux has no keystroke
+/// synthesis or application launching for commands yet.
+#[cfg(target_os = "linux")]
+pub fn execute(action: Action) -> Result<()> {
+    match action {
+        Action::OpenUrl(target) | Action::OpenPath(target) => {
+            std::process::Command::new("xdg-open")
+                .arg(&target)
+                .spawn()
+                .map(drop)
+                .map_err(|error| eyre!("could not open {target}: {error}"))
+        }
+        Action::StartDictation
+        | Action::StartMeeting
+        | Action::StopMeeting
+        | Action::InvokeHandler { .. } => Err(eyre!("interactive actions require the HEX app")),
+        Action::OpenApplication(_)
+        | Action::TypeText(_)
+        | Action::Keystroke { .. }
+        | Action::RepeatedKeystroke { .. } => {
+            Err(eyre!("this command action is not available on Linux"))
         }
     }
 }

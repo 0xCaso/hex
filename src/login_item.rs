@@ -1,4 +1,12 @@
-use color_eyre::eyre::{Result, eyre};
+//! Launch at login. macOS registers the app with `SMAppService`; Windows
+//! writes the current user's `Run` registry value. Linux starts the
+//! `hex.service` unit from its install script or Nix module, so Hex does not
+//! offer the setting there.
+
+use color_eyre::eyre::Result;
+#[cfg(target_os = "macos")]
+use color_eyre::eyre::eyre;
+#[cfg(target_os = "macos")]
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -8,6 +16,7 @@ pub enum LoginItemStatus {
     RequiresApproval,
 }
 
+#[cfg(target_os = "macos")]
 fn status() -> Result<LoginItemStatus> {
     // SAFETY: mainAppService and status do not retain caller-owned pointers.
     let status = unsafe { SMAppService::mainAppService().status() };
@@ -21,6 +30,7 @@ fn status() -> Result<LoginItemStatus> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn set_enabled(enabled: bool) -> Result<LoginItemStatus> {
     // SAFETY: SMAppService owns the NSError produced by these synchronous APIs.
     let service = unsafe { SMAppService::mainAppService() };
@@ -33,10 +43,45 @@ fn set_enabled(enabled: bool) -> Result<LoginItemStatus> {
     status()
 }
 
+#[cfg(target_os = "macos")]
 fn open_settings() {
     // SAFETY: This asks macOS to open its Login Items settings pane.
     unsafe { SMAppService::openSystemSettingsLoginItems() };
 }
+
+#[cfg(target_os = "windows")]
+fn status() -> Result<LoginItemStatus> {
+    Ok(if crate::windows_login_item::is_enabled()? {
+        LoginItemStatus::Enabled
+    } else {
+        LoginItemStatus::Disabled
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn set_enabled(enabled: bool) -> Result<LoginItemStatus> {
+    crate::windows_login_item::set_enabled(enabled)?;
+    status()
+}
+
+/// Windows never asks for approval, so there is no settings page to open.
+#[cfg(target_os = "windows")]
+fn open_settings() {}
+
+#[cfg(target_os = "linux")]
+fn status() -> Result<LoginItemStatus> {
+    Err(color_eyre::eyre::eyre!(
+        "hex.service decides whether Hex starts at login"
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn set_enabled(_: bool) -> Result<LoginItemStatus> {
+    status()
+}
+
+#[cfg(target_os = "linux")]
+fn open_settings() {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginItemRequest {
@@ -67,7 +112,7 @@ pub struct LoginItemWorker {
 impl LoginItemWorker {
     pub fn new() -> Result<Self, String> {
         Self::with_handler(|request| {
-            objc2::rc::autoreleasepool(|_| {
+            let handle = || {
                 let result = match request {
                     LoginItemRequest::Status => status(),
                     LoginItemRequest::SetEnabled(enabled) => set_enabled(enabled),
@@ -77,13 +122,18 @@ impl LoginItemWorker {
                     }
                 };
                 result.map_err(|error| LoginItemFailure {
-                    // Registration may change macOS state even when it reports an error.
+                    // Registration may change the OS state even when it reports an error.
                     status: matches!(request, LoginItemRequest::SetEnabled(_))
                         .then(|| status().ok())
                         .flatten(),
                     message: error.to_string(),
                 })
-            })
+            };
+            #[cfg(target_os = "macos")]
+            let result = objc2::rc::autoreleasepool(|_| handle());
+            #[cfg(not(target_os = "macos"))]
+            let result = handle();
+            result
         })
     }
 

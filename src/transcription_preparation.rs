@@ -196,6 +196,9 @@ fn prepare_selection(
             }
         }
         check_canceled()?;
+        // macOS warms the model to prove it loads. Windows and Linux load it
+        // once, when the listener restarts with the new selection.
+        #[cfg(target_os = "macos")]
         crate::transcription::Transcriber::load_selection(selection).map(drop)?;
         check_canceled()
     })()

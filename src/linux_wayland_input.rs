@@ -14,9 +14,9 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use evdev::raw_stream::RawDevice;
 use evdev::{EventType, KeyCode, SynchronizationCode};
 
+use crate::linux_input::LinuxHotkey;
 use crate::linux_input::{DOUBLE_TAP_WINDOW, HotkeyEvent, send_event};
 use crate::linux_session::LinuxSession;
-use crate::linux_settings::LinuxHotkey;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const RESCAN_INTERVAL: Duration = Duration::from_secs(1);
