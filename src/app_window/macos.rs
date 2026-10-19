@@ -44,7 +44,9 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
 
 /// macOS records shortcuts from window key events, resolving keys through
 /// the active keyboard layout.
-pub(super) const KEY_EVENT_HOTKEY_CAPTURE: bool = true;
+pub(super) fn records_key_events() -> bool {
+    true
+}
 
 /// Sparkle has its own Check for Updates command.
 pub(super) const MANUAL_UPDATE_CHECK: bool = false;
@@ -236,6 +238,26 @@ pub(super) fn validate_hotkey(
 }
 
 impl AppWindow {
+    /// Models are prepared in this window.
+    pub(super) fn platform_prepare_transcription(&mut self, _: &TranscriptionSelection) -> bool {
+        false
+    }
+
+    pub(super) fn platform_cancel_transcription(&mut self) -> bool {
+        false
+    }
+
+    pub(super) fn platform_preparation_status(&self) -> Option<PreparationStatus> {
+        None
+    }
+
+    /// Shortcuts are saved with the window's settings.
+    pub(super) fn platform_save_hotkey(&mut self, _: HotkeyKind, _: &HotkeyBinding) -> bool {
+        false
+    }
+
+    pub(super) fn platform_capture_cancelled(&mut self) {}
+
     pub(super) fn poll_platform(&mut self, cx: &mut Context<Self>) -> bool {
         let command_model_status = if self.preview {
             self.platform.command_model_status

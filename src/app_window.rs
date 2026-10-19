@@ -1485,10 +1485,17 @@ impl AppWindow {
         if self.preview {
             return false;
         }
-        let status = self.transcription_preparation.status();
+        let status = self.preparation_status();
         let changed = self.transcription_status != status;
         self.transcription_status = status;
         changed || self.transcription_status.model.is_some()
+    }
+
+    /// The model preparation the window shows: this OS's service when it
+    /// prepares models, otherwise the window's own.
+    fn preparation_status(&self) -> PreparationStatus {
+        self.platform_preparation_status()
+            .unwrap_or_else(|| self.transcription_preparation.status())
     }
 
     fn poll_setup(&mut self, force: bool) -> bool {
@@ -1634,7 +1641,6 @@ impl AppWindow {
         true
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn provision_personal_workspace(&mut self) {
         if self.preview || self.personal_workspace_receiver.is_some() {
             return;
@@ -1703,18 +1709,22 @@ impl AppWindow {
             self.transcription_picker_language = None;
             return;
         }
-        self.transcription_preparation.start(selection, false);
+        if !self.platform_prepare_transcription(&selection) {
+            self.transcription_preparation.start(selection, false);
+        }
         self.poll_transcription_download();
     }
 
     fn cancel_transcription_download(&mut self) {
-        self.transcription_preparation.cancel();
-        self.transcription_status = self.transcription_preparation.status();
+        if !self.platform_cancel_transcription() {
+            self.transcription_preparation.cancel();
+        }
+        self.transcription_status = self.preparation_status();
     }
 
     fn clear_transcription_error(&mut self) {
         self.transcription_preparation.set_error(None);
-        self.transcription_status = self.transcription_preparation.status();
+        self.transcription_status = self.preparation_status();
         self.transcription_deletion = None;
         self.transcription_deletion_error = None;
     }
@@ -2426,6 +2436,7 @@ impl AppWindow {
         if !matches!(self.hotkey_capture, HotkeyCaptureState::Idle) {
             if !self.preview {
                 platform::set_hotkey_capture_active(false);
+                self.platform_capture_cancelled();
             }
             self.hotkey_capture = HotkeyCaptureState::Idle;
             self.hotkey_capture_animation.set_enabled(false);
@@ -2439,7 +2450,7 @@ impl AppWindow {
             return;
         }
         cx.stop_propagation();
-        if event.is_held || !platform::KEY_EVENT_HOTKEY_CAPTURE {
+        if event.is_held || !platform::records_key_events() {
             return;
         }
         if event.keystroke.key == "escape" {
@@ -2470,7 +2481,7 @@ impl AppWindow {
     }
 
     fn capture_hotkey_modifiers(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
-        if !platform::KEY_EVENT_HOTKEY_CAPTURE {
+        if !platform::records_key_events() {
             return;
         }
         let current = normalize_captured_modifiers(platform::hotkey_modifiers(event.modifiers));
@@ -2538,6 +2549,10 @@ impl AppWindow {
         }
         if hotkey_binding_conflicts(&self.settings, kind, &binding) {
             self.set_hotkey_capture_message("Already in use", cx);
+            return;
+        }
+        if !self.preview && self.platform_save_hotkey(kind, &binding) {
+            self.set_hotkey_capture_message("Saving…", cx);
             return;
         }
         let keycaps = binding.keycaps();
@@ -4610,9 +4625,12 @@ impl AppWindow {
                 .into_any_element()
         });
 
+        let workspace = (!platform::CAPABILITIES.commands)
+            .then(|| self.render_transformation_workspace(cx))
+            .flatten();
         panel()
             .child(panel_header("Transformations", add).when(
-                selected.is_empty() && !self.transformation_picker_open,
+                selected.is_empty() && !self.transformation_picker_open && workspace.is_none(),
                 |header| header.border_b_0(),
             ))
             .children(selected_rows)
@@ -4632,7 +4650,82 @@ impl AppWindow {
                     })
                     .children(available_rows)
             })
+            .children(workspace)
             .into_any_element()
+    }
+
+    /// The personal TypeScript workspace that defines custom
+    /// transformations: its setup, loading, and failures, with the action
+    /// that recovers. Hidden once its transformations are loaded.
+    fn render_transformation_workspace(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.preview {
+            return None;
+        }
+        let status = &self.personal_commands_status;
+        let (description, error, action) = if self.personal_workspace_receiver.is_some() {
+            (
+                "Preparing the TypeScript workspace and installing its dependencies…",
+                None,
+                None,
+            )
+        } else if let Some(error) = self.personal_workspace_error.clone() {
+            (
+                "The TypeScript workspace could not be prepared.",
+                Some(error),
+                Some("Retry setup"),
+            )
+        } else if !crate::personal_commands::workspace_configured() {
+            (
+                "Create a TypeScript workspace to define reusable transformations.",
+                None,
+                Some("Set up"),
+            )
+        } else {
+            match status.host_state {
+                HostState::Active if status.last_reload_error.is_none() => return None,
+                HostState::Starting => {
+                    ("Loading registered TypeScript transformations…", None, None)
+                }
+                _ => (
+                    "Registered TypeScript transformations are unavailable.",
+                    status.last_reload_error.clone(),
+                    Some("Retry"),
+                ),
+            }
+        };
+        let is_error = error.is_some();
+        Some(
+            div()
+                .px_4()
+                .py_3()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .border_t_1()
+                .border_color(rgb(LINE))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(settings_copy("Custom transformations", description))
+                        .when_some(error, |copy, error| {
+                            copy.child(inline_error(bounded_opencode_error(&error)))
+                        }),
+                )
+                .when_some(action, |row, label| {
+                    row.child(
+                        small_button(ButtonKind::Secondary, label)
+                            .id("transformation-workspace-action")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.provision_personal_workspace();
+                                cx.notify();
+                            })),
+                    )
+                })
+                .when(is_error, |row| row.items_start())
+                .into_any_element(),
+        )
     }
 
     fn render_application_picker(

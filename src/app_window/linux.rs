@@ -3,9 +3,9 @@
 //! registration, the HUD, and updates, to reload it over the service socket.
 
 use super::*;
-use crate::desktop_host::{DesktopAction, DesktopUpdateStatus};
+use crate::desktop_host::{DesktopAction, DesktopShortcut, DesktopUpdateStatus};
+use crate::linux_input::LinuxHotkey;
 use crate::linux_service::{Client, Request};
-use crate::linux_settings::LinuxHotkey;
 
 pub(super) const CAPABILITIES: Capabilities = Capabilities {
     meetings: false,
@@ -26,8 +26,12 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     terminal_paste: true,
 };
 
-/// Linux records shortcuts from the focused window's key events.
-pub(super) const KEY_EVENT_HOTKEY_CAPTURE: bool = true;
+/// On X11 the window records the chord from its key events and the service
+/// registers it. On Wayland only the service sees physical keys, so it
+/// records the chord itself.
+pub(super) fn records_key_events() -> bool {
+    !crate::linux_session::LinuxSession::detect().is_wayland()
+}
 
 /// The service checks for updates on its own schedule.
 pub(super) const MANUAL_UPDATE_CHECK: bool = false;
@@ -38,6 +42,19 @@ pub(super) struct Platform {
     client: Client,
     /// What the window last showed of the service, to redraw only on change.
     shown: Option<(crate::desktop_host::DesktopSnapshot, Option<String>)>,
+    capture: CapturePhase,
+    /// The model the service is preparing, and since when.
+    preparing: Option<(crate::transcription_models::TranscriptionModelId, Instant)>,
+}
+
+/// The service's side of a shortcut change the window asked for.
+#[derive(Clone, Copy, PartialEq)]
+enum CapturePhase {
+    Idle,
+    /// Asked; the service has not reported the edit yet.
+    Requested(Instant),
+    /// The service is recording or saving the shortcut.
+    Editing,
 }
 
 impl Platform {
@@ -51,6 +68,8 @@ impl Platform {
         Self {
             client: Client::new(),
             shown: None,
+            capture: CapturePhase::Idle,
+            preparing: None,
         }
     }
 }
@@ -134,6 +153,8 @@ impl AppWindow {
             changed = true;
         }
         self.platform.client.refresh();
+        changed |= self.poll_service_capture();
+        changed |= self.poll_service_preparation(cx);
         let shown = self
             .platform
             .client
@@ -223,7 +244,139 @@ impl AppWindow {
         })
     }
 
-    pub(super) fn platform_capture_started(&mut self, _: &mut Context<Self>) {}
+    /// The service stops listening and records or awaits the chord.
+    pub(super) fn platform_capture_started(&mut self, _: &mut Context<Self>) {
+        if self.preview {
+            return;
+        }
+        self.send(Request::CaptureShortcut);
+        self.platform.capture = CapturePhase::Requested(Instant::now());
+    }
+
+    pub(super) fn platform_capture_cancelled(&mut self) {
+        if self.platform.capture != CapturePhase::Idle {
+            self.send(Request::CancelShortcut);
+            self.platform.capture = CapturePhase::Idle;
+        }
+    }
+
+    /// The service validates, registers, and saves the chord recorded on X11.
+    pub(super) fn platform_save_hotkey(&mut self, _: HotkeyKind, binding: &HotkeyBinding) -> bool {
+        let modifiers = binding.modifiers;
+        self.send(Request::Desktop(DesktopAction::SetDictationShortcut(
+            DesktopShortcut {
+                alt: modifiers.option.is_some(),
+                control: modifiers.control.is_some(),
+                function: false,
+                key: binding
+                    .key
+                    .as_ref()
+                    .map(HotkeyKey::name)
+                    .unwrap_or_default(),
+                platform: modifiers.command.is_some(),
+                shift: modifiers.shift.is_some(),
+            },
+        )));
+        true
+    }
+
+    /// The service prepares models so closing Settings never cancels one.
+    pub(super) fn platform_prepare_transcription(
+        &mut self,
+        selection: &TranscriptionSelection,
+    ) -> bool {
+        self.send(Request::ChooseModel {
+            model: selection.model,
+            language: selection.language.clone(),
+        });
+        true
+    }
+
+    pub(super) fn platform_cancel_transcription(&mut self) -> bool {
+        self.send(Request::CancelModel);
+        true
+    }
+
+    pub(super) fn platform_preparation_status(&self) -> Option<PreparationStatus> {
+        let transcription = &self.platform.client.state.as_ref()?.desktop.transcription;
+        Some(PreparationStatus {
+            model: transcription.preparing,
+            downloaded_bytes: transcription.downloaded_bytes,
+            started: self.platform.preparing.map(|(_, started)| started),
+            error: transcription.error.clone(),
+        })
+    }
+
+    fn send(&mut self, request: Request) {
+        if let Err(error) = self.platform.client.send(request) {
+            self.platform.client.error = Some(format!("{error:#}"));
+        }
+    }
+
+    /// Follows the service's shortcut edit and adopts the shortcut it saved.
+    fn poll_service_capture(&mut self) -> bool {
+        let Some(state) = &self.platform.client.state else {
+            return false;
+        };
+        let editing = state.capturing || state.editing;
+        let finished = match self.platform.capture {
+            CapturePhase::Idle => return false,
+            CapturePhase::Requested(_) if editing => {
+                self.platform.capture = CapturePhase::Editing;
+                return false;
+            }
+            CapturePhase::Requested(at) => at.elapsed() >= Duration::from_secs(3),
+            CapturePhase::Editing => !editing,
+        };
+        if !finished {
+            return false;
+        }
+        self.platform.capture = CapturePhase::Idle;
+        let saved = state.settings.dictation_hotkey.clone();
+        if saved != self.settings.dictation_hotkey {
+            let keycaps = saved.keycaps();
+            self.settings.dictation_hotkey = saved;
+            self.hotkey_width_spring
+                .set_target(hotkey_saved_width(keycaps.len()) + hotkey_label_overflow(&keycaps));
+            self.hotkey_capture = HotkeyCaptureState::Saved {
+                kind: HotkeyKind::Dictation,
+                saved_at: Instant::now(),
+            };
+        } else if !matches!(self.hotkey_capture, HotkeyCaptureState::Idle) {
+            self.hotkey_capture = HotkeyCaptureState::Idle;
+            self.hotkey_capture_animation.set_enabled(false);
+        }
+        true
+    }
+
+    /// Tracks the service's model preparation and adopts the selection it
+    /// saved when it finishes.
+    fn poll_service_preparation(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(state) = &self.platform.client.state else {
+            return false;
+        };
+        let transcription = &state.desktop.transcription;
+        if let Some(model) = transcription.preparing {
+            if self.platform.preparing.map(|(preparing, _)| preparing) != Some(model) {
+                self.platform.preparing = Some((model, Instant::now()));
+            }
+            return false;
+        }
+        if self.platform.preparing.take().is_none()
+            || transcription.error.is_some()
+            || state.settings.transcription == self.settings.transcription
+        {
+            return false;
+        }
+        self.settings.transcription = state.settings.transcription.clone();
+        self.settings.transcription_recents = state.settings.transcription_recents.clone();
+        let hints = self.settings.transcription.recognition_hints.clone();
+        self.transcription_hints
+            .entity
+            .update(cx, |input, cx| input.set_text(&hints, cx));
+        self.transcription_picker_language = None;
+        true
+    }
 
     pub(super) fn platform_listener(&self) -> Option<ListenerView> {
         let error = self.platform.client.error.clone();

@@ -1,5 +1,3 @@
-use color_eyre::Result;
-
 use crate::desktop_activity::DesktopActivity;
 use crate::transcription_models::{
     ModelPreparationStage, TranscriptionModelId, TranscriptionSelection,
@@ -8,10 +6,6 @@ use crate::transcription_models::{
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DesktopSnapshot {
     pub(crate) activity: DesktopActivity,
-    pub(crate) dictation_shortcut: Vec<String>,
-    pub(crate) double_tap_lock: bool,
-    #[serde(default)]
-    pub(crate) shortcut_mode: crate::dictation::ShortcutMode,
     pub(crate) listener: DesktopListenerSnapshot,
     pub(crate) operation_error: Option<String>,
     pub(crate) transcription: DesktopTranscriptionSnapshot,
@@ -59,16 +53,8 @@ pub(crate) enum DesktopAction {
     ClearError,
     RestartIntoUpdate,
     SetDictationShortcut(DesktopShortcut),
-    SetDoubleTapLock(bool),
-    SetShortcutMode(crate::dictation::ShortcutMode),
     StartListening,
     StopListening,
-}
-
-/// Contract between the Linux Settings client and its service-owned runtime.
-pub(crate) trait DesktopHost {
-    fn snapshot(&self) -> DesktopSnapshot;
-    fn dispatch(&mut self, action: DesktopAction) -> Result<()>;
 }
 
 #[cfg(test)]

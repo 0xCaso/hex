@@ -68,13 +68,13 @@ mod linux_dictation;
 #[cfg(target_os = "linux")]
 mod linux_input;
 #[cfg(target_os = "linux")]
+mod linux_migration;
+#[cfg(target_os = "linux")]
 mod linux_paste;
 #[cfg(target_os = "linux")]
 mod linux_service;
 #[cfg(target_os = "linux")]
 mod linux_session;
-#[cfg(target_os = "linux")]
-mod linux_settings;
 #[cfg(target_os = "linux")]
 mod linux_updater;
 #[cfg(target_os = "linux")]

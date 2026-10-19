@@ -32,7 +32,9 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
 
 /// Windows records shortcuts by polling the keyboard state: a modifier-only
 /// chord such as Ctrl+Win never reaches the window as a key event.
-pub(super) const KEY_EVENT_HOTKEY_CAPTURE: bool = false;
+pub(super) fn records_key_events() -> bool {
+    false
+}
 
 pub(super) const MANUAL_UPDATE_CHECK: bool = true;
 
@@ -176,6 +178,26 @@ pub(super) fn validate_hotkey(
 }
 
 impl AppWindow {
+    /// Models are prepared in this window.
+    pub(super) fn platform_prepare_transcription(&mut self, _: &TranscriptionSelection) -> bool {
+        false
+    }
+
+    pub(super) fn platform_cancel_transcription(&mut self) -> bool {
+        false
+    }
+
+    pub(super) fn platform_preparation_status(&self) -> Option<PreparationStatus> {
+        None
+    }
+
+    /// Shortcuts are saved with the window's settings.
+    pub(super) fn platform_save_hotkey(&mut self, _: HotkeyKind, _: &HotkeyBinding) -> bool {
+        false
+    }
+
+    pub(super) fn platform_capture_cancelled(&mut self) {}
+
     pub(super) fn poll_platform(&mut self, cx: &mut Context<Self>) -> bool {
         let mut changed = false;
         // Windows has no application coordinator: the window commits the

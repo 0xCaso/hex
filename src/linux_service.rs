@@ -16,7 +16,6 @@ use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::desktop_host::{DesktopAction, DesktopSnapshot};
-use crate::linux_settings::LinuxSettings;
 use crate::transcription_models::TranscriptionModelId;
 
 const VERSION: u32 = 1;
@@ -31,8 +30,6 @@ pub enum Request {
     Desktop(DesktopAction),
     CaptureShortcut,
     CancelShortcut,
-    SetTerminalPaste(bool),
-    SetVolume(f32),
     ChooseModel {
         model: TranscriptionModelId,
         language: String,
@@ -46,7 +43,7 @@ pub enum Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub desktop: DesktopSnapshot,
-    pub settings: LinuxSettings,
+    pub settings: crate::app_settings::AppSettings,
     pub editing: bool,
     pub capturing: bool,
     pub hud_limitation: Option<String>,

@@ -708,7 +708,7 @@ impl RecordingAudioBehavior {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub commands_enabled: bool,
@@ -1346,7 +1346,7 @@ pub(crate) fn migrate_legacy_settings(path: &std::path::Path) -> Result<()> {
     #[cfg(target_os = "windows")]
     let legacy = crate::windows_migration::legacy_settings(directory)?;
     #[cfg(target_os = "linux")]
-    let legacy = crate::linux_settings::legacy_settings(directory)?;
+    let legacy = crate::linux_migration::legacy_settings(directory)?;
     #[cfg(target_os = "macos")]
     let legacy: Option<(PathBuf, AppSettings)> = {
         let _ = directory;
