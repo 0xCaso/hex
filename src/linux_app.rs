@@ -586,7 +586,8 @@ impl LinuxDesktopHost {
             self.error = Some("Wait for model preparation before editing shortcut settings".into());
             return;
         }
-        let resume = self.is_running() && self.listen_when_ready;
+        // A listener waiting for a model still starts once one is ready.
+        let resume = self.listen_when_ready;
         self.stop();
         self.error = None;
         self.settings_edit = Some(SettingsEdit {
