@@ -5,6 +5,11 @@
 #[path = "../src/keyboard.rs"]
 mod keyboard;
 
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../src/keys.rs"]
+mod keys;
+
 #[cfg(not(target_os = "macos"))]
 fn main() {
     println!("keyboard layout regression: skipped (macOS only)");
