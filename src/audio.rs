@@ -258,6 +258,11 @@ impl AudioInput {
     }
 
     pub fn open_named(name: &str) -> Result<Self> {
+        if crate::hex_microphone::is_hex_virtual_device_name(name) {
+            return Err(eyre!(
+                "Hex cannot capture from its own virtual microphone: {name}"
+            ));
+        }
         let host = cpal::default_host();
         let device = host
             .input_devices()
@@ -649,6 +654,7 @@ pub fn input_device_names() -> Result<Vec<String>> {
         .input_devices()
         .wrap_err("could not enumerate input devices")?
         .map(|device| device.to_string())
+        .filter(|name| !crate::hex_microphone::is_hex_virtual_device_name(name))
         .collect::<Vec<_>>();
     names.sort_by_key(|name| name.to_lowercase());
     names.dedup();
@@ -666,18 +672,23 @@ fn find_device(host: &cpal::Host, queries: &[&str]) -> Result<Device> {
     let devices: Vec<_> = host
         .input_devices()
         .wrap_err("could not enumerate input devices")?
+        .filter(|device| !crate::hex_microphone::is_hex_virtual_device_name(&device.to_string()))
         .collect();
     for query in queries {
         if let Some(device) = devices.iter().find(|device| device_matches(device, query)) {
             return Ok(device.clone());
         }
     }
-    let default = host.default_input_device().ok_or_else(|| {
-        eyre!(
-            "no preferred or default input device is available (preferred: {})",
-            queries.join(", ")
-        )
-    })?;
+    let default = host
+        .default_input_device()
+        .filter(|device| !crate::hex_microphone::is_hex_virtual_device_name(&device.to_string()))
+        .or_else(|| devices.first().cloned())
+        .ok_or_else(|| {
+            eyre!(
+                "no preferred or default input device is available (preferred: {})",
+                queries.join(", ")
+            )
+        })?;
     Ok(avoid_bluetooth_input(default, &devices))
 }
 
@@ -830,10 +841,9 @@ fn build_stream<T: SizedSample>(
             *config,
             move |data: &[T], info| {
                 let captured_through = captured_through(info, data.len() / channels, sample_rate);
-                let _ = sender.send((
-                    mono(data, channels, |sample| convert(*sample)),
-                    captured_through,
-                ));
+                let mono_samples = mono(data, channels, |sample| convert(*sample));
+                crate::hex_microphone::push_capture_samples(&mono_samples, sample_rate);
+                let _ = sender.send((mono_samples, captured_through));
             },
             move |error| report_stream_error(&error_sender, error),
             None,

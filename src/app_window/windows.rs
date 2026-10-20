@@ -15,6 +15,7 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     meetings: false,
     commands: false,
     hud_lab: false,
+    fun: false,
     modes: true,
     voice_action: true,
     history: true,

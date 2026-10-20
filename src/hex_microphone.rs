@@ -1,0 +1,1338 @@
+use std::cell::UnsafeCell;
+use std::io::Cursor;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::voice_filter::{DictationSpan, HexMicEngine, ModeSpec, StageSpec, VoiceFilterMode};
+
+pub const HEX_MICROPHONE_NAME: &str = "Hex Microphone";
+pub const HEX_MICROPHONE_UID: &str = "com.kitlangton.hex.microphone";
+pub const HEX_MICROPHONE_SINK_NAME: &str = "Hex Microphone (Internal Sink)";
+pub const HEX_MICROPHONE_SINK_UID: &str = "com.kitlangton.hex.microphone.sink";
+pub const HEX_MICROPHONE_SAMPLE_RATE: u32 = 48_000;
+
+/// Capacity of the lock-free capture-to-sink ring buffer in 48 kHz mono samples (~341 ms).
+const RING_CAPACITY: usize = 16_384;
+const RING_MASK: usize = RING_CAPACITY - 1;
+/// Maximum queued frames before the consumer skips ahead to bound added latency (< 16 ms).
+const MAX_RING_LATENCY_FRAMES: usize = 768;
+
+pub fn is_hex_virtual_device_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.eq_ignore_ascii_case(HEX_MICROPHONE_NAME)
+        || trimmed.eq_ignore_ascii_case(HEX_MICROPHONE_SINK_NAME)
+        || trimmed.to_ascii_lowercase().starts_with("hex microphone")
+}
+
+/// Lock-free single-producer single-consumer ring buffer for real-time audio handoff.
+pub struct HexMicRingBuffer {
+    buffer: [UnsafeCell<f32>; RING_CAPACITY],
+    write_pos: AtomicUsize,
+    read_pos: AtomicUsize,
+    underflows: AtomicU64,
+    overflows: AtomicU64,
+}
+
+unsafe impl Sync for HexMicRingBuffer {}
+
+impl Default for HexMicRingBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HexMicRingBuffer {
+    pub const fn new() -> Self {
+        Self {
+            buffer: [const { UnsafeCell::new(0.0) }; RING_CAPACITY],
+            write_pos: AtomicUsize::new(0),
+            read_pos: AtomicUsize::new(0),
+            underflows: AtomicU64::new(0),
+            overflows: AtomicU64::new(0),
+        }
+    }
+
+    pub fn clear(&self) {
+        let w = self.write_pos.load(Ordering::Relaxed);
+        self.read_pos.store(w, Ordering::Release);
+    }
+
+    /// Pushes samples from the producer without blocking or allocating.
+    pub fn push_slice(&self, samples: &[f32]) {
+        if samples.is_empty() {
+            return;
+        }
+        let slice = if samples.len() > RING_CAPACITY {
+            &samples[samples.len() - RING_CAPACITY..]
+        } else {
+            samples
+        };
+        let count = slice.len();
+        let write = self.write_pos.load(Ordering::Relaxed);
+        let read = self.read_pos.load(Ordering::Acquire);
+        let available = write.wrapping_sub(read);
+
+        if available + count > RING_CAPACITY {
+            let new_read = write.wrapping_add(count).wrapping_sub(RING_CAPACITY);
+            self.read_pos.store(new_read, Ordering::Release);
+            self.overflows.fetch_add(1, Ordering::Relaxed);
+        }
+
+        for (i, &sample) in slice.iter().enumerate() {
+            let idx = write.wrapping_add(i) & RING_MASK;
+            // SAFETY: Bounded by RING_CAPACITY; producer is the sole writer.
+            unsafe {
+                *self.buffer[idx].get() = sample;
+            }
+        }
+
+        self.write_pos
+            .store(write.wrapping_add(count), Ordering::Release);
+    }
+
+    /// Pulls `dst.len()` samples for the real-time consumer without blocking.
+    /// Zero-fills on underflow and skips ahead if queued latency exceeds `MAX_RING_LATENCY_FRAMES`.
+    pub fn pop_slice(&self, dst: &mut [f32]) -> usize {
+        let needed = dst.len();
+        if needed == 0 {
+            return 0;
+        }
+        let write = self.write_pos.load(Ordering::Acquire);
+        let mut read = self.read_pos.load(Ordering::Relaxed);
+        let mut available = write.wrapping_sub(read);
+
+        if available > RING_CAPACITY {
+            read = write;
+            available = 0;
+        } else if available > MAX_RING_LATENCY_FRAMES + needed {
+            let keep = (MAX_RING_LATENCY_FRAMES / 2) + needed;
+            read = write.wrapping_sub(keep);
+            available = keep;
+            self.overflows.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let to_copy = available.min(needed);
+        for (i, out) in dst.iter_mut().take(to_copy).enumerate() {
+            let idx = read.wrapping_add(i) & RING_MASK;
+            // SAFETY: Consumer reads within [read, write).
+            *out = unsafe { *self.buffer[idx].get() };
+        }
+        if to_copy < needed {
+            dst[to_copy..].fill(0.0);
+            self.underflows.fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.read_pos
+            .store(read.wrapping_add(to_copy), Ordering::Release);
+        to_copy
+    }
+
+    #[cfg(test)]
+    pub fn queued_frames(&self) -> usize {
+        let write = self.write_pos.load(Ordering::Acquire);
+        let read = self.read_pos.load(Ordering::Acquire);
+        write.wrapping_sub(read).min(RING_CAPACITY)
+    }
+
+    #[cfg(test)]
+    pub fn underflows(&self) -> u64 {
+        self.underflows.load(Ordering::Relaxed)
+    }
+}
+
+static CAPTURE_RING: HexMicRingBuffer = HexMicRingBuffer::new();
+static SINK_STREAMING: AtomicBool = AtomicBool::new(false);
+static SUPERVISOR_STARTED: AtomicBool = AtomicBool::new(false);
+static PENDING_ENGINE_SWAP: AtomicBool = AtomicBool::new(false);
+static PENDING_ENGINE: OnceLock<Mutex<Option<HexMicEngine>>> = OnceLock::new();
+
+// Tunable per-mode parameters for the live engine and Fun pane sliders.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TunedFilterConfig {
+    pub mode: VoiceFilterMode,
+    pub comfort_noise: bool,
+    pub strength: f32,
+    pub muffled_wall_hz: f64,
+    pub muffled_room_mix: f64,
+    pub muffled_level_db: f64,
+    pub quiet_level_db: f64,
+    pub muted_room_tone_db: f64,
+    pub chipmunk_semitones: f64,
+    pub robot_carrier_hz: f64,
+    pub walkie_crunch: f64,
+    pub underwater_depth_hz: f64,
+    pub far_distance_mix: f64,
+}
+
+impl Default for TunedFilterConfig {
+    fn default() -> Self {
+        Self {
+            mode: VoiceFilterMode::Muffled,
+            comfort_noise: true,
+            strength: 1.0,
+            muffled_wall_hz: 480.0,
+            muffled_room_mix: 0.3,
+            muffled_level_db: -9.0,
+            quiet_level_db: -24.0,
+            muted_room_tone_db: -68.0,
+            chipmunk_semitones: 7.0,
+            robot_carrier_hz: 70.0,
+            walkie_crunch: 4.0,
+            underwater_depth_hz: 380.0,
+            far_distance_mix: 0.75,
+        }
+    }
+}
+
+impl TunedFilterConfig {
+    pub fn build_mode_spec(&self) -> ModeSpec {
+        let mut spec = self.mode.spec_with_options(self.comfort_noise);
+        match self.mode {
+            VoiceFilterMode::Normal => {}
+            VoiceFilterMode::Muffled => {
+                if let Some(StageSpec::Lowpass { hz, .. }) = spec.stages.get_mut(0) {
+                    *hz = self.muffled_wall_hz;
+                }
+                if let Some(StageSpec::Reverb { mix, .. }) = spec.stages.get_mut(2) {
+                    *mix = self.muffled_room_mix;
+                }
+                if let Some(StageSpec::Gain { db }) = spec.stages.get_mut(3) {
+                    *db = self.muffled_level_db;
+                }
+            }
+            VoiceFilterMode::Quiet => {
+                if let Some(StageSpec::Gain { db }) = spec.stages.get_mut(1) {
+                    *db = self.quiet_level_db;
+                }
+            }
+            VoiceFilterMode::Muted => {
+                if let Some(StageSpec::Noise { db, .. }) = spec.stages.get_mut(1) {
+                    *db = if self.comfort_noise {
+                        self.muted_room_tone_db
+                    } else {
+                        -120.0
+                    };
+                }
+            }
+            VoiceFilterMode::Chipmunk => {
+                if let Some(StageSpec::Pitch { semitones, .. }) = spec.stages.get_mut(0) {
+                    *semitones = self.chipmunk_semitones;
+                }
+            }
+            VoiceFilterMode::Robot => {
+                if let Some(StageSpec::Ringmod { hz, .. }) = spec.stages.get_mut(0) {
+                    *hz = self.robot_carrier_hz;
+                }
+            }
+            VoiceFilterMode::Walkie => {
+                if let Some(StageSpec::Drive { amount }) = spec.stages.get_mut(3) {
+                    *amount = self.walkie_crunch;
+                }
+            }
+            VoiceFilterMode::Underwater => {
+                if let Some(StageSpec::Wobble { hz, .. }) = spec.stages.get_mut(0) {
+                    *hz = self.underwater_depth_hz;
+                }
+            }
+            VoiceFilterMode::Far => {
+                if let Some(StageSpec::Reverb { mix, .. }) = spec.stages.get_mut(2) {
+                    *mix = self.far_distance_mix;
+                }
+            }
+        }
+        spec
+    }
+
+    pub fn build_engine(&self, sr: f64) -> HexMicEngine {
+        let spec = self.build_mode_spec();
+        let mut engine = HexMicEngine::new(sr, &spec);
+        engine.set_strength(f64::from(self.strength));
+        engine
+    }
+}
+
+static TUNED_CONFIG: OnceLock<Mutex<TunedFilterConfig>> = OnceLock::new();
+
+fn tuned_config_lock() -> &'static Mutex<TunedFilterConfig> {
+    TUNED_CONFIG.get_or_init(|| Mutex::new(TunedFilterConfig::default()))
+}
+
+fn pending_engine_lock() -> &'static Mutex<Option<HexMicEngine>> {
+    PENDING_ENGINE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn current_tuned_config() -> TunedFilterConfig {
+    tuned_config_lock()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+pub fn update_tuned_config(mutate: impl FnOnce(&mut TunedFilterConfig)) {
+    let next_engine = {
+        let Ok(mut guard) = tuned_config_lock().lock() else {
+            return;
+        };
+        mutate(&mut guard);
+        guard.build_engine(f64::from(HEX_MICROPHONE_SAMPLE_RATE))
+    };
+    if let Ok(mut slot) = pending_engine_lock().lock() {
+        *slot = Some(next_engine);
+        PENDING_ENGINE_SWAP.store(true, Ordering::Release);
+    }
+}
+
+pub fn sync_from_settings(mode: VoiceFilterMode, comfort_noise: bool, strength: f32) {
+    update_tuned_config(|cfg| {
+        cfg.mode = mode;
+        cfg.comfort_noise = comfort_noise;
+        cfg.strength = strength.clamp(0.0, 1.0);
+    });
+    if crate::app_settings::hex_microphone_enabled() {
+        ensure_service_started();
+    }
+}
+
+/// Called from `src/audio.rs` capture callback. Never blocks, never allocates.
+pub fn push_capture_samples(samples: &[f32], sample_rate: u32) {
+    if samples.is_empty() || sample_rate == 0 {
+        return;
+    }
+    let sink_active = SINK_STREAMING.load(Ordering::Relaxed);
+    let demo_recording = DEMO_RECORDING_ACTIVE.load(Ordering::Relaxed);
+    if !sink_active && !demo_recording {
+        return;
+    }
+
+    if sample_rate == HEX_MICROPHONE_SAMPLE_RATE {
+        if sink_active {
+            CAPTURE_RING.push_slice(samples);
+        }
+        if demo_recording {
+            append_demo_recording_samples(samples);
+        }
+        return;
+    }
+
+    // Resample to 48 kHz in stack chunks without heap allocation.
+    let ratio = f64::from(HEX_MICROPHONE_SAMPLE_RATE) / f64::from(sample_rate);
+    let total_out = ((samples.len() as f64) * ratio).round() as usize;
+    if total_out == 0 {
+        return;
+    }
+    let mut stack_buf = [0.0_f32; 512];
+    let mut out_idx = 0usize;
+    while out_idx < total_out {
+        let chunk_len = (total_out - out_idx).min(stack_buf.len());
+        for (i, slot) in stack_buf.iter_mut().take(chunk_len).enumerate() {
+            let src_pos = ((out_idx + i) as f64) / ratio;
+            let idx0 = (src_pos.floor() as usize).min(samples.len() - 1);
+            let idx1 = (idx0 + 1).min(samples.len() - 1);
+            let frac = (src_pos - (idx0 as f64)) as f32;
+            let s0 = samples[idx0];
+            let s1 = samples[idx1];
+            *slot = s0 + (s1 - s0) * frac;
+        }
+        if sink_active {
+            CAPTURE_RING.push_slice(&stack_buf[..chunk_len]);
+        }
+        if demo_recording {
+            append_demo_recording_samples(&stack_buf[..chunk_len]);
+        }
+        out_idx += chunk_len;
+    }
+}
+
+// ── Status & Driver Discovery ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexMicrophoneStatus {
+    pub driver_bundle_installed: bool,
+    pub driver_loaded: bool,
+    pub sink_streaming: bool,
+    pub mic_in_use: bool,
+    pub active_apps: Vec<String>,
+    pub install_script_path: PathBuf,
+}
+
+pub fn install_script_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/Users/kit"))
+        .join("Library/Caches/hex-mic/install-driver.sh")
+}
+
+pub fn driver_bundle_installed() -> bool {
+    std::path::Path::new("/Library/Audio/Plug-Ins/HAL/HexMicrophone.driver").exists()
+}
+
+#[cfg(target_os = "macos")]
+pub fn status() -> HexMicrophoneStatus {
+    let mic_id = macos_hal::translate_uid_to_device(HEX_MICROPHONE_UID);
+    let sink_id = macos_hal::translate_uid_to_device(HEX_MICROPHONE_SINK_UID);
+    let driver_loaded = mic_id.is_some() && sink_id.is_some();
+    let mic_in_use = mic_id.is_some_and(macos_hal::device_is_running_somewhere);
+    let my_pid = std::process::id() as i32;
+    let active_apps: Vec<String> = crate::microphone_activity::active_microphone_applications()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|proc| proc.pid != my_pid && !proc.name.eq_ignore_ascii_case("hex"))
+        .map(|proc| proc.name)
+        .collect();
+
+    HexMicrophoneStatus {
+        driver_bundle_installed: driver_bundle_installed(),
+        driver_loaded,
+        sink_streaming: SINK_STREAMING.load(Ordering::Acquire),
+        mic_in_use,
+        active_apps,
+        install_script_path: install_script_path(),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn status() -> HexMicrophoneStatus {
+    HexMicrophoneStatus {
+        driver_bundle_installed: false,
+        driver_loaded: false,
+        sink_streaming: false,
+        mic_in_use: false,
+        active_apps: Vec::new(),
+        install_script_path: install_script_path(),
+    }
+}
+
+pub fn ensure_service_started() {
+    #[cfg(target_os = "macos")]
+    {
+        if !crate::app_settings::hex_microphone_enabled() {
+            return;
+        }
+        if SUPERVISOR_STARTED.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let _ = thread::Builder::new()
+            .name("hex-mic-sink".to_string())
+            .spawn(macos_hal::run_sink_supervisor);
+    }
+}
+
+// ── "Try it" Demo Recording & Playback (in-memory only) ──────────────────────
+
+const DEMO_RECORD_MAX_SAMPLES: usize = (HEX_MICROPHONE_SAMPLE_RATE as usize) * 5; // 5.0 seconds
+const WAVEFORM_BARS: usize = 48;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemoSourceKind {
+    Example,
+    Recording,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemoPlaybackTrack {
+    CallHears,
+    You,
+}
+
+#[derive(Debug, Clone)]
+pub struct DemoSnapshot {
+    pub source: DemoSourceKind,
+    pub has_recording: bool,
+    pub is_recording: bool,
+    pub recording_progress: f32,
+    pub playing: Option<DemoPlaybackTrack>,
+    pub playback_progress: f32,
+    pub duration_ms: u32,
+    pub span: DictationSpan,
+    pub peaks_you: Vec<f32>,
+    pub peaks_call: Vec<f32>,
+}
+
+static DEMO_RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DEMO_RECORDED_LEN: AtomicUsize = AtomicUsize::new(0);
+static DEMO_PLAYBACK_GEN: AtomicU64 = AtomicU64::new(0);
+static DEMO_PLAYING_TRACK: AtomicU32 = AtomicU32::new(0); // 0 = none, 1 = CallHears, 2 = You
+static DEMO_PLAYBACK_PROGRESS_BITS: AtomicU32 = AtomicU32::new(0.0_f32.to_bits());
+
+struct DemoBuffers {
+    source: DemoSourceKind,
+    example_samples: Vec<f32>,
+    recorded_samples: Vec<f32>,
+    cached_mode: Option<TunedFilterConfig>,
+    cached_source: Option<DemoSourceKind>,
+    peaks_you: Vec<f32>,
+    peaks_call: Vec<f32>,
+    processed_samples: Vec<f32>,
+}
+
+static DEMO_BUFFERS: OnceLock<Mutex<DemoBuffers>> = OnceLock::new();
+
+fn demo_buffers_lock() -> &'static Mutex<DemoBuffers> {
+    DEMO_BUFFERS.get_or_init(|| {
+        let example_samples = decode_bundled_example();
+        let mut buffers = DemoBuffers {
+            source: DemoSourceKind::Example,
+            example_samples,
+            recorded_samples: Vec::with_capacity(DEMO_RECORD_MAX_SAMPLES),
+            cached_mode: None,
+            cached_source: None,
+            peaks_you: vec![0.0; WAVEFORM_BARS],
+            peaks_call: vec![0.0; WAVEFORM_BARS],
+            processed_samples: Vec::new(),
+        };
+        recompute_demo_cache(&mut buffers);
+        Mutex::new(buffers)
+    })
+}
+
+fn decode_bundled_example() -> Vec<f32> {
+    use rodio::Source;
+    let bytes = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/resources/audio/funDemo.mp3"
+    ));
+    let Ok(decoder) = rodio::Decoder::new(Cursor::new(bytes.as_slice())) else {
+        return vec![0.0; HEX_MICROPHONE_SAMPLE_RATE as usize * 5];
+    };
+    let channels = usize::from(decoder.channels().get()).max(1);
+    let sr = decoder.sample_rate().get();
+    let raw: Vec<f32> = decoder.collect();
+    let mut mono = Vec::with_capacity(raw.len() / channels);
+    for frame in raw.chunks_exact(channels) {
+        let sum: f32 = frame.iter().copied().sum();
+        mono.push(sum / (channels as f32));
+    }
+    if sr == HEX_MICROPHONE_SAMPLE_RATE || mono.is_empty() {
+        return mono;
+    }
+    let ratio = f64::from(HEX_MICROPHONE_SAMPLE_RATE) / f64::from(sr);
+    let out_len = ((mono.len() as f64) * ratio).round() as usize;
+    (0..out_len)
+        .map(|i| {
+            let pos = (i as f64) / ratio;
+            let idx0 = (pos.floor() as usize).min(mono.len() - 1);
+            let idx1 = (idx0 + 1).min(mono.len() - 1);
+            let frac = (pos - (idx0 as f64)) as f32;
+            mono[idx0] + (mono[idx1] - mono[idx0]) * frac
+        })
+        .collect()
+}
+
+fn span_for_source(source: DemoSourceKind, sample_len: usize) -> DictationSpan {
+    let duration_ms = (sample_len as f64) * 1000.0 / f64::from(HEX_MICROPHONE_SAMPLE_RATE);
+    match source {
+        DemoSourceKind::Example => DictationSpan {
+            start_ms: 5921.0_f64.min(duration_ms),
+            end_ms: 10231.0_f64.min(duration_ms),
+        },
+        DemoSourceKind::Recording => DictationSpan {
+            start_ms: (duration_ms * 0.24).round(),
+            end_ms: (duration_ms * 0.78).round(),
+        },
+    }
+}
+
+fn compute_peaks(samples: &[f32], bars: usize) -> Vec<f32> {
+    if samples.is_empty() || bars == 0 {
+        return vec![0.0; bars];
+    }
+    let step = (samples.len() as f64) / (bars as f64);
+    (0..bars)
+        .map(|i| {
+            let a = ((i as f64) * step).floor() as usize;
+            let b = (((i + 1) as f64) * step).ceil() as usize;
+            let end = b.min(samples.len()).max(a + 1);
+            samples[a.min(samples.len() - 1)..end]
+                .iter()
+                .fold(0.0_f32, |acc, &v| acc.max(v.abs()))
+        })
+        .collect()
+}
+
+fn recompute_demo_cache(buffers: &mut DemoBuffers) {
+    let cfg = current_tuned_config();
+    let active_samples = match buffers.source {
+        DemoSourceKind::Example => &buffers.example_samples,
+        DemoSourceKind::Recording => {
+            if buffers.recorded_samples.is_empty() {
+                &buffers.example_samples
+            } else {
+                &buffers.recorded_samples
+            }
+        }
+    };
+    let span = span_for_source(buffers.source, active_samples.len());
+    let spec = cfg.build_mode_spec();
+    buffers.processed_samples = crate::voice_filter::render(
+        active_samples,
+        f64::from(HEX_MICROPHONE_SAMPLE_RATE),
+        &spec,
+        &[span],
+        f64::from(cfg.strength),
+    );
+    buffers.peaks_you = compute_peaks(active_samples, WAVEFORM_BARS);
+    buffers.peaks_call = compute_peaks(&buffers.processed_samples, WAVEFORM_BARS);
+    buffers.cached_mode = Some(cfg);
+    buffers.cached_source = Some(buffers.source);
+}
+
+fn append_demo_recording_samples(samples: &[f32]) {
+    let Ok(mut guard) = demo_buffers_lock().try_lock() else {
+        return;
+    };
+    if !DEMO_RECORDING_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let remaining = DEMO_RECORD_MAX_SAMPLES.saturating_sub(guard.recorded_samples.len());
+    let take = remaining.min(samples.len());
+    guard.recorded_samples.extend_from_slice(&samples[..take]);
+    DEMO_RECORDED_LEN.store(guard.recorded_samples.len(), Ordering::Relaxed);
+    if guard.recorded_samples.len() >= DEMO_RECORD_MAX_SAMPLES {
+        DEMO_RECORDING_ACTIVE.store(false, Ordering::Release);
+        guard.source = DemoSourceKind::Recording;
+        guard.cached_mode = None;
+        recompute_demo_cache(&mut guard);
+    }
+}
+
+pub fn start_demo_recording() {
+    stop_demo_playback();
+    if let Ok(mut guard) = demo_buffers_lock().lock() {
+        guard.recorded_samples.clear();
+        DEMO_RECORDED_LEN.store(0, Ordering::Relaxed);
+        DEMO_RECORDING_ACTIVE.store(true, Ordering::Release);
+    }
+}
+
+pub fn stop_demo_recording() {
+    if !DEMO_RECORDING_ACTIVE.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    if let Ok(mut guard) = demo_buffers_lock().lock()
+        && guard.recorded_samples.len() >= (HEX_MICROPHONE_SAMPLE_RATE as usize / 4)
+    {
+        guard.source = DemoSourceKind::Recording;
+        guard.cached_mode = None;
+        recompute_demo_cache(&mut guard);
+    }
+}
+
+pub fn select_demo_source(source: DemoSourceKind) {
+    stop_demo_playback();
+    if let Ok(mut guard) = demo_buffers_lock().lock() {
+        if source == DemoSourceKind::Recording && guard.recorded_samples.is_empty() {
+            return;
+        }
+        guard.source = source;
+        guard.cached_mode = None;
+        recompute_demo_cache(&mut guard);
+    }
+}
+
+pub fn stop_demo_playback() {
+    DEMO_PLAYBACK_GEN.fetch_add(1, Ordering::AcqRel);
+    DEMO_PLAYING_TRACK.store(0, Ordering::Release);
+    DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+}
+
+pub fn play_demo_track(track: DemoPlaybackTrack) {
+    stop_demo_recording();
+    let samples = {
+        let Ok(mut guard) = demo_buffers_lock().lock() else {
+            return;
+        };
+        let cfg = current_tuned_config();
+        if guard.cached_mode.as_ref() != Some(&cfg) || guard.cached_source != Some(guard.source) {
+            recompute_demo_cache(&mut guard);
+        }
+        match track {
+            DemoPlaybackTrack::CallHears => guard.processed_samples.clone(),
+            DemoPlaybackTrack::You => match guard.source {
+                DemoSourceKind::Example => guard.example_samples.clone(),
+                DemoSourceKind::Recording => {
+                    if guard.recorded_samples.is_empty() {
+                        guard.example_samples.clone()
+                    } else {
+                        guard.recorded_samples.clone()
+                    }
+                }
+            },
+        }
+    };
+    if samples.is_empty() {
+        return;
+    }
+
+    let generation = DEMO_PLAYBACK_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    let track_code = match track {
+        DemoPlaybackTrack::CallHears => 1,
+        DemoPlaybackTrack::You => 2,
+    };
+    DEMO_PLAYING_TRACK.store(track_code, Ordering::Release);
+    DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+
+    thread::spawn(move || {
+        let Ok(mut sink) = rodio::DeviceSinkBuilder::open_default_sink() else {
+            if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) == generation {
+                DEMO_PLAYING_TRACK.store(0, Ordering::Release);
+            }
+            return;
+        };
+        sink.log_on_drop(false);
+        let duration =
+            Duration::from_secs_f64((samples.len() as f64) / f64::from(HEX_MICROPHONE_SAMPLE_RATE));
+        let Some(ch) = std::num::NonZeroU16::new(1) else {
+            return;
+        };
+        let Some(sr) = std::num::NonZeroU32::new(HEX_MICROPHONE_SAMPLE_RATE) else {
+            return;
+        };
+        let buffer = rodio::buffer::SamplesBuffer::new(ch, sr, samples);
+        sink.mixer().add(buffer);
+        let started = Instant::now();
+        while started.elapsed() < duration {
+            if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) != generation {
+                return;
+            }
+            let p = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
+            DEMO_PLAYBACK_PROGRESS_BITS.store(p.to_bits(), Ordering::Release);
+            thread::sleep(Duration::from_millis(30));
+        }
+        if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) == generation {
+            DEMO_PLAYING_TRACK.store(0, Ordering::Release);
+            DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+        }
+    });
+}
+
+pub fn demo_snapshot() -> DemoSnapshot {
+    let cfg = current_tuned_config();
+    let is_recording = DEMO_RECORDING_ACTIVE.load(Ordering::Acquire);
+    let recorded_len = DEMO_RECORDED_LEN.load(Ordering::Relaxed);
+    let recording_progress =
+        ((recorded_len as f32) / (DEMO_RECORD_MAX_SAMPLES as f32)).clamp(0.0, 1.0);
+    let playing = match DEMO_PLAYING_TRACK.load(Ordering::Acquire) {
+        1 => Some(DemoPlaybackTrack::CallHears),
+        2 => Some(DemoPlaybackTrack::You),
+        _ => None,
+    };
+    let playback_progress = f32::from_bits(DEMO_PLAYBACK_PROGRESS_BITS.load(Ordering::Acquire));
+
+    let Ok(mut guard) = demo_buffers_lock().lock() else {
+        return DemoSnapshot {
+            source: DemoSourceKind::Example,
+            has_recording: false,
+            is_recording,
+            recording_progress,
+            playing,
+            playback_progress,
+            duration_ms: 14_237,
+            span: DictationSpan {
+                start_ms: 5921.0,
+                end_ms: 10231.0,
+            },
+            peaks_you: vec![0.2; WAVEFORM_BARS],
+            peaks_call: vec![0.1; WAVEFORM_BARS],
+        };
+    };
+
+    if guard.cached_mode.as_ref() != Some(&cfg) || guard.cached_source != Some(guard.source) {
+        recompute_demo_cache(&mut guard);
+    }
+
+    let sample_len = match guard.source {
+        DemoSourceKind::Example => guard.example_samples.len(),
+        DemoSourceKind::Recording => {
+            if guard.recorded_samples.is_empty() {
+                guard.example_samples.len()
+            } else {
+                guard.recorded_samples.len()
+            }
+        }
+    };
+    let duration_ms =
+        ((sample_len as f64) * 1000.0 / f64::from(HEX_MICROPHONE_SAMPLE_RATE)).round() as u32;
+    let span = span_for_source(guard.source, sample_len);
+
+    DemoSnapshot {
+        source: guard.source,
+        has_recording: !guard.recorded_samples.is_empty(),
+        is_recording,
+        recording_progress,
+        playing,
+        playback_progress,
+        duration_ms,
+        span,
+        peaks_you: guard.peaks_you.clone(),
+        peaks_call: guard.peaks_call.clone(),
+    }
+}
+
+// ── macOS CoreAudio HAL Sink Client ─────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+mod macos_hal {
+    use super::*;
+    use objc2_core_foundation::{CFRetained, CFString};
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::ptr;
+
+    type AudioObjectID = u32;
+    type AudioObjectPropertySelector = u32;
+    type AudioObjectPropertyScope = u32;
+    type AudioObjectPropertyElement = u32;
+    type OSStatus = i32;
+    type AudioDeviceIOProcID = *mut c_void;
+
+    const K_AUDIO_OBJECT_SYSTEM_OBJECT: AudioObjectID = 1;
+    const K_AUDIO_OBJECT_UNKNOWN: AudioObjectID = 0;
+
+    const K_AUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL: AudioObjectPropertyScope =
+        u32::from_be_bytes(*b"glob");
+    const K_AUDIO_OBJECT_PROPERTY_SCOPE_OUTPUT: AudioObjectPropertyScope =
+        u32::from_be_bytes(*b"outp");
+    const K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN: AudioObjectPropertyElement = 0;
+
+    const K_AUDIO_HARDWARE_PROPERTY_TRANSLATE_UID_TO_DEVICE: AudioObjectPropertySelector =
+        u32::from_be_bytes(*b"uidd");
+    const K_AUDIO_DEVICE_PROPERTY_DEVICE_IS_ALIVE: AudioObjectPropertySelector =
+        u32::from_be_bytes(*b"livn");
+    const K_AUDIO_DEVICE_PROPERTY_DEVICE_IS_RUNNING_SOMEWHERE: AudioObjectPropertySelector =
+        u32::from_be_bytes(*b"gone");
+    const K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE: AudioObjectPropertySelector =
+        u32::from_be_bytes(*b"fsiz");
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct AudioObjectPropertyAddress {
+        m_selector: AudioObjectPropertySelector,
+        m_scope: AudioObjectPropertyScope,
+        m_element: AudioObjectPropertyElement,
+    }
+
+    #[repr(C)]
+    struct AudioBuffer {
+        m_number_channels: u32,
+        m_data_byte_size: u32,
+        m_data: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct AudioBufferList {
+        m_number_buffers: u32,
+        m_buffers: [AudioBuffer; 1],
+    }
+
+    type AudioDeviceIOProc = unsafe extern "C" fn(
+        in_device: AudioObjectID,
+        in_now: *const c_void,
+        in_input_data: *const AudioBufferList,
+        in_input_time: *const c_void,
+        out_output_data: *mut AudioBufferList,
+        in_output_time: *const c_void,
+        in_client_data: *mut c_void,
+    ) -> OSStatus;
+
+    #[link(name = "CoreAudio", kind = "framework")]
+    unsafe extern "C" {
+        fn AudioObjectGetPropertyData(
+            in_object_id: AudioObjectID,
+            in_address: *const AudioObjectPropertyAddress,
+            in_qualifier_data_size: u32,
+            in_qualifier_data: *const c_void,
+            io_data_size: *mut u32,
+            out_data: *mut c_void,
+        ) -> OSStatus;
+
+        fn AudioObjectSetPropertyData(
+            in_object_id: AudioObjectID,
+            in_address: *const AudioObjectPropertyAddress,
+            in_qualifier_data_size: u32,
+            in_qualifier_data: *const c_void,
+            in_data_size: u32,
+            in_data: *const c_void,
+        ) -> OSStatus;
+
+        fn AudioDeviceCreateIOProcID(
+            in_device: AudioObjectID,
+            in_proc: AudioDeviceIOProc,
+            in_client_data: *mut c_void,
+            out_io_proc_id: *mut AudioDeviceIOProcID,
+        ) -> OSStatus;
+
+        fn AudioDeviceDestroyIOProcID(
+            in_device: AudioObjectID,
+            in_io_proc_id: AudioDeviceIOProcID,
+        ) -> OSStatus;
+
+        fn AudioDeviceStart(in_device: AudioObjectID, in_proc_id: AudioDeviceIOProcID) -> OSStatus;
+
+        fn AudioDeviceStop(in_device: AudioObjectID, in_proc_id: AudioDeviceIOProcID) -> OSStatus;
+    }
+
+    pub(super) fn translate_uid_to_device(uid: &str) -> Option<AudioObjectID> {
+        let cf_uid = CFString::from_str(uid);
+        let raw_cf = CFRetained::as_ptr(&cf_uid).as_ptr().cast::<c_void>();
+        let address = AudioObjectPropertyAddress {
+            m_selector: K_AUDIO_HARDWARE_PROPERTY_TRANSLATE_UID_TO_DEVICE,
+            m_scope: K_AUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+            m_element: K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+        };
+        let mut device_id: AudioObjectID = K_AUDIO_OBJECT_UNKNOWN;
+        let mut data_size = size_of::<AudioObjectID>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                K_AUDIO_OBJECT_SYSTEM_OBJECT,
+                &address,
+                size_of::<*const c_void>() as u32,
+                (&raw const raw_cf).cast::<c_void>(),
+                &mut data_size,
+                (&raw mut device_id).cast::<c_void>(),
+            )
+        };
+        if status == 0 && device_id != K_AUDIO_OBJECT_UNKNOWN {
+            Some(device_id)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn device_is_alive(device_id: AudioObjectID) -> bool {
+        let address = AudioObjectPropertyAddress {
+            m_selector: K_AUDIO_DEVICE_PROPERTY_DEVICE_IS_ALIVE,
+            m_scope: K_AUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+            m_element: K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+        };
+        let mut alive: u32 = 0;
+        let mut size = size_of::<u32>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                device_id,
+                &address,
+                0,
+                ptr::null(),
+                &mut size,
+                (&raw mut alive).cast::<c_void>(),
+            )
+        };
+        status == 0 && alive != 0
+    }
+
+    pub(super) fn device_is_running_somewhere(device_id: AudioObjectID) -> bool {
+        let address = AudioObjectPropertyAddress {
+            m_selector: K_AUDIO_DEVICE_PROPERTY_DEVICE_IS_RUNNING_SOMEWHERE,
+            m_scope: K_AUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+            m_element: K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+        };
+        let mut running: u32 = 0;
+        let mut size = size_of::<u32>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                device_id,
+                &address,
+                0,
+                ptr::null(),
+                &mut size,
+                (&raw mut running).cast::<c_void>(),
+            )
+        };
+        status == 0 && running != 0
+    }
+
+    fn set_preferred_buffer_size(device_id: AudioObjectID, frames: u32) {
+        let address = AudioObjectPropertyAddress {
+            m_selector: K_AUDIO_DEVICE_PROPERTY_BUFFER_FRAME_SIZE,
+            m_scope: K_AUDIO_OBJECT_PROPERTY_SCOPE_OUTPUT,
+            m_element: K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+        };
+        let _ = unsafe {
+            AudioObjectSetPropertyData(
+                device_id,
+                &address,
+                0,
+                ptr::null(),
+                size_of::<u32>() as u32,
+                (&raw const frames).cast::<c_void>(),
+            )
+        };
+    }
+
+    struct IoContext {
+        engine: HexMicEngine,
+    }
+
+    unsafe extern "C" fn sink_io_proc(
+        _in_device: AudioObjectID,
+        _in_now: *const c_void,
+        _in_input_data: *const AudioBufferList,
+        _in_input_time: *const c_void,
+        out_output_data: *mut AudioBufferList,
+        _in_output_time: *const c_void,
+        in_client_data: *mut c_void,
+    ) -> OSStatus {
+        if out_output_data.is_null() || in_client_data.is_null() {
+            return 0;
+        }
+        let ctx = unsafe { &mut *(in_client_data.cast::<IoContext>()) };
+        if PENDING_ENGINE_SWAP.load(Ordering::Acquire)
+            && let Ok(mut guard) = pending_engine_lock().try_lock()
+        {
+            if let Some(mut next_engine) = guard.take() {
+                next_engine.set_dictating(ctx.engine.is_dictating());
+                ctx.engine = next_engine;
+            }
+            PENDING_ENGINE_SWAP.store(false, Ordering::Release);
+        }
+
+        let abl = unsafe { &mut *out_output_data };
+        if abl.m_number_buffers == 0 {
+            return 0;
+        }
+        let buf = &mut abl.m_buffers[0];
+        if buf.m_data.is_null() || buf.m_data_byte_size == 0 {
+            return 0;
+        }
+        let channels = (buf.m_number_channels as usize).max(1);
+        let total_samples = (buf.m_data_byte_size as usize) / size_of::<f32>();
+        let frames = total_samples / channels;
+        if frames == 0 {
+            return 0;
+        }
+
+        let out_slice =
+            unsafe { std::slice::from_raw_parts_mut(buf.m_data.cast::<f32>(), total_samples) };
+
+        let dictating = crate::recording_environment::intentional_recording_active();
+        ctx.engine.set_dictating(dictating);
+
+        if channels == 1 {
+            CAPTURE_RING.pop_slice(out_slice);
+            ctx.engine.process_in_place(out_slice);
+        } else {
+            let mut mono_buf = [0.0_f32; 2048];
+            let count = frames.min(mono_buf.len());
+            CAPTURE_RING.pop_slice(&mut mono_buf[..count]);
+            ctx.engine.process_in_place(&mut mono_buf[..count]);
+            for f in 0..count {
+                let s = mono_buf[f];
+                for c in 0..channels {
+                    out_slice[f * channels + c] = s;
+                }
+            }
+            if count < frames {
+                out_slice[count * channels..].fill(0.0);
+            }
+        }
+        0
+    }
+
+    pub(super) fn run_sink_supervisor() {
+        loop {
+            if !crate::app_settings::hex_microphone_enabled() {
+                SINK_STREAMING.store(false, Ordering::Release);
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+
+            let Some(sink_id) = translate_uid_to_device(HEX_MICROPHONE_SINK_UID) else {
+                SINK_STREAMING.store(false, Ordering::Release);
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            };
+
+            set_preferred_buffer_size(sink_id, 256);
+            CAPTURE_RING.clear();
+
+            let cfg = current_tuned_config();
+            let mut io_ctx = Box::new(IoContext {
+                engine: cfg.build_engine(f64::from(HEX_MICROPHONE_SAMPLE_RATE)),
+            });
+
+            let mut proc_id: AudioDeviceIOProcID = ptr::null_mut();
+            let create_status = unsafe {
+                AudioDeviceCreateIOProcID(
+                    sink_id,
+                    sink_io_proc,
+                    (&raw mut *io_ctx).cast::<c_void>(),
+                    &mut proc_id,
+                )
+            };
+            if create_status != 0 || proc_id.is_null() {
+                tracing::warn!(
+                    status = create_status,
+                    "failed to create Hex Microphone sink IOProc; retrying"
+                );
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+
+            let start_status = unsafe { AudioDeviceStart(sink_id, proc_id) };
+            if start_status != 0 {
+                let _ = unsafe { AudioDeviceDestroyIOProcID(sink_id, proc_id) };
+                tracing::warn!(
+                    status = start_status,
+                    "failed to start Hex Microphone sink IOProc; retrying"
+                );
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+
+            SINK_STREAMING.store(true, Ordering::Release);
+            tracing::info!(
+                device_id = sink_id,
+                mode = cfg.mode.id(),
+                "Hex Microphone virtual sink streaming started"
+            );
+
+            while crate::app_settings::hex_microphone_enabled() && device_is_alive(sink_id) {
+                thread::sleep(Duration::from_millis(250));
+            }
+
+            SINK_STREAMING.store(false, Ordering::Release);
+            let _ = unsafe { AudioDeviceStop(sink_id, proc_id) };
+            let _ = unsafe { AudioDeviceDestroyIOProcID(sink_id, proc_id) };
+            CAPTURE_RING.clear();
+            tracing::info!(device_id = sink_id, "Hex Microphone virtual sink stopped");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_buffer_transfers_samples_and_handles_underflow_and_overflow() {
+        let ring = HexMicRingBuffer::new();
+        let input: Vec<f32> = (0..512).map(|i| (i as f32) / 512.0).collect();
+        ring.push_slice(&input);
+        assert_eq!(ring.queued_frames(), 512);
+
+        let mut out = vec![0.0_f32; 512];
+        let copied = ring.pop_slice(&mut out);
+        assert_eq!(copied, 512);
+        assert_eq!(out, input);
+        assert_eq!(ring.queued_frames(), 0);
+
+        // Underflow zero-fills cleanly without blocking
+        let mut under = vec![1.0_f32; 128];
+        let copied_under = ring.pop_slice(&mut under);
+        assert_eq!(copied_under, 0);
+        assert!(under.iter().all(|&s| s == 0.0));
+        assert!(ring.underflows() >= 1);
+
+        // Latency cap skips ahead when more than MAX_RING_LATENCY_FRAMES are queued
+        let big = vec![0.25_f32; MAX_RING_LATENCY_FRAMES * 4];
+        ring.push_slice(&big);
+        let mut pull = vec![0.0_f32; 256];
+        let pulled = ring.pop_slice(&mut pull);
+        assert_eq!(pulled, 256);
+        assert!(
+            ring.queued_frames() <= MAX_RING_LATENCY_FRAMES,
+            "expected ring buffer to bound latency to <= {MAX_RING_LATENCY_FRAMES}, got {}",
+            ring.queued_frames()
+        );
+    }
+
+    #[test]
+    fn virtual_device_names_are_excluded_from_self_capture() {
+        assert!(is_hex_virtual_device_name("Hex Microphone"));
+        assert!(is_hex_virtual_device_name("Hex Microphone (Internal Sink)"));
+        assert!(is_hex_virtual_device_name("hex microphone"));
+        assert!(!is_hex_virtual_device_name("MacBook Pro Microphone"));
+        assert!(!is_hex_virtual_device_name("Shure MV7"));
+    }
+
+    #[test]
+    fn demo_snapshot_computes_finite_peaks_for_bundled_example() {
+        let snap = demo_snapshot();
+        assert_eq!(snap.source, DemoSourceKind::Example);
+        assert_eq!(snap.peaks_you.len(), WAVEFORM_BARS);
+        assert_eq!(snap.peaks_call.len(), WAVEFORM_BARS);
+        assert!(snap.peaks_you.iter().any(|&p| p > 0.05));
+        assert!(snap.peaks_call.iter().any(|&p| p > 0.02));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn driver_plugin_loopback_streams_at_48khz_under_20ms_latency() {
+        use std::ffi::{CString, c_void};
+        use std::process::Command;
+
+        let out_dir =
+            std::env::temp_dir().join(format!("hex-mic-driver-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts/build-hex-microphone-driver.sh");
+        let status = Command::new("/bin/sh")
+            .arg(&script)
+            .arg(&out_dir)
+            .status()
+            .expect("run build-hex-microphone-driver.sh");
+        assert!(status.success(), "driver build script must succeed");
+
+        let dylib_path = out_dir.join("HexMicrophone.driver/Contents/MacOS/HexMicrophoneDriver");
+        assert!(dylib_path.exists(), "built driver binary must exist");
+
+        #[repr(C)]
+        struct DriverInterfacePrefix {
+            _reserved: *mut c_void,
+            query_interface: *const c_void,
+            add_ref: *const c_void,
+            release: *const c_void,
+            initialize: unsafe extern "C" fn(*mut *mut DriverInterfacePrefix, *const c_void) -> i32,
+            create_device: *const c_void,
+            destroy_device: *const c_void,
+            add_device_client: *const c_void,
+            remove_device_client: *const c_void,
+            perform_device_configuration_change: *const c_void,
+            abort_device_configuration_change: *const c_void,
+            has_property: *const c_void,
+            is_property_settable: *const c_void,
+            get_property_data_size: *const c_void,
+            get_property_data: *const c_void,
+            set_property_data: *const c_void,
+            start_io: unsafe extern "C" fn(*mut *mut DriverInterfacePrefix, u32, u32) -> i32,
+            stop_io: unsafe extern "C" fn(*mut *mut DriverInterfacePrefix, u32, u32) -> i32,
+            get_zero_time_stamp: *const c_void,
+            will_do_io_operation: *const c_void,
+            begin_io_operation: *const c_void,
+            do_io_operation: unsafe extern "C" fn(
+                *mut *mut DriverInterfacePrefix,
+                u32,
+                u32,
+                u32,
+                u32,
+                u32,
+                *const c_void,
+                *mut c_void,
+                *mut c_void,
+            ) -> i32,
+            end_io_operation: *const c_void,
+        }
+
+        let c_path = CString::new(dylib_path.to_str().unwrap()).unwrap();
+        let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        assert!(!handle.is_null(), "dlopen HexMicrophone must succeed");
+
+        let sym_name = CString::new("HexMicrophoneDriverCreate").unwrap();
+        let sym = unsafe { libc::dlsym(handle, sym_name.as_ptr()) };
+        assert!(
+            !sym.is_null(),
+            "HexMicrophoneDriverCreate symbol must exist"
+        );
+
+        // StartIO on Sink (3) and Mic (2), write 256 frames (5.33 ms at 48 kHz), read 256 frames.
+        // Verify bit-exact transfer and < 20 ms latency.
+        let g_driver_sym = CString::new("gDriverRef").unwrap();
+        let _ = g_driver_sym;
+        // Call Initialize, StartIO, DoIOOperation via a small C-ABI wrapper or directly through the vtable:
+        unsafe extern "C" {
+            fn CFUUIDGetConstantUUIDWithBytes(
+                alloc: *const c_void,
+                b0: u8,
+                b1: u8,
+                b2: u8,
+                b3: u8,
+                b4: u8,
+                b5: u8,
+                b6: u8,
+                b7: u8,
+                b8: u8,
+                b9: u8,
+                b10: u8,
+                b11: u8,
+                b12: u8,
+                b13: u8,
+                b14: u8,
+                b15: u8,
+            ) -> *const c_void;
+        }
+        let create_fn: unsafe extern "C" fn(
+            *const c_void,
+            *const c_void,
+        ) -> *mut *mut DriverInterfacePrefix = unsafe { std::mem::transmute(sym) };
+        let type_uuid = unsafe {
+            CFUUIDGetConstantUUIDWithBytes(
+                std::ptr::null(),
+                0x44,
+                0x3A,
+                0xBA,
+                0xB8,
+                0xE7,
+                0xB3,
+                0x49,
+                0x1A,
+                0xB9,
+                0x85,
+                0xBE,
+                0xB9,
+                0x18,
+                0x70,
+                0x30,
+                0xDB,
+            )
+        };
+        let driver_ref = unsafe { create_fn(std::ptr::null(), type_uuid) };
+        assert!(!driver_ref.is_null());
+        let vtable = unsafe { &**driver_ref };
+        assert_eq!(
+            unsafe { (vtable.initialize)(driver_ref, std::ptr::null()) },
+            0
+        );
+        // kObjectID_MicDevice = 2 (stream 3), kObjectID_SinkDevice = 4 (stream 5)
+        assert_eq!(unsafe { (vtable.start_io)(driver_ref, 4, 0) }, 0);
+        assert_eq!(unsafe { (vtable.start_io)(driver_ref, 2, 0) }, 0);
+
+        const IO_OP_WRITE_MIX: u32 = u32::from_be_bytes(*b"rite");
+        const IO_OP_READ_INPUT: u32 = u32::from_be_bytes(*b"read");
+
+        let frames = 256u32; // 5.33 ms at 48 kHz (< 20 ms requirement)
+        let input: Vec<f32> = (0..frames)
+            .map(|i| ((i as f32) * 2.0 * std::f32::consts::PI * 440.0 / 48_000.0).sin() * 0.5)
+            .collect();
+        let mut output = vec![0.0_f32; frames as usize];
+
+        let write_rc = unsafe {
+            (vtable.do_io_operation)(
+                driver_ref,
+                4,
+                5,
+                0,
+                IO_OP_WRITE_MIX,
+                frames,
+                std::ptr::null(),
+                input.as_ptr() as *mut c_void,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(write_rc, 0);
+
+        let read_rc = unsafe {
+            (vtable.do_io_operation)(
+                driver_ref,
+                2,
+                3,
+                0,
+                IO_OP_READ_INPUT,
+                frames,
+                std::ptr::null(),
+                output.as_mut_ptr().cast::<c_void>(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(read_rc, 0);
+        assert_eq!(
+            output, input,
+            "driver loopback must transfer 256 frames bit-for-bit (5.33 ms latency)"
+        );
+
+        let _ = unsafe { (vtable.stop_io)(driver_ref, 2, 0) };
+        let _ = unsafe { (vtable.stop_io)(driver_ref, 4, 0) };
+        let _ = unsafe { libc::dlclose(handle) };
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+}

@@ -23,6 +23,7 @@ pub enum DeveloperPane {
     HudLab,
     Commands,
     Meetings,
+    Fun,
     Activity,
 }
 

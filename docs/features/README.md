@@ -512,6 +512,39 @@ actual capture and output remain in [Dictation](dictation.md).
 focus-free offer, menu-bar recording state, rolling transcription, echo
 suppression, and the Markdown copy in the user's transcript folder.
 
+## Experimental: Hex Microphone And Fun
+
+```ts
+HEX_EXPERIMENTAL_MIC=1 or experimental.hex_microphone = true // fun.hex-microphone; macOS
+├── Sidebar -> Fun pane + Settings > Experimental: Hex microphone
+├── Hex Microphone card
+│   ├── Driver status -> Ready / In use by <app> | Driver not installed -> Copy install command
+│   ├── Mode while dictating -> Muffled (default), Muted, Quiet, Normal, Chipmunk, Robot, Walkie, Underwater, Far
+│   ├── Key sliders -> Live mode tuning + Effect strength + Reset
+│   └── Try it -> Example clip OR Record 5s (in-memory only)
+│       ├── Dual waveform -> You vs Call hears with highlighted dictation span
+│       └── Explicit playback -> Play what call hears | Play your voice
+├── Live microphone capture -> Raw audio to Hex transcription (unmodified)
+│   └── Lock-free ring -> 48 kHz virtual sink -> Raised-cosine fade on intentional hold
+└── Offline CLI -> hex dev voice-filter render <in.wav> --mode <m> --dictation <start>-<end> -o <out.wav>
+```
+
+Sources: [voice_filter.rs](../../src/voice_filter.rs),
+[hex_microphone.rs](../../src/hex_microphone.rs),
+[HexMicrophoneDriver.c](../../macos/HexMicrophoneDriver/HexMicrophoneDriver.c),
+and [app_window.rs](../../src/app_window.rs). Checks:
+`muffled_mode_attenuates_high_frequencies_and_preserves_length`,
+`muted_mode_with_comfort_noise_drops_speech_to_room_tone_floor`,
+`all_modes_produce_finite_bounded_samples`,
+`ring_buffer_transfers_samples_and_handles_underflow_and_overflow`,
+`driver_plugin_loopback_streams_at_48khz_under_20ms_latency`, and
+`experimental_fun_pane_appears_only_when_enabled`. Previews:
+`./scripts/capture-preview.sh /tmp/hex-fun.png fun` (with `--fun-driver-missing`
+and `--fun-mode <mode>`) and `./scripts/capture-preview.sh /tmp/hex-settings-mic.png settings --experimental-mic`.
+Proof limit: in-process `dlopen` loopback proves the compiled driver's 48 kHz
+`WriteMix`/`ReadInput` path at 5.33 ms (256 frames), not a live `coreaudiod`
+install or an active Slack/Zoom call.
+
 ## Recover And Maintain
 
 ```ts

@@ -18,6 +18,7 @@ use crate::design_tokens::*;
 pub(crate) enum NavigationIcon {
     Activity,
     Commands,
+    Fun,
     History,
     HudLab,
     Meetings,
@@ -37,6 +38,7 @@ impl NavigationIcon {
             Self::Commands => "command",
             Self::History => "clock",
             Self::Meetings => "calendar",
+            Self::Fun => "wand.and.stars",
             Self::Activity => "chart.bar",
             Self::HudLab => "flask",
         }
@@ -51,6 +53,7 @@ impl NavigationIcon {
             Self::Commands => include_str!("../assets/icons/commands.svg"),
             Self::History => include_str!("../assets/icons/history.svg"),
             Self::Meetings => include_str!("../assets/icons/meetings.svg"),
+            Self::Fun => include_str!("../assets/icons/hud-lab.svg"),
             Self::Activity => include_str!("../assets/icons/activity.svg"),
             Self::HudLab => include_str!("../assets/icons/hud-lab.svg"),
         }

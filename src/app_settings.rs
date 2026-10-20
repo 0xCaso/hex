@@ -17,6 +17,7 @@ static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
 static DOUBLE_TAP_ONLY: AtomicBool = AtomicBool::new(false);
 static SHORTCUT_TOGGLE: AtomicBool = AtomicBool::new(false);
 static MEETINGS_ENABLED: AtomicBool = AtomicBool::new(false);
+static HEX_MICROPHONE_ENABLED: AtomicBool = AtomicBool::new(false);
 static MEETING_NOTES_ENABLED: AtomicBool = AtomicBool::new(true);
 static MEETING_OUTPUT_FOLDER: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
@@ -579,6 +580,39 @@ impl MeetingSettings {
     }
 }
 
+/// Experimental opt-in features hidden by default.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ExperimentalSettings {
+    pub hex_microphone: bool,
+    pub hex_microphone_mode: crate::voice_filter::VoiceFilterMode,
+    pub hex_microphone_comfort_noise: bool,
+    pub hex_microphone_strength: f32,
+}
+
+impl Default for ExperimentalSettings {
+    fn default() -> Self {
+        Self {
+            hex_microphone: false,
+            hex_microphone_mode: crate::voice_filter::VoiceFilterMode::Muffled,
+            hex_microphone_comfort_noise: true,
+            hex_microphone_strength: 1.0,
+        }
+    }
+}
+
+impl ExperimentalSettings {
+    pub fn hex_microphone_available(&self) -> bool {
+        self.hex_microphone || env_hex_experimental_mic()
+    }
+}
+
+pub fn env_hex_experimental_mic() -> bool {
+    std::env::var("HEX_EXPERIMENTAL_MIC")
+        .ok()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
+}
+
 pub fn default_meeting_output_folder() -> PathBuf {
     dirs::document_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
@@ -736,6 +770,8 @@ pub struct AppSettings {
     pub voice_action: VoiceActionSettings,
     pub history_retention: crate::history::HistoryRetention,
     pub meetings: MeetingSettings,
+    #[serde(default)]
+    pub experimental: ExperimentalSettings,
     /// Start listening when Hex opens (Windows and Linux, where the
     /// listener can be off).
     pub enable_on_launch: bool,
@@ -787,6 +823,7 @@ impl Default for AppSettings {
             voice_action: VoiceActionSettings::default(),
             history_retention: crate::history::HistoryRetention::default(),
             meetings: MeetingSettings::default(),
+            experimental: ExperimentalSettings::default(),
             enable_on_launch: true,
             paste_with_shift: false,
             ui_language: None,
@@ -1011,6 +1048,15 @@ impl AppSettings {
             Ordering::Relaxed,
         );
         MEETINGS_ENABLED.store(self.meetings.available(), Ordering::Release);
+        HEX_MICROPHONE_ENABLED.store(
+            self.experimental.hex_microphone_available(),
+            Ordering::Release,
+        );
+        crate::hex_microphone::sync_from_settings(
+            self.experimental.hex_microphone_mode,
+            self.experimental.hex_microphone_comfort_noise,
+            self.experimental.hex_microphone_strength,
+        );
         MEETING_NOTES_ENABLED.store(
             self.meetings.summarize_with_apple_intelligence,
             Ordering::Release,
@@ -1314,6 +1360,10 @@ pub fn shortcut_toggle() -> bool {
 /// builds, otherwise only after the user opts in.
 pub fn meetings_enabled() -> bool {
     MEETINGS_ENABLED.load(Ordering::Acquire)
+}
+
+pub fn hex_microphone_enabled() -> bool {
+    HEX_MICROPHONE_ENABLED.load(Ordering::Acquire) || env_hex_experimental_mic()
 }
 
 pub fn meeting_notes_enabled() -> bool {

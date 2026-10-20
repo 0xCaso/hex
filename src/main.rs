@@ -52,6 +52,8 @@ mod events;
 mod feedback;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod gguf_session;
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+mod hex_microphone;
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 mod history;
 mod instance;
@@ -146,6 +148,8 @@ mod transcription_models;
 mod transcription_preparation;
 #[cfg(target_os = "macos")]
 mod transcription_service;
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+mod voice_filter;
 
 // The Windows shell and the shared desktop layer it was built on. These
 // modules come from the `windows-shell` branch and stay Windows-only until
@@ -292,6 +296,15 @@ enum Command {
         /// For `meeting-offer`: show the call-ended or transcript-ready capsule.
         #[arg(long, value_enum, default_value = "offer")]
         meeting_panel: MeetingPanelPreview,
+        /// Opt in to the experimental Hex microphone and Fun pane.
+        #[arg(long)]
+        experimental_mic: bool,
+        /// For `fun`: select the voice filter mode shown in the preview.
+        #[arg(long)]
+        fun_mode: Option<String>,
+        /// For `fun`: show the virtual microphone driver as not yet installed.
+        #[arg(long)]
+        fun_driver_missing: bool,
     },
     /// Listen and transcribe until interrupted.
     Listen {
@@ -321,8 +334,7 @@ enum Command {
     #[cfg(debug_assertions)]
     /// Show the developer recognition dashboard.
     Status,
-    #[cfg(debug_assertions)]
-    /// Inspect and control the running desktop app.
+    /// Inspect and control the running desktop app or offline audio tools.
     Dev {
         #[command(subcommand)]
         command: DevCommand,
@@ -380,26 +392,59 @@ enum CommandsCommand {
     Init,
 }
 
-#[cfg(debug_assertions)]
 #[cfg(target_os = "macos")]
 #[derive(Subcommand)]
 enum DevCommand {
+    #[cfg(debug_assertions)]
     /// Inspect the running app and window state.
     Status,
+    #[cfg(debug_assertions)]
     /// Drive a deterministic HUD state.
     Hud {
         #[arg(value_enum)]
         state: developer_control::DeveloperHudState,
     },
+    #[cfg(debug_assertions)]
     /// Open the app and select a pane.
     Show {
         #[arg(value_enum)]
         pane: developer_control::DeveloperPane,
     },
+    #[cfg(debug_assertions)]
     /// Enable or disable voice commands.
     Commands {
         #[arg(value_enum)]
         state: DevToggle,
+    },
+    /// Render offline audio through the Hex Microphone voice filter.
+    VoiceFilter {
+        #[command(subcommand)]
+        command: VoiceFilterCommand,
+    },
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Subcommand)]
+enum VoiceFilterCommand {
+    /// Apply a voice-filter mode across one or more dictation spans in a WAV file.
+    Render {
+        /// Input WAV path (16-bit PCM or 32-bit float).
+        input: PathBuf,
+        /// Voice filter mode id (muffled, muted, quiet, normal, chipmunk, robot, walkie, underwater, far).
+        #[arg(long, default_value = "muffled")]
+        mode: String,
+        /// Optional JSON mode spec override (matching presets.json).
+        #[arg(long)]
+        params: Option<String>,
+        /// Dictation span(s) in milliseconds, e.g. `1000-3500`.
+        #[arg(long = "dictation")]
+        dictation: Vec<String>,
+        /// Effect strength (`0.0` to `1.0`).
+        #[arg(long, default_value_t = 1.0)]
+        strength: f64,
+        /// Output WAV path.
+        #[arg(short = 'o', long = "output")]
+        output: PathBuf,
     },
 }
 
@@ -423,6 +468,7 @@ enum AppPreviewTarget {
     VoiceAction,
     Commands,
     Meetings,
+    Fun,
     Activity,
     History,
     TranscriptionPicker,
@@ -519,6 +565,30 @@ fn main() -> Result<()> {
     if let Some(Command::Mcp { meetings_dir }) = &cli.command {
         return run_mcp(meetings_dir.clone());
     }
+    if let Some(Command::Dev {
+        command:
+            DevCommand::VoiceFilter {
+                command:
+                    VoiceFilterCommand::Render {
+                        input,
+                        mode,
+                        params,
+                        dictation,
+                        strength,
+                        output,
+                    },
+            },
+    }) = &cli.command
+    {
+        return voice_filter::render_wav_command(
+            input,
+            mode,
+            params.as_deref(),
+            dictation,
+            *strength,
+            output,
+        );
+    }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let log_dir = app_paths::init_process_logging(&SHUTDOWN)?;
 
@@ -546,6 +616,7 @@ fn main() -> Result<()> {
             preview_dictation,
         } => {
             let _instance = instance::acquire("listener")?;
+            hex_microphone::ensure_service_started();
             let launch = if preview_dictation {
                 meeting_watcher::Launch::DictationHudPreview
             } else {
@@ -580,6 +651,9 @@ fn main() -> Result<()> {
             open_meeting_actions,
             meetings_empty,
             meeting_panel,
+            experimental_mic,
+            fun_mode,
+            fun_driver_missing,
             step,
         } => {
             if matches!(target, AppPreviewTarget::MeetingOffer) {
@@ -604,6 +678,13 @@ fn main() -> Result<()> {
             {
                 return Err(eyre!("unsupported preview language: {language}"));
             }
+            let fun_mode = match fun_mode.as_deref() {
+                Some(raw) => Some(
+                    voice_filter::VoiceFilterMode::from_str_loose(raw)
+                        .ok_or_else(|| eyre!("unknown voice filter mode: {raw}"))?,
+                ),
+                None => None,
+            };
             let pane = match target {
                 AppPreviewTarget::HudLab => developer_control::DeveloperPane::HudLab,
                 AppPreviewTarget::Onboarding
@@ -615,6 +696,7 @@ fn main() -> Result<()> {
                 AppPreviewTarget::VoiceAction => developer_control::DeveloperPane::VoiceAction,
                 AppPreviewTarget::Commands => developer_control::DeveloperPane::Commands,
                 AppPreviewTarget::Meetings => developer_control::DeveloperPane::Meetings,
+                AppPreviewTarget::Fun => developer_control::DeveloperPane::Fun,
                 AppPreviewTarget::Activity => developer_control::DeveloperPane::Activity,
                 AppPreviewTarget::History => developer_control::DeveloperPane::History,
                 AppPreviewTarget::DictationHud | AppPreviewTarget::MeetingOffer => unreachable!(),
@@ -684,12 +766,16 @@ fn main() -> Result<()> {
                     confirm_meeting_delete,
                     open_meeting_actions,
                     meetings_empty,
+                    experimental_mic,
+                    fun_mode,
+                    fun_driver_missing,
                 }),
             )
         }
         Command::Listen { device } => {
             let _instance = instance::acquire("listener")?;
             let settings = app_settings::AppSettings::load()?;
+            hex_microphone::ensure_service_started();
             let events = events::EventLog::create(&event_path)?;
             let history = match history::History::open_default(settings.history_retention) {
                 Ok(history) => Some(history),
@@ -778,23 +864,32 @@ fn main() -> Result<()> {
         }
         #[cfg(debug_assertions)]
         Command::Status => dashboard::run(event_path, config::voice_control()),
-        #[cfg(debug_assertions)]
         Command::Dev { command } => {
-            use developer_control::{DeveloperCommand, DeveloperReply};
-            let command = match command {
-                DevCommand::Status => DeveloperCommand::Status,
-                DevCommand::Hud { state } => DeveloperCommand::Hud { state },
-                DevCommand::Show { pane } => DeveloperCommand::ShowPane { pane },
-                DevCommand::Commands { state } => DeveloperCommand::SetCommandsEnabled {
-                    enabled: matches!(state, DevToggle::On),
-                },
-            };
-            let reply = local_api::call_developer(&command)?;
-            if let DeveloperReply::Error { code, message } = &reply {
-                return Err(eyre!("{code}: {message}"));
+            #[cfg(debug_assertions)]
+            {
+                use developer_control::{DeveloperCommand, DeveloperReply};
+                let command = match command {
+                    DevCommand::Status => DeveloperCommand::Status,
+                    DevCommand::Hud { state } => DeveloperCommand::Hud { state },
+                    DevCommand::Show { pane } => DeveloperCommand::ShowPane { pane },
+                    DevCommand::Commands { state } => DeveloperCommand::SetCommandsEnabled {
+                        enabled: matches!(state, DevToggle::On),
+                    },
+                    DevCommand::VoiceFilter { .. } => unreachable!("handled before startup"),
+                };
+                let reply = local_api::call_developer(&command)?;
+                if let DeveloperReply::Error { code, message } = &reply {
+                    return Err(eyre!("{code}: {message}"));
+                }
+                println!("{}", serde_json::to_string_pretty(&reply)?);
+                Ok(())
             }
-            println!("{}", serde_json::to_string_pretty(&reply)?);
-            Ok(())
+            #[cfg(not(debug_assertions))]
+            {
+                match command {
+                    DevCommand::VoiceFilter { .. } => unreachable!("handled before startup"),
+                }
+            }
         }
         #[cfg(debug_assertions)]
         Command::Meeting {

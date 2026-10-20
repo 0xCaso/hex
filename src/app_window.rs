@@ -32,9 +32,10 @@ use crate::desktop_ui::{
     disclosure_frame, dropdown_menu, error_message, error_panel, hotkey_keycaps, icon, icon_button,
     inline_error, list_row, list_row_meta, list_row_title, listener_status, menu, menu_item,
     mix_color, navigation_item, pane_body, pane_content, pane_detail, pane_header,
-    pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header, section_label,
-    settings_copy, settings_row, settings_section_label, sidebar_frame, sliding_segmented_control,
-    sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, window_frame,
+    pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header, progress_track,
+    section_label, segmented_control, segmented_item, settings_copy, settings_row,
+    settings_section_label, sidebar_frame, sliding_segmented_control, sliding_segmented_item,
+    small_button, status_dot, tag, toggle, truncated_line, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
@@ -102,6 +103,7 @@ struct Capabilities {
     meetings: bool,
     commands: bool,
     hud_lab: bool,
+    fun: bool,
     modes: bool,
     voice_action: bool,
     history: bool,
@@ -379,11 +381,15 @@ pub struct AppWindowPreview {
     pub confirm_meeting_delete: bool,
     pub open_meeting_actions: bool,
     pub meetings_empty: bool,
+    pub experimental_mic: bool,
+    pub fun_mode: Option<crate::voice_filter::VoiceFilterMode>,
+    pub fun_driver_missing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum Pane {
     HudLab,
+    Fun,
     Meetings,
     Commands,
     Activity,
@@ -404,18 +410,29 @@ impl Pane {
         }
     }
 
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Settings,
         Self::Modes,
         Self::Commands,
         Self::VoiceAction,
         Self::History,
+        Self::Fun,
         Self::HudLab,
         Self::Meetings,
         Self::Activity,
     ];
 
+    #[cfg(test)]
     fn all(capabilities: Capabilities, developer_features: bool, meetings: bool) -> Vec<Self> {
+        Self::all_with_fun(capabilities, developer_features, meetings, false)
+    }
+
+    fn all_with_fun(
+        capabilities: Capabilities,
+        developer_features: bool,
+        meetings: bool,
+        fun: bool,
+    ) -> Vec<Self> {
         Self::ALL
             .into_iter()
             .filter(|pane| match pane {
@@ -424,6 +441,7 @@ impl Pane {
                 Self::Commands => capabilities.commands,
                 Self::VoiceAction => capabilities.voice_action,
                 Self::History => capabilities.history,
+                Self::Fun => capabilities.fun && fun,
                 Self::Meetings => capabilities.meetings && (developer_features || meetings),
                 Self::HudLab => capabilities.hud_lab && developer_features,
                 Self::Activity => developer_features,
@@ -434,6 +452,7 @@ impl Pane {
     fn label(self) -> &'static str {
         match self {
             Self::HudLab => "HUD Lab",
+            Self::Fun => tr("Fun"),
             Self::Meetings => tr("Meetings"),
             Self::Commands => tr("Commands"),
             Self::Activity => tr("Activity"),
@@ -451,6 +470,7 @@ impl Pane {
             Self::VoiceAction => NavigationIcon::VoiceAction,
             Self::History => NavigationIcon::History,
             Self::Commands => NavigationIcon::Commands,
+            Self::Fun => NavigationIcon::Fun,
             Self::Meetings => NavigationIcon::Meetings,
             Self::Activity => NavigationIcon::Activity,
             Self::HudLab => NavigationIcon::HudLab,
@@ -464,6 +484,7 @@ impl Pane {
             DeveloperPane::VoiceAction => Self::VoiceAction,
             DeveloperPane::History => Self::History,
             DeveloperPane::HudLab => Self::HudLab,
+            DeveloperPane::Fun => Self::Fun,
             DeveloperPane::Commands => Self::Commands,
             DeveloperPane::Meetings => Self::Meetings,
             DeveloperPane::Activity => Self::Activity,
@@ -478,6 +499,7 @@ impl Pane {
             Self::VoiceAction => DeveloperPane::VoiceAction,
             Self::History => DeveloperPane::History,
             Self::HudLab => DeveloperPane::HudLab,
+            Self::Fun => DeveloperPane::Fun,
             Self::Commands => DeveloperPane::Commands,
             Self::Meetings => DeveloperPane::Meetings,
             Self::Activity => DeveloperPane::Activity,
@@ -804,6 +826,21 @@ enum MicrophonePolicyChange {
     DisableCommandsAndRelease,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunSlider {
+    Strength,
+    MuffledWall,
+    MuffledRoom,
+    MuffledLevel,
+    QuietLevel,
+    MutedRoomTone,
+    ChipmunkPitch,
+    RobotCarrier,
+    WalkieCrunch,
+    UnderwaterDepth,
+    FarRoom,
+}
+
 enum HotkeyCaptureState {
     Idle,
     Listening {
@@ -983,6 +1020,10 @@ pub struct AppWindow {
     history_clear_armed: bool,
     history_retention_open: bool,
     history_copied: Option<u64>,
+    fun_comfort_noise_toggle: ToggleSpring,
+    fun_install_copied: bool,
+    fun_driver_missing_preview: bool,
+    fun_active_slider: Option<FunSlider>,
 }
 
 impl AppWindow {
@@ -1000,9 +1041,12 @@ impl AppWindow {
                 Timer::after(interval).await;
                 if window
                     .update(cx, |window, cx| {
-                        // The tour reacts to grants and practice dictations
-                        // as they happen.
-                        interval = if window.setup_visible && !window.preview {
+                        // The tour and the Fun demo recorder/player react at 100 ms.
+                        let fun_busy = window.pane == Pane::Fun && {
+                            let snap = crate::hex_microphone::demo_snapshot();
+                            snap.is_recording || snap.playing.is_some()
+                        };
+                        interval = if (window.setup_visible && !window.preview) || fun_busy {
                             Duration::from_millis(100)
                         } else {
                             Duration::from_millis(500)
@@ -1032,6 +1076,7 @@ impl AppWindow {
                             || personal_workspace_changed
                             || history_changed
                             || platform_changed
+                            || fun_busy
                         {
                             cx.notify();
                         }
@@ -1054,6 +1099,16 @@ impl AppWindow {
             settings.voice_action.enabled = preview.voice_action_enabled;
             settings.meetings.enabled =
                 preview.meetings_enabled || matches!(preview.pane, DeveloperPane::Meetings);
+            settings.experimental.hex_microphone =
+                preview.experimental_mic || matches!(preview.pane, DeveloperPane::Fun);
+            if let Some(mode) = preview.fun_mode {
+                settings.experimental.hex_microphone_mode = mode;
+            }
+            crate::hex_microphone::sync_from_settings(
+                settings.experimental.hex_microphone_mode,
+                settings.experimental.hex_microphone_comfort_noise,
+                settings.experimental.hex_microphone_strength,
+            );
             if let Some((language, _)) = &preview.transcription_picker
                 && let Some(choice) = preview_choices(language).first()
             {
@@ -1297,6 +1352,7 @@ impl AppWindow {
             history
         };
         let history_search = Self::history_search_input(cx);
+        let hex_mic_comfort_noise = settings.experimental.hex_microphone_comfort_noise;
         let mut window = Self {
             preview: preview_mode,
             pane: preview.as_ref().map_or(Pane::default(), |preview| {
@@ -1477,6 +1533,12 @@ impl AppWindow {
                 .as_ref()
                 .is_some_and(|preview| preview.open_history_retention),
             history_copied: None,
+            fun_comfort_noise_toggle: ToggleSpring::new(hex_mic_comfort_noise),
+            fun_install_copied: false,
+            fun_driver_missing_preview: preview
+                .as_ref()
+                .is_some_and(|preview| preview.fun_driver_missing),
+            fun_active_slider: None,
         };
         window.platform_opened(preview.as_ref());
         if !window.preview {
@@ -1514,16 +1576,21 @@ impl AppWindow {
     }
 
     fn select_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        if self.pane == Pane::Fun && pane != Pane::Fun {
+            crate::hex_microphone::stop_demo_playback();
+            crate::hex_microphone::stop_demo_recording();
+        }
         self.pane = pane;
         self.mode_context_menu = None;
         self.history_retention_open = false;
         self.pending_microphone_policy = None;
+        self.fun_active_slider = None;
         match pane {
             Pane::HudLab | Pane::Meetings => self.platform_select_pane(pane),
             Pane::Commands | Pane::Activity => self.reload_events(),
             Pane::History => self.reload_history(cx),
             Pane::Modes => self.ensure_application_catalog_load(),
-            Pane::VoiceAction => {}
+            Pane::Fun | Pane::VoiceAction => {}
             Pane::Settings => self.permission_refresh_at = Instant::now(),
         }
         cx.notify();
@@ -2310,10 +2377,11 @@ impl AppWindow {
     }
 
     fn render_navigation(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let items = Pane::all(
+        let items = Pane::all_with_fun(
             platform::CAPABILITIES,
             crate::DEVELOPER_FEATURES_ENABLED,
             self.settings.meetings.available(),
+            self.settings.experimental.hex_microphone_available() || self.pane == Pane::Fun,
         )
         .into_iter()
         .enumerate()
@@ -3732,6 +3800,804 @@ impl AppWindow {
                                 .id("software-updates-setting"),
                             )
                         }),
+                )
+                .when(
+                    platform::CAPABILITIES.fun
+                        && self.settings.experimental.hex_microphone_available(),
+                    |column| {
+                        let mode = self.settings.experimental.hex_microphone_mode;
+                        let comfort_position =
+                            self.fun_comfort_noise_toggle.render_position(window);
+                        let mode_pills = segmented_control()
+                            .id("settings-hex-mic-mode")
+                            .children(
+                                [
+                                    crate::voice_filter::VoiceFilterMode::Muffled,
+                                    crate::voice_filter::VoiceFilterMode::Muted,
+                                    crate::voice_filter::VoiceFilterMode::Quiet,
+                                    crate::voice_filter::VoiceFilterMode::Normal,
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, choice)| {
+                                    segmented_item(mode == choice)
+                                        .id(("settings-hex-mic-mode-item", index))
+                                        .cursor_pointer()
+                                        .child(Self::voice_filter_mode_label(choice))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_hex_microphone_mode(choice, cx);
+                                        }))
+                                }),
+                            );
+                        let comfort_control = div()
+                            .id("settings-hex-mic-comfort-noise")
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .child(toggle(comfort_position))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let next =
+                                    !this.settings.experimental.hex_microphone_comfort_noise;
+                                this.set_hex_microphone_comfort_noise(next, cx);
+                            }));
+                        let open_fun = button(ButtonKind::Secondary, tr("Open Fun"))
+                            .id("open-fun-pane")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_pane(Pane::Fun, cx);
+                            }));
+                        column
+                            .child(settings_section_label(tr("Experimental: Hex microphone")))
+                            .child(
+                                panel()
+                                    .id("experimental-hex-microphone-panel")
+                                    .child(settings_row(
+                                        tr("Mode while dictating"),
+                                        Self::voice_filter_mode_description(mode),
+                                        mode_pills,
+                                    ))
+                                    .child(settings_row(
+                                        tr("Comfort noise"),
+                                        tr("Keeps a quiet room tone while muted so callers know the line is live"),
+                                        comfort_control,
+                                    ))
+                                    .child(
+                                        settings_row(
+                                            tr("Try it"),
+                                            tr("Try Hex Microphone and preview how callers hear you while you dictate"),
+                                            open_fun,
+                                        )
+                                        .border_b_0(),
+                                    ),
+                            )
+                    },
+                ),
+        )
+    }
+
+    fn voice_filter_mode_label(mode: crate::voice_filter::VoiceFilterMode) -> &'static str {
+        use crate::voice_filter::VoiceFilterMode;
+        match mode {
+            VoiceFilterMode::Muffled => tr("Muffled"),
+            VoiceFilterMode::Muted => tr("Muted"),
+            VoiceFilterMode::Quiet => tr("Quiet"),
+            VoiceFilterMode::Normal => tr("Normal"),
+            VoiceFilterMode::Chipmunk => tr("Chipmunk"),
+            VoiceFilterMode::Robot => tr("Robot"),
+            VoiceFilterMode::Walkie => tr("Walkie"),
+            VoiceFilterMode::Underwater => tr("Underwater"),
+            VoiceFilterMode::Far => tr("Far"),
+        }
+    }
+
+    fn voice_filter_mode_description(mode: crate::voice_filter::VoiceFilterMode) -> &'static str {
+        use crate::voice_filter::VoiceFilterMode;
+        match mode {
+            VoiceFilterMode::Muffled => {
+                tr("Sounds like a hand over the microphone while you dictate")
+            }
+            VoiceFilterMode::Muted => {
+                tr("Silences your voice with soft room tone while you dictate")
+            }
+            VoiceFilterMode::Quiet => tr("Turns your voice down to a whisper while you dictate"),
+            VoiceFilterMode::Normal => tr("Passes your voice through unchanged while you dictate"),
+            VoiceFilterMode::Chipmunk => tr("Sounds pitched up while you dictate"),
+            VoiceFilterMode::Robot => tr("Sounds robotic while you dictate"),
+            VoiceFilterMode::Walkie => tr("Sounds like a handheld radio while you dictate"),
+            VoiceFilterMode::Underwater => tr("Sounds submerged while you dictate"),
+            VoiceFilterMode::Far => tr("Sounds like you are across the room while you dictate"),
+        }
+    }
+
+    fn set_hex_microphone_mode(
+        &mut self,
+        mode: crate::voice_filter::VoiceFilterMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_settings(cx, |settings| {
+            settings.experimental.hex_microphone_mode = mode;
+        });
+        crate::hex_microphone::update_tuned_config(|cfg| {
+            cfg.mode = mode;
+        });
+        cx.notify();
+    }
+
+    fn set_hex_microphone_comfort_noise(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.update_settings(cx, |settings| {
+            settings.experimental.hex_microphone_comfort_noise = enabled;
+        }) {
+            self.fun_comfort_noise_toggle.set_enabled(enabled);
+        }
+        crate::hex_microphone::update_tuned_config(|cfg| {
+            cfg.comfort_noise = enabled;
+        });
+        cx.notify();
+    }
+
+    fn fun_slider_normalized(
+        slider: FunSlider,
+        cfg: &crate::hex_microphone::TunedFilterConfig,
+    ) -> (f32, String) {
+        let norm = |val: f64, min: f64, max: f64| -> f32 {
+            ((val - min) / (max - min)).clamp(0.0, 1.0) as f32
+        };
+        match slider {
+            FunSlider::Strength => (
+                cfg.strength.clamp(0.0, 1.0),
+                format!("{:.0}%", cfg.strength * 100.0),
+            ),
+            FunSlider::MuffledWall => (
+                norm(cfg.muffled_wall_hz, 150.0, 3000.0),
+                format!("{:.0} Hz", cfg.muffled_wall_hz),
+            ),
+            FunSlider::MuffledRoom => (
+                norm(cfg.muffled_room_mix, 0.0, 0.8),
+                format!("{:.0}%", cfg.muffled_room_mix * 100.0),
+            ),
+            FunSlider::MuffledLevel => (
+                norm(cfg.muffled_level_db, -24.0, 0.0),
+                format!("{:.0} dB", cfg.muffled_level_db),
+            ),
+            FunSlider::QuietLevel => (
+                norm(cfg.quiet_level_db, -36.0, -6.0),
+                format!("{:.0} dB", cfg.quiet_level_db),
+            ),
+            FunSlider::MutedRoomTone => (
+                norm(cfg.muted_room_tone_db, -80.0, -42.0),
+                format!("{:.0} dB", cfg.muted_room_tone_db),
+            ),
+            FunSlider::ChipmunkPitch => (
+                norm(cfg.chipmunk_semitones, 2.0, 12.0),
+                format!("+{:.1} st", cfg.chipmunk_semitones),
+            ),
+            FunSlider::RobotCarrier => (
+                norm(cfg.robot_carrier_hz, 30.0, 180.0),
+                format!("{:.0} Hz", cfg.robot_carrier_hz),
+            ),
+            FunSlider::WalkieCrunch => (
+                norm(cfg.walkie_crunch, 1.0, 8.0),
+                format!("{:.1}x", cfg.walkie_crunch),
+            ),
+            FunSlider::UnderwaterDepth => (
+                norm(cfg.underwater_depth_hz, 160.0, 900.0),
+                format!("{:.0} Hz", cfg.underwater_depth_hz),
+            ),
+            FunSlider::FarRoom => (
+                norm(cfg.far_distance_mix, 0.2, 0.95),
+                format!("{:.0}%", cfg.far_distance_mix * 100.0),
+            ),
+        }
+    }
+
+    fn apply_fun_slider(&mut self, slider: FunSlider, normalized: f32, cx: &mut Context<Self>) {
+        let t = f64::from(normalized.clamp(0.0, 1.0));
+        let lerp = |min: f64, max: f64| min + (max - min) * t;
+        crate::hex_microphone::update_tuned_config(|cfg| match slider {
+            FunSlider::Strength => cfg.strength = t as f32,
+            FunSlider::MuffledWall => cfg.muffled_wall_hz = lerp(150.0, 3000.0).round(),
+            FunSlider::MuffledRoom => {
+                cfg.muffled_room_mix = (lerp(0.0, 0.8) * 100.0).round() / 100.0
+            }
+            FunSlider::MuffledLevel => cfg.muffled_level_db = lerp(-24.0, 0.0).round(),
+            FunSlider::QuietLevel => cfg.quiet_level_db = lerp(-36.0, -6.0).round(),
+            FunSlider::MutedRoomTone => cfg.muted_room_tone_db = lerp(-80.0, -42.0).round(),
+            FunSlider::ChipmunkPitch => {
+                cfg.chipmunk_semitones = (lerp(2.0, 12.0) * 2.0).round() / 2.0
+            }
+            FunSlider::RobotCarrier => cfg.robot_carrier_hz = lerp(30.0, 180.0).round(),
+            FunSlider::WalkieCrunch => cfg.walkie_crunch = (lerp(1.0, 8.0) * 10.0).round() / 10.0,
+            FunSlider::UnderwaterDepth => cfg.underwater_depth_hz = lerp(160.0, 900.0).round(),
+            FunSlider::FarRoom => cfg.far_distance_mix = (lerp(0.2, 0.95) * 100.0).round() / 100.0,
+        });
+        if slider == FunSlider::Strength {
+            let strength = normalized.clamp(0.0, 1.0);
+            self.settings.experimental.hex_microphone_strength = strength;
+            self.schedule_settings_save(cx);
+        }
+        cx.notify();
+    }
+
+    fn render_fun_slider(
+        &self,
+        slider: FunSlider,
+        label: &'static str,
+        cfg: &crate::hex_microphone::TunedFilterConfig,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        const TRACK_WIDTH: f32 = 310.0;
+        let (value, display) = Self::fun_slider_normalized(slider, cfg);
+        let id = match slider {
+            FunSlider::Strength => "fun-slider-strength",
+            FunSlider::MuffledWall => "fun-slider-wall",
+            FunSlider::MuffledRoom => "fun-slider-room",
+            FunSlider::MuffledLevel => "fun-slider-level",
+            FunSlider::QuietLevel => "fun-slider-quiet",
+            FunSlider::MutedRoomTone => "fun-slider-room-tone",
+            FunSlider::ChipmunkPitch => "fun-slider-pitch",
+            FunSlider::RobotCarrier => "fun-slider-carrier",
+            FunSlider::WalkieCrunch => "fun-slider-crunch",
+            FunSlider::UnderwaterDepth => "fun-slider-depth",
+            FunSlider::FarRoom => "fun-slider-far-room",
+        };
+        div()
+            .w(px(TRACK_WIDTH))
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_footnote()
+                    .child(div().text_color(rgb(TEXT_SECONDARY)).child(label))
+                    .child(
+                        div()
+                            .text_monospace()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .child(display),
+                    ),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .w(px(TRACK_WIDTH))
+                    .h(px(22.0))
+                    .px(px(6.0))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .rounded(RADIUS_CONTROL)
+                    .bg(rgb(CANVAS))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(4.0))
+                            .relative()
+                            .rounded(RADIUS_KNOB)
+                            .bg(rgb(LINE_STRONG))
+                            .child(
+                                div()
+                                    .w(gpui::relative(value))
+                                    .h_full()
+                                    .rounded(RADIUS_KNOB)
+                                    .bg(rgb(ACCENT)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(-4.0))
+                                    .left(px(((TRACK_WIDTH - 12.0) * value - 6.0)
+                                        .clamp(0.0, TRACK_WIDTH - 24.0)))
+                                    .size(px(12.0))
+                                    .rounded_full()
+                                    .bg(rgb(TEXT_PRIMARY)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .px(px(6.0))
+                            .flex()
+                            .children((0..=40).map(|step| {
+                                let norm = (step as f32) / 40.0;
+                                div()
+                                    .flex_1()
+                                    .h_full()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                            this.fun_active_slider = Some(slider);
+                                            this.apply_fun_slider(slider, norm, cx);
+                                        }),
+                                    )
+                                    .on_mouse_move(cx.listener(
+                                        move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                                            if event.pressed_button == Some(MouseButton::Left)
+                                                && this.fun_active_slider == Some(slider)
+                                            {
+                                                this.apply_fun_slider(slider, norm, cx);
+                                            }
+                                        },
+                                    ))
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_fun(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use crate::hex_microphone::{DemoPlaybackTrack, DemoSourceKind, TunedFilterConfig};
+        use crate::voice_filter::VoiceFilterMode;
+
+        let status = if self.preview {
+            crate::hex_microphone::HexMicrophoneStatus {
+                driver_bundle_installed: !self.fun_driver_missing_preview,
+                driver_loaded: !self.fun_driver_missing_preview,
+                sink_streaming: !self.fun_driver_missing_preview,
+                mic_in_use: !self.fun_driver_missing_preview,
+                active_apps: if self.fun_driver_missing_preview {
+                    Vec::new()
+                } else {
+                    vec!["Slack".into()]
+                },
+                install_script_path: crate::hex_microphone::install_script_path(),
+            }
+        } else {
+            crate::hex_microphone::status()
+        };
+
+        let cfg = crate::hex_microphone::current_tuned_config();
+        let current_mode = cfg.mode;
+        let demo = crate::hex_microphone::demo_snapshot();
+
+        let header_status = if !status.driver_loaded {
+            tag(Tone::Neutral, tr("Driver not installed")).into_any_element()
+        } else if !status.active_apps.is_empty() {
+            tag(
+                Tone::Success,
+                tr_fill("In use by {}", &status.active_apps.join(", ")),
+            )
+            .into_any_element()
+        } else {
+            tag(Tone::Success, tr("Ready")).into_any_element()
+        };
+
+        let driver_row = if status.driver_loaded {
+            let desc = if status.active_apps.is_empty() {
+                tr("Choose Hex Microphone as your input in Slack, Zoom, or Discord").into()
+            } else {
+                tr_fill(
+                    "Streaming 48 kHz audio to {}",
+                    &status.active_apps.join(", "),
+                )
+            };
+            settings_row(
+                tr("Virtual microphone"),
+                desc,
+                tag(Tone::Success, tr("Installed")),
+            )
+            .id("fun-driver-row")
+        } else {
+            let script_path = status.install_script_path.display().to_string();
+            let copy_btn = small_button(
+                ButtonKind::Secondary,
+                if self.fun_install_copied {
+                    tr("Copied")
+                } else {
+                    tr("Copy install command")
+                },
+            )
+            .id("fun-copy-install-command")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(script_path.clone()));
+                this.fun_install_copied = true;
+                cx.notify();
+            }));
+            settings_row(
+                tr("Virtual microphone driver"),
+                tr("Install the CoreAudio driver once, then choose Hex Microphone as your input in Slack, Zoom, or Discord"),
+                copy_btn,
+            )
+            .id("fun-driver-row")
+        };
+
+        let mode_bar = segmented_control().id("fun-mode-picker").children(
+            VoiceFilterMode::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, choice)| {
+                    segmented_item(current_mode == choice)
+                        .id(("fun-mode-item", index))
+                        .px_2p5()
+                        .cursor_pointer()
+                        .child(Self::voice_filter_mode_label(choice))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_hex_microphone_mode(choice, cx);
+                        }))
+                }),
+        );
+
+        let mode_sliders: Vec<AnyElement> = match current_mode {
+            VoiceFilterMode::Normal => Vec::new(),
+            VoiceFilterMode::Muffled => vec![
+                self.render_fun_slider(FunSlider::MuffledWall, tr("Wall"), &cfg, cx),
+                self.render_fun_slider(FunSlider::MuffledRoom, tr("Room"), &cfg, cx),
+                self.render_fun_slider(FunSlider::MuffledLevel, tr("Level"), &cfg, cx),
+                self.render_fun_slider(FunSlider::Strength, tr("Effect strength"), &cfg, cx),
+            ],
+            VoiceFilterMode::Muted => vec![
+                self.render_fun_slider(FunSlider::MutedRoomTone, tr("Room tone"), &cfg, cx),
+                self.render_fun_slider(FunSlider::Strength, tr("Effect strength"), &cfg, cx),
+            ],
+            VoiceFilterMode::Quiet => vec![
+                self.render_fun_slider(FunSlider::QuietLevel, tr("Level"), &cfg, cx),
+                self.render_fun_slider(FunSlider::Strength, tr("Effect strength"), &cfg, cx),
+            ],
+            VoiceFilterMode::Chipmunk => vec![
+                self.render_fun_slider(FunSlider::ChipmunkPitch, tr("Pitch"), &cfg, cx),
+                self.render_fun_slider(FunSlider::Strength, tr("Effect strength"), &cfg, cx),
+            ],
+            VoiceFilterMode::Robot => vec![
+                self.render_fun_slider(FunSlider::RobotCarrier, tr("Carrier"), &cfg, cx),
+                self.render_fun_slider(FunSlider::Strength, tr("Effect strength"), &cfg, cx),
+            ],
+            VoiceFilterMode::Walkie => vec![
+                self.render_fun_slider(FunSlider::WalkieCrunch, tr("Crunch"), &cfg, cx),
+                self.render_fun_slider(FunSlider::Strength, tr("Effect strength"), &cfg, cx),
+            ],
+            VoiceFilterMode::Underwater => vec![
+                self.render_fun_slider(FunSlider::UnderwaterDepth, tr("Depth"), &cfg, cx),
+                self.render_fun_slider(FunSlider::Strength, tr("Effect strength"), &cfg, cx),
+            ],
+            VoiceFilterMode::Far => vec![
+                self.render_fun_slider(FunSlider::FarRoom, tr("Room"), &cfg, cx),
+                self.render_fun_slider(FunSlider::Strength, tr("Effect strength"), &cfg, cx),
+            ],
+        };
+
+        let comfort_position = self.fun_comfort_noise_toggle.render_position(window);
+        let comfort_row = (current_mode == VoiceFilterMode::Muted).then(|| {
+            let control = div()
+                .id("fun-comfort-noise-toggle")
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .child(toggle(comfort_position))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let next = !this.settings.experimental.hex_microphone_comfort_noise;
+                    this.set_hex_microphone_comfort_noise(next, cx);
+                }));
+            settings_row(
+                tr("Comfort noise"),
+                tr("Keeps a quiet room tone while muted so callers know the line is live"),
+                control,
+            )
+        });
+
+        let source_picker = demo.has_recording.then(|| {
+            segmented_control()
+                .id("fun-demo-source")
+                .child(
+                    segmented_item(demo.source == DemoSourceKind::Example)
+                        .id("fun-demo-source-example")
+                        .cursor_pointer()
+                        .child(tr("Example"))
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            crate::hex_microphone::select_demo_source(DemoSourceKind::Example);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    segmented_item(demo.source == DemoSourceKind::Recording)
+                        .id("fun-demo-source-recording")
+                        .cursor_pointer()
+                        .child(tr("Your voice"))
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            crate::hex_microphone::select_demo_source(DemoSourceKind::Recording);
+                            cx.notify();
+                        })),
+                )
+        });
+
+        let record_btn = if demo.is_recording {
+            button(ButtonKind::Danger, status_dot(DANGER))
+                .id("fun-demo-record")
+                .child(tr("Stop recording"))
+                .on_click(cx.listener(|_, _, _, cx| {
+                    crate::hex_microphone::stop_demo_recording();
+                    cx.notify();
+                }))
+        } else {
+            button(ButtonKind::Secondary, status_dot(DANGER))
+                .id("fun-demo-record")
+                .child(tr("Record 5s"))
+                .on_click(cx.listener(|_, _, _, cx| {
+                    crate::hex_microphone::start_demo_recording();
+                    cx.notify();
+                }))
+        };
+
+        let duration_s = (demo.duration_ms as f64) / 1000.0;
+        let span_start_s = format!("{:.1}s", demo.span.start_ms / 1000.0);
+        let span_end_s = format!("{:.1}s", demo.span.end_ms / 1000.0);
+        let span_badge = tag(Tone::Accent, format!("{} – {}", span_start_s, span_end_s));
+        let clip_quote = match demo.source {
+            DemoSourceKind::Example => {
+                "“Yeah, I’m looking at the new layout now — Reply to Olive: pick up dinner…”"
+            }
+            DemoSourceKind::Recording => tr("Your 5s sample"),
+        };
+
+        let total_bars = demo.peaks_you.len().max(1);
+        let duration_f = (demo.duration_ms.max(1)) as f64;
+        let render_waveform_bars = |peaks: &[f32], call_track: bool| -> Div {
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .h(px(28.0))
+                .px_2()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .rounded(RADIUS_SMALL)
+                .bg(rgb(SURFACE))
+                .children(peaks.iter().enumerate().map(|(idx, &peak)| {
+                    let bar_ms = ((idx as f64) + 0.5) / (total_bars as f64) * duration_f;
+                    let in_span = bar_ms >= demo.span.start_ms && bar_ms <= demo.span.end_ms;
+                    let height = (peak.clamp(0.06, 1.0) * 20.0).round();
+                    let color = if call_track {
+                        if in_span { ACCENT_TEXT } else { TEXT_SECONDARY }
+                    } else if in_span {
+                        TEXT_PRIMARY
+                    } else {
+                        TEXT_TERTIARY
+                    };
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(height))
+                        .rounded(RADIUS_KNOB)
+                        .bg(rgb(color))
+                }))
+        };
+
+        let playing_call = demo.playing == Some(DemoPlaybackTrack::CallHears);
+        let playing_you = demo.playing == Some(DemoPlaybackTrack::You);
+
+        let play_call_btn = button(
+            ButtonKind::Primary,
+            if playing_call {
+                tr("Stop")
+            } else {
+                tr("Play what call hears")
+            },
+        )
+        .id("fun-play-call-hears")
+        .on_click(cx.listener(move |_, _, _, cx| {
+            if playing_call {
+                crate::hex_microphone::stop_demo_playback();
+            } else {
+                crate::hex_microphone::play_demo_track(DemoPlaybackTrack::CallHears);
+            }
+            cx.notify();
+        }));
+
+        let play_you_btn = button(
+            ButtonKind::Secondary,
+            if playing_you {
+                tr("Stop")
+            } else {
+                tr("Play your voice")
+            },
+        )
+        .id("fun-play-you")
+        .on_click(cx.listener(move |_, _, _, cx| {
+            if playing_you {
+                crate::hex_microphone::stop_demo_playback();
+            } else {
+                crate::hex_microphone::play_demo_track(DemoPlaybackTrack::You);
+            }
+            cx.notify();
+        }));
+
+        settings_pane(
+            tr("Fun"),
+            "fun-scroll",
+            div()
+                .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, _| {
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        this.fun_active_slider = None;
+                    }
+                }))
+                .child(
+                    panel()
+                        .mt_6()
+                        .id("fun-hex-microphone-card")
+                        .child(panel_header(tr("Hex Microphone"), Some(header_status)))
+                        .child(driver_row)
+                        .child(
+                            div()
+                                .px_4()
+                                .py_3()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .border_b_1()
+                                .border_color(rgb(LINE))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_4()
+                                        .child(settings_copy(
+                                            tr("Mode while dictating"),
+                                            Self::voice_filter_mode_description(current_mode),
+                                        ))
+                                        .child(
+                                            small_button(ButtonKind::Secondary, tr("Reset"))
+                                                .id("fun-reset-tuning")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    let defaults = TunedFilterConfig::default();
+                                                    crate::hex_microphone::update_tuned_config(
+                                                        |cfg| {
+                                                            let keep_mode = cfg.mode;
+                                                            *cfg = defaults;
+                                                            cfg.mode = keep_mode;
+                                                        },
+                                                    );
+                                                    this.set_hex_microphone_comfort_noise(true, cx);
+                                                })),
+                                        ),
+                                )
+                                .child(mode_bar)
+                                .when(!mode_sliders.is_empty(), |sec| {
+                                    sec.child(
+                                        div()
+                                            .pt_1()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_4()
+                                            .children(mode_sliders),
+                                    )
+                                }),
+                        )
+                        .children(comfort_row)
+                        .child(
+                            div()
+                                .p_4()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_4()
+                                        .child(settings_copy(
+                                            tr("Try it"),
+                                            tr("Compare your raw microphone with what the call hears during dictation"),
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .children(source_picker)
+                                                .child(record_btn),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("fun-waveform-card")
+                                        .p_3()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2p5()
+                                        .rounded(RADIUS_CONTROL)
+                                        .border_1()
+                                        .border_color(rgb(LINE))
+                                        .bg(rgb(CANVAS))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_3()
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .min_w_0()
+                                                        .child(
+                                                            div()
+                                                                .text_footnote()
+                                                                .text_color(rgb(TEXT_SECONDARY))
+                                                                .child(clip_quote),
+                                                        )
+                                                        .child(span_badge),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_caption()
+                                                        .text_monospace()
+                                                        .text_color(rgb(TEXT_TERTIARY))
+                                                        .child(format!("{duration_s:.1}s")),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_3()
+                                                .child(
+                                                    div()
+                                                        .w(px(80.0))
+                                                        .flex_none()
+                                                        .text_caption()
+                                                        .text_color(rgb(TEXT_TERTIARY))
+                                                        .child(tr("You")),
+                                                )
+                                                .child(render_waveform_bars(&demo.peaks_you, false)),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_3()
+                                                .child(
+                                                    div()
+                                                        .w(px(80.0))
+                                                        .flex_none()
+                                                        .text_caption()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(rgb(ACCENT_TEXT))
+                                                        .child(tr("Call hears")),
+                                                )
+                                                .child(render_waveform_bars(&demo.peaks_call, true)),
+                                        )
+                                        .when(demo.is_recording || demo.playing.is_some(), |card| {
+                                            let progress = if demo.is_recording {
+                                                demo.recording_progress
+                                            } else {
+                                                demo.playback_progress
+                                            };
+                                            card.child(progress_track(
+                                                div().w(gpui::relative(progress.clamp(0.0, 1.0))),
+                                            ))
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(play_call_btn)
+                                                .child(play_you_btn),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_caption()
+                                                .text_color(rgb(TEXT_TERTIARY))
+                                                .child(tr("Stays in memory")),
+                                        ),
+                                ),
+                        ),
                 ),
         )
     }
@@ -5901,6 +6767,7 @@ impl Render for AppWindow {
             Pane::History => self.render_history(cx),
             Pane::Modes => self.render_modes(window, cx),
             Pane::VoiceAction => self.render_voice_action(window, cx),
+            Pane::Fun => self.render_fun(window, cx),
             Pane::Settings => self.render_settings(window, cx),
         };
         let transcription_picker = self
@@ -6868,6 +7735,9 @@ mod tests {
             confirm_meeting_delete: false,
             open_meeting_actions: false,
             meetings_empty: false,
+            experimental_mic: false,
+            fun_mode: None,
+            fun_driver_missing: false,
         }
     }
 
@@ -7886,6 +8756,24 @@ mod tests {
                 Pane::HudLab,
                 Pane::Meetings,
                 Pane::Activity,
+            ]
+        );
+    }
+
+    #[test]
+    fn experimental_fun_pane_appears_only_when_enabled() {
+        assert!(
+            !Pane::all_with_fun(platform::CAPABILITIES, false, false, false).contains(&Pane::Fun)
+        );
+        assert_eq!(
+            Pane::all_with_fun(platform::CAPABILITIES, false, false, true),
+            vec![
+                Pane::Settings,
+                Pane::Modes,
+                Pane::Commands,
+                Pane::VoiceAction,
+                Pane::History,
+                Pane::Fun,
             ]
         );
     }
