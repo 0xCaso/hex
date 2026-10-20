@@ -11,12 +11,12 @@ stop_bundle() {
   [ -d "$bundle" ] || return 0
   executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist")
   executable="$bundle/Contents/MacOS/$executable_name"
-  if ! pgrep -f "$executable" >/dev/null; then
+  if ! LC_ALL=C pgrep -f "$executable" >/dev/null; then
     return 0
   fi
-  pkill -TERM -f "$executable" || true
+  LC_ALL=C pkill -TERM -f "$executable" || true
   attempts=30
-  while pgrep -f "$executable" >/dev/null; do
+  while LC_ALL=C pgrep -f "$executable" >/dev/null; do
     if [ "$attempts" -eq 0 ]; then
       echo "Timed out waiting for $executable to stop." >&2
       exit 1
