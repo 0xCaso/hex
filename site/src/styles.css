@@ -90,7 +90,7 @@ a {
   transition: opacity 240ms ease-out;
 }
 
-.page:not([data-phase="idle"]) .show__head img {
+.page[data-live] .show__head img {
   opacity: 0;
 }
 

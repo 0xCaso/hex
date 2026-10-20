@@ -50,6 +50,8 @@ export function useShout(root: RefObject<HTMLElement | null>, canvas: RefObject<
         )
         .then((e: Engine) => {
           live.current = e
+          // The canvas has drawn the head; the still can go.
+          root.current?.setAttribute("data-live", "")
           setPhase((p) => (p === "idle" ? "live" : p))
           return e
         })
@@ -61,8 +63,9 @@ export function useShout(root: RefObject<HTMLElement | null>, canvas: RefObject<
   useEffect(() => {
     setMutedState(readMuted())
     reduced.current = matchMedia("(prefers-reduced-motion: reduce)").matches
-    // Reduced motion keeps the still until the visitor asks for the show.
-    if (reduced.current) return
+    // Reduced motion and phones keep the still until the visitor asks for the show: building
+    // the renderer is a long task on a phone CPU.
+    if (reduced.current || matchMedia("(pointer: coarse), (max-width: 40rem)").matches) return
     const idle = "requestIdleCallback" in window ? requestIdleCallback(() => void load(), { timeout: 2500 }) : setTimeout(() => void load(), 1200)
     return () => {
       if ("cancelIdleCallback" in window) cancelIdleCallback(idle as number)
