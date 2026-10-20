@@ -241,7 +241,7 @@ function rows(platform: Platform): Row[] {
 
 export default function Download({ platform }: { platform: Platform }) {
   return (
-    <div className="hero__action">
+    <div className="hero__action" data-avoid>
       <Primary platform={platform} />
       <details className="platforms">
         <summary>Other platforms</summary>

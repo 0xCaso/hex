@@ -13,32 +13,39 @@ and "Send yourself the link" on phones. Versions and URLs live in
 `src/release.ts`. Add `?platform=mac|mac-intel|windows-x64|windows-arm64|linux|mobile`
 to see each state.
 
-The wind-up teeth in `src/ChatteringTeeth.tsx` use separate body and foot groups:
-the soles remain planted during anticipation, the whole toy travels during the
-hop, and the body settles after contact. Wide screens use the perimeter; narrow
-screens use the space above the copy. A warm spotlight fades in from 1.4–2.4
-seconds, foreshadowing the landing. The toy stays hidden for three seconds, then
-hops in from the left to the center above the headline. The light fades away
-as roaming begins. Reduced motion reveals the light and toy as still poses at
-their respective delays. The canvas is click-through and decorative;
-the site has no microphone control or microphone access.
+The hero is a show (`src/shout/`, plain JS): Kit's notifications pile up around a
+floating head that answers them out loud, dictates prompts into an OpenCode window
+that fixes the complaints, powers up, and finally sprays the inbox clean. WebGPU
+renders it, with a Canvas 2D fallback (`?canvas2d` forces it).
 
-Rounded teeth, teal irises, and cherry-red lacquer use a three-softbox procedural
-studio environment for enamel and metal reflections, plus soft directional shadows.
-The environment is generated
-locally, with no remote model or lighting asset request.
+- The prerendered page shows `public/shout-idle.webp`, a still of the idle head, in
+  `.show__head`. The engine chunk loads when the browser is idle or the visitor
+  reaches for the ⌥ key, then draws the same head into that box (the canvas reads the
+  box, 3.2 head radii wide, so nothing moves).
+- Nothing audible or heavy loads before the key press: the voice bank and its
+  manifest are fetched on start, the opening clips first. The sound toggle in the
+  header remembers its choice in `localStorage`.
+- It pauses when the tab is hidden or the hero is off screen, runs the idle head at
+  30 fps, caps the pixel ratio (1.5 on phones), and thins the messages on small
+  screens. Reduced motion keeps the still until the key is pressed, then runs only
+  the calm stage with no shake or flashes.
+- Dax, Jay and Frank (teammates) appear with their real X avatars; everyone else is
+  invented with a generated portrait (`src/shout/assets/people.webp`). Brand glyphs
+  are Simple Icons (CC0) and Lucide (ISC); OpenCode's mark is from opencode.ai.
+
+`VITE_SHOUT_CAPTURE=1` builds a capture variant with a deterministic frame stepper
+(`?capture`, `window.__shout`) and an audio play log; production builds strip it.
+Regenerate the idle still after changing the head:
+
+```sh
+VITE_SHOUT_CAPTURE=1 bunx vite --port 5531
+HEX_SITE_URL=http://127.0.0.1:5531 bun run generate:poster
+```
 
 ## Social image
 
-The Open Graph and Twitter image is `public/og-teeth.png` (1200 × 630). It is
-rendered from the same Three.js model, using `?og` for a deterministic poster pose.
-With the dev server running, regenerate after changing the model:
-
-```sh
-bunx playwright install chromium
-bun run generate:og
-# If Vite chose another port:
-HEX_SITE_URL=http://127.0.0.1:5174 bun run generate:og
-```
-Inspect the resulting image, rebuild, then deploy. Verify the production HTML's
-image metadata and fetch the published PNG.
+The Open Graph and Twitter image is `public/og.png` (1200 × 630): the app icon,
+the name, and one line. `scripts/og/hex-icon.png` is the 1024 px icon exported
+from the built app (`iconutil -c iconset Hex.app/Contents/Resources/AppIcon.icns`).
+Regenerate with `bun run generate:og`, bump the `?v=` on both image tags in
+`index.html`, rebuild, deploy, and fetch the published PNG.

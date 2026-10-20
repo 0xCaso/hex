@@ -76,17 +76,14 @@ endpoint remains available for installed clients. New builds use the custom host
 for Sparkle and Linux updates; the signed Linux payload and verification key are
 unchanged. Hosting does not guarantee access through every corporate policy.
 
-The `.dev` site's decorative wind-up teeth have feet and hop around desktop
-margins, or above the copy on narrow screens. A warm spotlight fades in first
-(1.4–2.4 seconds). After three seconds hidden, the toy hops in from the left to
-the center above the headline; the light fades as roaming begins. The canvas passes clicks through;
-the website has no microphone button or microphone access. Reduced motion reveals
-still light and toy poses at their respective delays. Rounded teeth, teal irises,
-enamel, lacquer, and metal materials use local softbox reflections and soft shadows.
-Its Open Graph image uses the same model; see
-[site authoring](../../site/README.md). Desktop/mobile animation frames were
-inspected, and reduced-motion canvas captures were pixel-identical four seconds
-apart in Chromium. These checks do not exercise a live microphone.
+The site's hero is an animated, optional show: an idle head and an ⌥ keycap until
+the visitor presses it, then a voiced demo of messages, OpenCode prompts and fixes
+(WebGPU, with a Canvas 2D fallback). Audio loads only after that press; the website
+has no microphone button or microphone access. Reduced motion keeps a still until
+the press and then plays only the calm stage. See [site authoring](../../site/README.md).
+Headless Chromium renders of the WebGPU, Canvas 2D, reduced-motion and phone paths
+showed no console errors; a deterministic 60 fps capture was reviewed frame by
+frame. These checks do not exercise real speakers or a physical phone.
 
 The Windows installer is silently installed, reinstalled, refused as a
 downgrade, and uninstalled on x64 and ARM64 runners by

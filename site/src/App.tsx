@@ -1,7 +1,7 @@
-import { useLayoutEffect, useState } from "react"
-import ChatteringTeeth from "./ChatteringTeeth"
+import { useLayoutEffect, useRef, useState } from "react"
 import Download, { PLATFORM_NAMES, SHORTCUTS } from "./Download"
 import { guessPlatform, refinePlatform, type Platform } from "./platform"
+import { OptionKey, SoundToggle, useShout } from "./Shout"
 
 function HexMark() {
   return (
@@ -37,25 +37,38 @@ export default function App() {
     }
   }, [])
 
+  const root = useRef<HTMLElement>(null)
+  const canvas = useRef<HTMLCanvasElement>(null)
+  const head = useRef<HTMLDivElement>(null)
+  const shout = useShout(root, canvas, head)
+
   return (
-    <main className="page">
+    <main className="page" ref={root} data-phase={shout.phase}>
+      <canvas ref={canvas} className="stage" aria-hidden="true" />
       <header className="header">
-        <a className="wordmark" href="/" aria-label="Hex home">
+        <a className="wordmark" href="/" aria-label="Hex home" data-avoid>
           <HexMark />
           <span>HEX</span>
         </a>
-        <a className="header__github" href="https://github.com/anomalyco/hex">
-          <GitHubMark />
-          <span>GitHub</span>
-        </a>
+        <div className="header__tools" data-avoid>
+          {shout.phase === "started" && <SoundToggle muted={shout.muted} onToggle={shout.toggleMuted} />}
+          <a className="header__github" href="https://github.com/anomalyco/hex">
+            <GitHubMark />
+            <span>GitHub</span>
+          </a>
+        </div>
       </header>
 
+      <div className="show">
+        <div className="show__head" ref={head}>
+          <img src="/shout-idle.webp" alt="" width="640" height="640" decoding="async" fetchPriority="high" />
+        </div>
+        <OptionKey phase={shout.phase} onStart={shout.start} onIntent={shout.load} />
+      </div>
+
       <section className="hero">
-        <div className="hero__copy">
-          <div className="hero__title">
-            <h1>Speak. It appears.</h1>
-            <ChatteringTeeth />
-          </div>
+        <div className="hero__copy" data-avoid>
+          <h1>Speak. It appears.</h1>
           <p>
             Local voice dictation for {PLATFORM_NAMES[platform]}. Hold {SHORTCUTS[platform]}, say what you mean, and
             Hex pastes it where you are.

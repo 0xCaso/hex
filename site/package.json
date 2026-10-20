@@ -7,20 +7,19 @@
     "dev": "vite",
     "build": "tsc -b && vite build && vite build --ssr src/prerender.tsx --outDir dist-server && bun scripts/prerender.ts",
     "preview": "vite preview",
+    "check:downloads": "bun scripts/check-downloads.ts",
     "generate:og": "bun scripts/generate-og.ts",
-    "check:downloads": "bun scripts/check-downloads.ts"
+    "generate:poster": "bun scripts/generate-poster.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
     "motion": "^14.0.0",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "three": "^0.186.1"
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^6.1.2",
     "playwright": "^1.63.0",
     "typescript": "^7.0.2",
