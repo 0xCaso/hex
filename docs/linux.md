@@ -75,7 +75,7 @@ The published build targets current x86_64 Arch Linux and needs glibc 2.44 or
 later. Install it with:
 
 ```sh
-curl -fsSL https://downloads.hex.kitlangton.dev/install-linux.sh | sh
+curl -fsSL https://downloads.hex.kitlangton.com/install-linux.sh | sh
 ```
 
 If a runtime library is missing, the installer names the Arch packages to
@@ -90,7 +90,7 @@ sudo pacman -S --needed alsa-lib curl gtk3 gtk-layer-shell jq libappindicator-gt
   libxkbcommon libxkbcommon-x11 libx11 libxcb openblas openssl util-linux \
   vulkan-icd-loader wl-clipboard wtype xxd
 curl --proto '=https' --tlsv1.2 -fsSLO \
-  https://downloads.hex.kitlangton.dev/install-linux.sh
+  https://downloads.hex.kitlangton.com/install-linux.sh
 less install-linux.sh
 sh install-linux.sh
 ~/.local/bin/hex model install

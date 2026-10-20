@@ -27,8 +27,8 @@ app and **Disabled** when it does nothing.
 
 Download and run the installer for your PC:
 
-- x64: [`HEX-Setup-2.3.0-x64.exe`](https://downloads.hex.kitlangton.dev/releases/HEX-Setup-2.3.0-x64.exe)
-- ARM64: [`HEX-Setup-2.3.0-arm64.exe`](https://downloads.hex.kitlangton.dev/releases/HEX-Setup-2.3.0-arm64.exe)
+- x64: [`HEX-Setup-2.3.0-x64.exe`](https://downloads.hex.kitlangton.com/releases/HEX-Setup-2.3.0-x64.exe)
+- ARM64: [`HEX-Setup-2.3.0-arm64.exe`](https://downloads.hex.kitlangton.com/releases/HEX-Setup-2.3.0-arm64.exe)
 
 [hex.kitlangton.com](https://hex.kitlangton.com/) picks the right one. The
 installer needs no administrator rights: it installs for the current user,
@@ -49,7 +49,7 @@ The installer and the script below create the same managed layout, so either
 can replace the other. For a scripted install:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://downloads.hex.kitlangton.dev/install-windows.ps1 -OutFile install-windows.ps1; ./install-windows.ps1"
+powershell -ExecutionPolicy Bypass -Command "iwr https://downloads.hex.kitlangton.com/install-windows.ps1 -OutFile install-windows.ps1; ./install-windows.ps1"
 ```
 
 Uninstall a script install with `install-windows.ps1 -Uninstall`.

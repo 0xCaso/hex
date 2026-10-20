@@ -5,7 +5,8 @@
 ```ts
 hex.kitlangton.com                         // the one site: platform-aware download
 ├── hex.kitlangton.dev/*                   // 301 to the same path on .com (site/worker.ts)
-├── downloads.hex.kitlangton.dev           // direct R2 Custom Domain; no redirect
+├── downloads.hex.kitlangton.com           // R2 Custom Domain for links people click
+├── downloads.hex.kitlangton.dev           // same bucket; compiled into apps and feeds; keep forever
 │   ├── releases/HEX-<version>-arm64.dmg
 │   ├── releases/HEX-<version>-arm64.zip    // signed Sparkle artifact
 │   ├── releases/HEX-latest-arm64.dmg      // mutable pointer; no-cache
@@ -30,7 +31,10 @@ Configuration Rule disables **Browser Integrity Check** only for
 `http.host eq "downloads.hex.kitlangton.dev"`. This is public file hosting for
 browser and non-browser clients: the inherited zone check returned HTTP 403,
 error 1010, for Python's default user agent. The host-specific rule restored
-HTTP 200 without changing the zone-wide setting. Keep future browser challenges
+HTTP 200 without changing the zone-wide setting. `downloads.hex.kitlangton.com` (added
+2026-10-19) has no such rule yet: Python's default user agent gets 403 there,
+while curl, PowerShell, and browsers get 200. Add the same Configuration Rule
+in the `kitlangton.com` zone; Wrangler's OAuth token cannot edit rulesets. Keep future browser challenges
 off download and updater routes.
 
 `scripts/release-app.sh publish` uploads and reads back the R2 DMG and ZIP, then

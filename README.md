@@ -50,7 +50,7 @@ or forcibly replace another app already named `Hex.app`.
 
 Or install manually:
 
-1. [Download the latest signed DMG](https://downloads.hex.kitlangton.dev/releases/HEX-latest-arm64.dmg) and open it.
+1. [Download the latest signed DMG](https://downloads.hex.kitlangton.com/releases/HEX-latest-arm64.dmg) and open it.
 2. Drag `Hex.app` into Applications, then launch it.
 3. Complete the permission and model steps in setup.
 
@@ -75,7 +75,8 @@ use `app-v…` tags; the repository also publishes separate TypeScript SDK relea
 If an older installation cannot check for updates on your network, install the
 DMG manually over the existing Rust app.
 
-On managed networks, ask IT to allow `downloads.hex.kitlangton.dev` for the app
+On managed networks, ask IT to allow `downloads.hex.kitlangton.com` and
+`downloads.hex.kitlangton.dev` (in-app updates) for the app
 and updates. Local model setup separately needs `huggingface.co` and its model
 download CDN; optional Voice Commands needs `download.moonshine.ai`. A successful
 app download does not establish that those model hosts are reachable. After
@@ -203,8 +204,8 @@ driver, Parakeet Unified English streams while you speak, so text arrives within
 about 100 ms of release even after minutes of talking; ARM64 transcribes on the
 CPU. Voice commands, meetings, and the local transcription API are not included.
 Download the installer for
-[x64](https://downloads.hex.kitlangton.dev/releases/HEX-Setup-2.3.0-x64.exe) or
-[ARM64](https://downloads.hex.kitlangton.dev/releases/HEX-Setup-2.3.0-arm64.exe)
+[x64](https://downloads.hex.kitlangton.com/releases/HEX-Setup-2.3.0-x64.exe) or
+[ARM64](https://downloads.hex.kitlangton.com/releases/HEX-Setup-2.3.0-arm64.exe)
 and run it; it installs for your user without administrator rights. It is not
 code-signed yet, so SmartScreen may warn: choose **More info**, then **Run
 anyway**. See the [Windows guide](docs/windows.md) for details or to build from
@@ -222,7 +223,7 @@ protocols. Voice commands and meetings are not included.
 Install the signed release on x86_64 Arch Linux (glibc 2.44 or later) with:
 
 ```sh
-curl -fsSL https://downloads.hex.kitlangton.dev/install-linux.sh | sh
+curl -fsSL https://downloads.hex.kitlangton.com/install-linux.sh | sh
 ```
 
 The [Linux installation guide](docs/linux.md) covers inspecting the installer

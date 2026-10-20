@@ -47,7 +47,8 @@ Download Hex                              // setup.download-recovery
 │   ├── Phone -> Send yourself the link
 │   └── Other platforms -> every build, Homebrew, the GitHub release
 ├── hex.kitlangton.dev/* -> 301 same path on .com
-├── Website / README / Homebrew -> downloads.hex.kitlangton.dev -> R2 bytes
+├── Website / README / installers -> downloads.hex.kitlangton.com -> R2 bytes
+├── Apps, feeds, appcast, Homebrew -> downloads.hex.kitlangton.dev -> same R2 bytes
 ├── GitHub app-v<version> -> identical DMG, Setup.exe, and Linux bytes
 └── Older app cannot reach its update feed -> manually install the DMG
 

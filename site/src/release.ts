@@ -4,7 +4,7 @@
 export const MAC_VERSION = "2.3.0"
 export const DESKTOP_VERSION = "2.3.0"
 
-const DOWNLOADS = "https://downloads.hex.kitlangton.dev"
+const DOWNLOADS = "https://downloads.hex.kitlangton.com"
 
 export const RELEASE = {
   mac: {

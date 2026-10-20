@@ -621,7 +621,10 @@ identity. `scripts/release-app.sh` prepares a notarized and stapled DMG plus its
 signed Sparkle appcast; run `scripts/release-app.sh publish` only after validating
 the prepared artifact. Public app downloads and update feeds use
 `https://downloads.hex.kitlangton.dev`, connected directly to the `hex-releases`
-R2 bucket through Custom Domains. Preserve the legacy public R2 endpoint for
+R2 bucket through Custom Domains. The same bucket is also
+`https://downloads.hex.kitlangton.com`, which the website, docs, and script
+installers use; apps, feeds, the appcast, and release scripts keep the `.dev`
+host, which must keep working unchanged. Preserve the legacy public R2 endpoint for
 installed clients. The publisher verifies both R2 artifacts and the identical
 GitHub DMG mirror before publishing the appcast. GitHub app releases use
 `app-v<VERSION>` tags with `--latest=false`, keeping them distinct from SDK

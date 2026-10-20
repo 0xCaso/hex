@@ -20,7 +20,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$baseUrl = if ($env:HEX_RELEASE_BASE_URL) { $env:HEX_RELEASE_BASE_URL } else { 'https://downloads.hex.kitlangton.dev' }
+$baseUrl = if ($env:HEX_RELEASE_BASE_URL) { $env:HEX_RELEASE_BASE_URL } else { 'https://downloads.hex.kitlangton.com' }
 $support = Join-Path $env:APPDATA 'voice-control'
 $versions = Join-Path $support 'versions'
 $pointer = Join-Path $support 'current-version'
