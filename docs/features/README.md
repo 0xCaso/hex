@@ -40,13 +40,13 @@ leaves runtime settings, models, and retained data intact.
 
 ```ts
 Download Hex                              // setup.download-recovery
-├── hex.kitlangton.dev names the visitor's platform  // setup.download-button
+├── hex.kitlangton.com names the visitor's platform  // setup.download-button
 │   ├── Mac -> DMG | Intel Mac -> disabled, "needs Apple silicon"
 │   ├── Windows x64 / ARM64 (UA-CH) -> HEX-Setup-<version>-<arch>.exe + SmartScreen note
 │   ├── Linux -> copyable `curl … install-linux.sh | sh` + Arch/glibc requirement
 │   ├── Phone -> Send yourself the link
 │   └── Other platforms -> every build, Homebrew, the GitHub release
-├── hex.kitlangton.com/* -> 301 same path on .dev
+├── hex.kitlangton.dev/* -> 301 same path on .com
 ├── Website / README / Homebrew -> downloads.hex.kitlangton.dev -> R2 bytes
 ├── GitHub app-v<version> -> identical DMG, Setup.exe, and Linux bytes
 └── Older app cannot reach its update feed -> manually install the DMG

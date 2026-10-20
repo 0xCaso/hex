@@ -3,8 +3,8 @@
 ## Public Paths
 
 ```ts
-hex.kitlangton.dev                         // the one site: platform-aware download
-├── hex.kitlangton.com/*                   // 301 to the same path on .dev (site/worker.ts)
+hex.kitlangton.com                         // the one site: platform-aware download
+├── hex.kitlangton.dev/*                   // 301 to the same path on .com (site/worker.ts)
 ├── downloads.hex.kitlangton.dev           // direct R2 Custom Domain; no redirect
 │   ├── releases/HEX-<version>-arm64.dmg
 │   ├── releases/HEX-<version>-arm64.zip    // signed Sparkle artifact
@@ -46,10 +46,11 @@ After each publication, bump `MAC_VERSION` or `DESKTOP_VERSION` in
 `anomalyco/homebrew-tap/Casks/hex.rb`. `bun run --cwd site check:downloads`
 must pass before deploying; then verify the live links.
 
-`hex.kitlangton.com` was a second, Mac-only site
-(`/Users/kit/code/projects/hex-marketing-site`, Worker `hex-marketing-site`).
-It is retired: its custom domain now belongs to `hex-voice-site`, whose worker
-301s every path to `hex.kitlangton.dev`. Do not deploy the old project again.
+`hex.kitlangton.com` once served a separate Mac-only site
+(`/Users/kit/code/projects/hex-marketing-site`, Worker `hex-marketing-site`,
+deleted). Do not deploy that project again: it would take the domain back.
+Both hosts now belong to `hex-voice-site`, which serves the site on `.com` and
+301s every `hex.kitlangton.dev` path to it.
 
 ## Network Recovery
 

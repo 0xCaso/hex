@@ -30,7 +30,7 @@ Download and run the installer for your PC:
 - x64: [`HEX-Setup-2.3.0-x64.exe`](https://downloads.hex.kitlangton.dev/releases/HEX-Setup-2.3.0-x64.exe)
 - ARM64: [`HEX-Setup-2.3.0-arm64.exe`](https://downloads.hex.kitlangton.dev/releases/HEX-Setup-2.3.0-arm64.exe)
 
-[hex.kitlangton.dev](https://hex.kitlangton.dev/) picks the right one. The
+[hex.kitlangton.com](https://hex.kitlangton.com/) picks the right one. The
 installer needs no administrator rights: it installs for the current user,
 adds Hex to the Start menu and to **Settings › Apps** for uninstalling, and
 opens Hex, whose first run downloads a speech model. Neither the installer nor

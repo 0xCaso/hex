@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://hex.kitlangton.dev/"><strong>Download for Mac, Windows, or Linux</strong></a>
+  <a href="https://hex.kitlangton.com/"><strong>Download for Mac, Windows, or Linux</strong></a>
   · <a href="docs/windows.md">Windows beta</a>
   · <a href="docs/linux.md">Linux beta</a>
   · <a href="sdk/typescript/README.md">TypeScript SDK</a>

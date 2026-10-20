@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://hex.kitlangton.dev/sitemap.xml
+Sitemap: https://hex.kitlangton.com/sitemap.xml

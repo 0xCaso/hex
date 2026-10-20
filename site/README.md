@@ -1,10 +1,10 @@
 # Hex website
 
-`hex.kitlangton.dev` is the one Hex site. `bun run dev` starts Vite. `bun run
+`hex.kitlangton.com` is the one Hex site. `bun run dev` starts Vite. `bun run
 build` checks TypeScript and builds it; `bun run check:downloads` checks that
 every download link serves a file; `bunx wrangler deploy` publishes the Worker,
-whose `worker.ts` 301s `hex.kitlangton.com`, plain HTTP, and workers.dev to the
-same path on `hex.kitlangton.dev`.
+whose `worker.ts` 301s `hex.kitlangton.dev`, plain HTTP, and workers.dev to the
+same path on `hex.kitlangton.com`.
 
 The download section (`src/Download.tsx`) names the visitor's platform on first
 paint and refines it with UA client hints: a DMG for Apple silicon Macs, the

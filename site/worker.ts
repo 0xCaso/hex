@@ -1,10 +1,10 @@
-// hex.kitlangton.dev is the one Hex site. The old hex.kitlangton.com, plain
+// hex.kitlangton.com is the one Hex site. hex.kitlangton.dev, plain
 // HTTP, and workers.dev all 301 to the same path and query there. Hashed build
 // assets get a long cache. `wrangler dev --var ANY_HOST:1` turns the redirect
 // off for local testing.
 type Env = { ASSETS: { fetch(request: Request): Promise<Response> }; ANY_HOST?: string }
 
-const HOST = "hex.kitlangton.dev"
+const HOST = "hex.kitlangton.com"
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

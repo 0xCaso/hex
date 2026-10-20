@@ -626,8 +626,8 @@ installed clients. The publisher verifies both R2 artifacts and the identical
 GitHub DMG mirror before publishing the appcast. GitHub app releases use
 `app-v<VERSION>` tags with `--latest=false`, keeping them distinct from SDK
 releases. Never overwrite a published artifact with different bytes.
-`https://hex.kitlangton.dev` (in-repo `site/`, Worker `hex-voice-site`) is the
-only Hex website; its Worker 301s `hex.kitlangton.com` and every other host to
+`https://hex.kitlangton.com` (in-repo `site/`, Worker `hex-voice-site`) is the
+only Hex website; its Worker 301s `hex.kitlangton.dev` and every other host to
 the same path there. After publishing a version, bump `MAC_VERSION` or
 `DESKTOP_VERSION` in `site/src/release.ts`, the explicit GitHub mirror/version
 link in `README.md`, and (macOS) the Homebrew cask. `bun run --cwd site

@@ -11,8 +11,8 @@
     "run_worker_first": true
   },
   "routes": [
-    { "pattern": "hex.kitlangton.dev", "custom_domain": true },
-    // The retired second site; the worker redirects it to hex.kitlangton.dev.
-    { "pattern": "hex.kitlangton.com", "custom_domain": true }
+    { "pattern": "hex.kitlangton.com", "custom_domain": true },
+    // The former main host; the worker redirects it to hex.kitlangton.com.
+    { "pattern": "hex.kitlangton.dev", "custom_domain": true }
   ]
 }
