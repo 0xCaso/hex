@@ -76,7 +76,7 @@ export function useShout(root: RefObject<HTMLElement | null>, canvas: RefObject<
   useEffect(() => () => live.current?.destroy(), [])
 
   const context = useRef<AudioContext | null>(null)
-  // Must run inside the click or key press: that gesture is what lets the browser play audio.
+  // Must run inside the click: that gesture is what lets the browser play audio.
   const start = useCallback(() => {
     if (phase === "starting" || phase === "started") return
     const quiet = readMuted()
@@ -91,10 +91,6 @@ export function useShout(root: RefObject<HTMLElement | null>, canvas: RefObject<
   }, [phase, load])
 
   const toggleMuted = useCallback(() => {
-    if (!muted && context.current?.state === "suspended" && !document.hidden) {
-      void context.current.resume()
-      return
-    }
     const next = !muted
     setMutedState(next)
     try {
@@ -107,61 +103,17 @@ export function useShout(root: RefObject<HTMLElement | null>, canvas: RefObject<
     live.current?.setMuted(next, context.current)
   }, [muted])
 
-  // Browsers don't count a modifier key as permission to play, so starting with ⌥ leaves the
-  // audio suspended. Say so, and let the next click or ordinary key turn the sound on.
-  const [blocked, setBlocked] = useState(false)
-  useEffect(() => {
-    const ctx = context.current
-    if (phase !== "started" || !ctx) return
-    const check = () => setBlocked(ctx.state === "suspended" && !readMuted() && !document.hidden)
-    const wake = (e: Event) => {
-      if (e.target instanceof Element && e.target.closest(".sound")) return
-      if (!readMuted() && ctx.state === "suspended" && !document.hidden) void ctx.resume()
-    }
-    check()
-    ctx.addEventListener("statechange", check)
-    addEventListener("pointerdown", wake)
-    addEventListener("keydown", wake)
-    return () => {
-      ctx.removeEventListener("statechange", check)
-      removeEventListener("pointerdown", wake)
-      removeEventListener("keydown", wake)
-    }
-  }, [phase, muted])
-
-  return { phase, muted, blocked, start, load, toggleMuted }
+  return { phase, muted, start, load, toggleMuted }
 }
 
 export function OptionKey({ phase, onStart, onIntent }: { phase: Phase; onStart(): void; onIntent(): void }) {
-  const [pressed, setPressed] = useState(false)
   const gone = phase === "started"
-
-  useEffect(() => {
-    if (gone) return
-    const down = (e: KeyboardEvent) => {
-      if (e.key !== "Alt" || e.repeat) return
-      setPressed(true)
-      onStart()
-    }
-    const up = (e: KeyboardEvent) => {
-      if (e.key === "Alt") setPressed(false)
-    }
-    const blur = () => setPressed(false)
-    addEventListener("keydown", down)
-    addEventListener("keyup", up)
-    addEventListener("blur", blur)
-    return () => {
-      removeEventListener("keydown", down)
-      removeEventListener("keyup", up)
-      removeEventListener("blur", blur)
-    }
-  }, [gone, onStart, onIntent])
 
   return (
     <button
       type="button"
       className="keycap"
-      data-pressed={pressed || phase === "starting" || undefined}
+      data-pressed={phase === "starting" || undefined}
       data-gone={gone || undefined}
       aria-label="Play the demo with sound"
       tabIndex={gone ? -1 : undefined}
@@ -182,28 +134,19 @@ export function OptionKey({ phase, onStart, onIntent }: { phase: Phase; onStart(
         </span>
       </span>
       <span className="keycap__hint" aria-hidden="true">
-        <span className="keycap__hint-fine">Click or press ⌥</span>
+        <span className="keycap__hint-fine">Click to play</span>
         <span className="keycap__hint-touch">Tap to play</span>
       </span>
     </button>
   )
 }
 
-export function SoundToggle({ muted, blocked, onToggle }: { muted: boolean; blocked: boolean; onToggle(): void }) {
-  const off = muted || blocked
+export function SoundToggle({ muted, onToggle }: { muted: boolean; onToggle(): void }) {
   return (
-    <button
-      type="button"
-      className="sound"
-      data-blocked={blocked || undefined}
-      aria-pressed={!off}
-      aria-label={blocked ? "Turn on sound" : muted ? "Unmute" : "Mute"}
-      onClick={onToggle}
-    >
-      {blocked && <span className="sound__label">Click for sound</span>}
+    <button type="button" className="sound" aria-pressed={!muted} aria-label={muted ? "Unmute" : "Mute"} onClick={onToggle}>
       <svg viewBox="0 0 20 20" aria-hidden="true">
         <path d="M3 8v4h3l4 3V5L6 8z" />
-        {off ? <path d="m13.5 8 4 4m0-4-4 4" fill="none" /> : <path d="M13 7.5a3.5 3.5 0 0 1 0 5M15.2 5.5a6.5 6.5 0 0 1 0 9" fill="none" />}
+        {muted ? <path d="m13.5 8 4 4m0-4-4 4" fill="none" /> : <path d="M13 7.5a3.5 3.5 0 0 1 0 5M15.2 5.5a6.5 6.5 0 0 1 0 9" fill="none" />}
       </svg>
     </button>
   )

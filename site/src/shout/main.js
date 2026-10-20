@@ -1594,7 +1594,7 @@ if (capture) {
 
 return {
   renderer: renderer.kind,
-  // Call from a click or key press with an AudioContext created inside that gesture.
+  // Call from a click with an AudioContext created inside that gesture.
   async start({ context, muted }) {
     if (started) return
     audio.attach(context, { muted })

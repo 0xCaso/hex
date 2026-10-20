@@ -51,7 +51,7 @@ export default function App() {
           <span>HEX</span>
         </a>
         <div className="header__tools" data-avoid>
-          {shout.phase === "started" && <SoundToggle muted={shout.muted} blocked={shout.blocked} onToggle={shout.toggleMuted} />}
+          {shout.phase === "started" && <SoundToggle muted={shout.muted} onToggle={shout.toggleMuted} />}
           <a className="header__github" href="https://github.com/anomalyco/hex">
             <GitHubMark />
             <span>GitHub</span>
