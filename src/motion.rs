@@ -351,12 +351,6 @@ struct KeyedSpringState {
     last_step: Instant,
 }
 
-struct KeyedTransitionState {
-    active_key: u64,
-    spring: Spring,
-    last_step: Instant,
-}
-
 /// Self-stepping spring wrapper for component fields (such as toggles, segmented
 /// controls, and disclosure widths) that also need `.enabled()` or `.set_target()`
 /// outside `render`.
@@ -365,6 +359,7 @@ pub struct ToggleSpring {
     pub spring: Spring,
     pub spec: Spec,
     last_frame: Instant,
+    waking: bool,
 }
 
 impl ToggleSpring {
@@ -381,6 +376,7 @@ impl ToggleSpring {
             spring: Spring::at(position),
             spec,
             last_frame: Instant::now(),
+            waking: false,
         }
     }
 
@@ -394,11 +390,13 @@ impl ToggleSpring {
         }
         if self.is_settled() {
             self.last_frame = Instant::now();
+            self.waking = true;
         }
         self.spring.to(target);
     }
 
     pub fn advance(&mut self, elapsed: Duration) {
+        self.waking = false;
         let dt = elapsed.as_secs_f32().clamp(0.0, 1.0);
         self.spring.step(self.spec, dt);
         self.spring.settle(self.spec, DEFAULT_EPSILON);
@@ -408,9 +406,22 @@ impl ToggleSpring {
         if reduced_motion() || std::env::var_os("HEX_PREVIEW_BEFORE").is_some() {
             self.spring.jump(self.spring.target);
             self.last_frame = current_frame_instant();
+            self.waking = false;
             return self.spring.x;
         }
         let now = current_frame_instant();
+        if self.is_settled() {
+            self.spring.jump(self.spring.target);
+            self.last_frame = now;
+            self.waking = false;
+            return self.spring.x;
+        }
+        if self.waking {
+            self.waking = false;
+            self.last_frame = now;
+            window.request_animation_frame();
+            return self.spring.x;
+        }
         let dt = now
             .saturating_duration_since(self.last_frame)
             .as_secs_f32()
@@ -442,7 +453,6 @@ impl ToggleSpring {
 thread_local! {
     static CURRENT_FRAME_INSTANT: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static KEYED_SPRINGS: RefCell<HashMap<(WindowId, ElementId), KeyedSpringState>> = RefCell::new(HashMap::new());
-    static KEYED_TRANSITIONS: RefCell<HashMap<(WindowId, ElementId), KeyedTransitionState>> = RefCell::new(HashMap::new());
 }
 
 fn current_frame_instant() -> Instant {
@@ -466,6 +476,16 @@ pub trait WindowMotion {
     /// when Reduce Motion is enabled.
     fn spring(&mut self, key: impl Into<ElementId>, target: f32, spec: Spec) -> f32;
 
+    /// Steps a keyed spring toward `target`, or jumps 1:1 when `jump` is true
+    /// (for direct user manipulation such as dragging a slider).
+    fn spring_or_jump(
+        &mut self,
+        key: impl Into<ElementId>,
+        target: f32,
+        jump: bool,
+        spec: Spec,
+    ) -> f32;
+
     /// Steps a keyed boolean progress spring (`0.0` when `enabled == false`, `1.0` when `true`),
     /// requesting another animation frame only while unsettled.
     fn spring_when(&mut self, key: impl Into<ElementId>, enabled: bool, spec: Spec) -> f32;
@@ -474,20 +494,6 @@ pub trait WindowMotion {
     /// crossfade when Reduce Motion is enabled.
     fn spring_fade(&mut self, key: impl Into<ElementId>, target: f32, spec: Spec) -> f32;
 
-    /// Returns a `0.0 -> 1.0` progress spring that starts settled at `1.0` on first render
-    /// and restarts from `0.0` whenever `active_key` changes. Snaps to `1.0` when Reduce Motion is enabled.
-    fn spring_transition(&mut self, key: impl Into<ElementId>, active_key: u64, spec: Spec) -> f32;
-
-    /// Returns a `0.0 -> 1.0` opacity transition spring that starts settled at `1.0` on first render
-    /// and restarts from `0.0` whenever `active_key` changes, keeping a short `0.16s` crossfade
-    /// when Reduce Motion is enabled.
-    fn spring_fade_transition(
-        &mut self,
-        key: impl Into<ElementId>,
-        active_key: u64,
-        spec: Spec,
-    ) -> f32;
-
     /// Whether Reduce Motion is active.
     fn reduced_motion(&self) -> bool;
 }
@@ -495,6 +501,18 @@ pub trait WindowMotion {
 impl WindowMotion for Window {
     fn spring(&mut self, key: impl Into<ElementId>, target: f32, spec: Spec) -> f32 {
         let animate = !reduced_motion() && std::env::var_os("HEX_PREVIEW_BEFORE").is_none();
+        step_window_spring(self, key.into(), target, animate, spec, DEFAULT_EPSILON)
+    }
+
+    fn spring_or_jump(
+        &mut self,
+        key: impl Into<ElementId>,
+        target: f32,
+        jump: bool,
+        spec: Spec,
+    ) -> f32 {
+        let animate =
+            !jump && !reduced_motion() && std::env::var_os("HEX_PREVIEW_BEFORE").is_none();
         step_window_spring(self, key.into(), target, animate, spec, DEFAULT_EPSILON)
     }
 
@@ -513,33 +531,6 @@ impl WindowMotion for Window {
             self,
             key.into(),
             target,
-            animate,
-            effective_spec,
-            DEFAULT_EPSILON,
-        )
-    }
-
-    fn spring_transition(&mut self, key: impl Into<ElementId>, active_key: u64, spec: Spec) -> f32 {
-        let animate = !reduced_motion() && std::env::var_os("HEX_PREVIEW_BEFORE").is_none();
-        step_window_transition(self, key.into(), active_key, animate, spec, DEFAULT_EPSILON)
-    }
-
-    fn spring_fade_transition(
-        &mut self,
-        key: impl Into<ElementId>,
-        active_key: u64,
-        spec: Spec,
-    ) -> f32 {
-        let animate = std::env::var_os("HEX_PREVIEW_BEFORE").is_none();
-        let effective_spec = if reduced_motion() {
-            presets::REDUCED_FADE
-        } else {
-            spec
-        };
-        step_window_transition(
-            self,
-            key.into(),
-            active_key,
             animate,
             effective_spec,
             DEFAULT_EPSILON,
@@ -590,61 +581,6 @@ fn step_window_spring(
             return (state.spring.x, false);
         }
 
-        let dt = frame_now
-            .saturating_duration_since(state.last_step)
-            .as_secs_f32()
-            .clamp(0.0, MAX_FRAME_DT);
-        state.last_step = frame_now;
-        state.spring.step(spec, dt);
-        let settled = state.spring.settle(spec, eps);
-        (state.spring.x, settled)
-    });
-    if !settled {
-        window.request_animation_frame();
-    }
-    value
-}
-
-fn step_window_transition(
-    window: &mut Window,
-    key: ElementId,
-    active_key: u64,
-    animate: bool,
-    spec: Spec,
-    eps: f32,
-) -> f32 {
-    let frame_now = current_frame_instant();
-    let window_id = window.window_handle().window_id();
-    let (value, settled) = KEYED_TRANSITIONS.with(|map| {
-        let mut map = map.borrow_mut();
-        let state = map
-            .entry((window_id, key))
-            .or_insert_with(|| KeyedTransitionState {
-                active_key,
-                spring: Spring::at(1.0),
-                last_step: frame_now,
-            });
-        if !animate {
-            state.active_key = active_key;
-            state.spring.jump(1.0);
-            state.last_step = frame_now;
-            return (1.0, true);
-        }
-        if state.active_key != active_key {
-            state.active_key = active_key;
-            state.spring = Spring {
-                x: 0.0,
-                v: 0.0,
-                target: 1.0,
-            };
-            state.last_step = frame_now;
-            return (0.0, false);
-        }
-        if state.spring.settled(spec, eps) {
-            state.spring.jump(1.0);
-            state.last_step = frame_now;
-            return (1.0, true);
-        }
         let dt = frame_now
             .saturating_duration_since(state.last_step)
             .as_secs_f32()
@@ -1133,5 +1069,73 @@ mod tests {
         assert_eq!(summary.p50_us, 5000);
         assert_eq!(summary.p95_us, 9500);
         assert_eq!(summary.max_us, 10000);
+    }
+
+    #[test]
+    fn fun_pane_mode_and_height_traces_are_continuous_without_jumps() {
+        const WIDTHS: [f32; 9] = [66.0, 56.0, 52.0, 62.0, 76.0, 54.0, 60.0, 86.0, 44.0];
+        let target_rect = |idx: usize| -> (f32, f32) {
+            let left = 2.0 + WIDTHS[..idx].iter().sum::<f32>();
+            (left, WIDTHS[idx])
+        };
+
+        // 1. Mode pill trace: Muted (1, width 56) -> Robot (5, width 54) must never pump width
+        // up to 76px (Chipmunk) and must move monotonically in `left` and `width`.
+        let (start_left, start_width) = target_rect(1);
+        let (end_left, end_width) = target_rect(5);
+        let mut left = Spring::at(start_left);
+        let mut width = Spring::at(start_width);
+        let mut prev_left = left.x;
+        let mut prev_width = width.x;
+        for _ in 0..30 {
+            left.step_to(end_left, presets::SNAP, 1.0 / 60.0);
+            width.step_to(end_width, presets::SNAP, 1.0 / 60.0);
+            assert!(left.x >= prev_left - 1e-4, "left reversed");
+            assert!(
+                width.x <= prev_width + 1e-4 && width.x >= end_width - 1e-4,
+                "width pumped outside [54, 56]: {}",
+                width.x
+            );
+            prev_left = left.x;
+            prev_width = width.x;
+        }
+
+        // 2. Mode controls height trace: Muffled (row1=58, row2=52, comfort=0) ->
+        // Muted (row1=58, row2=0, comfort=52) must keep total height invariant at 110px.
+        let mut row1 = Spring::at(1.0);
+        let mut row2 = Spring::at(1.0);
+        let mut comfort = Spring::at(0.0);
+        for _ in 0..30 {
+            row1.step_to(1.0, presets::REFLOW, 1.0 / 60.0);
+            row2.step_to(0.0, presets::REFLOW, 1.0 / 60.0);
+            comfort.step_to(1.0, presets::REFLOW, 1.0 / 60.0);
+            let h = ((58.0 * row1.x) * 64.0).round() / 64.0
+                + ((52.0 * row2.x) * 64.0).round() / 64.0
+                + ((52.0 * comfort.x) * 64.0).round() / 64.0;
+            assert!(
+                (h - 110.0).abs() <= 0.04,
+                "Muffled -> Muted height jumped: {h}"
+            );
+        }
+
+        // Muted -> Robot: total height glides monotonically from 110px -> 58px with no >6px frame step.
+        let mut prev_h = 110.0_f32;
+        for _ in 0..40 {
+            row1.step_to(1.0, presets::REFLOW, 1.0 / 60.0);
+            row2.step_to(0.0, presets::REFLOW, 1.0 / 60.0);
+            comfort.step_to(0.0, presets::REFLOW, 1.0 / 60.0);
+            let h = ((58.0 * row1.x) * 64.0).round() / 64.0
+                + ((52.0 * row2.x) * 64.0).round() / 64.0
+                + ((52.0 * comfort.x) * 64.0).round() / 64.0;
+            assert!(h <= prev_h + 1e-4, "height reversed: {h} > {prev_h}");
+            assert!(
+                (prev_h - h) <= 6.0,
+                "single-frame height jump too large: {} -> {}",
+                prev_h,
+                h
+            );
+            prev_h = h;
+        }
+        assert!((prev_h - 58.0).abs() < 0.2);
     }
 }

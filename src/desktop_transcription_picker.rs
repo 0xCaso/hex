@@ -302,7 +302,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
     });
 
     let open_progress = view.open_progress.clamp(0.0, 1.0);
-    let modal_offset = ((1.0 - open_progress) * PANE_ENTER_OFFSET * 2.0).round() * 0.5;
+    let modal_offset = ((1.0 - open_progress) * PANE_ENTER_OFFSET * 64.0).round() / 64.0;
     let language_progress = view.language_progress.clamp(0.0, 1.0);
 
     div()

@@ -1063,7 +1063,7 @@ pub(crate) fn menu_with_progress(progress: f32) -> Div {
 /// [`MENU_ENTER_OFFSET`] down from its trigger.
 pub(crate) fn dropdown_menu_with_progress(progress: f32) -> Div {
     let progress = progress.clamp(0.0, 1.0);
-    let offset = ((1.0 - progress) * MENU_ENTER_OFFSET * 2.0).round() * 0.5;
+    let offset = ((1.0 - progress) * MENU_ENTER_OFFSET * 64.0).round() / 64.0;
     menu_with_progress(progress)
         .absolute()
         .top(px(CONTROL_HEIGHT + MENU_OFFSET - offset))
@@ -1164,6 +1164,29 @@ pub(crate) fn segmented_item(selected: bool) -> Div {
 /// width in order; append the items with [`sliding_segmented_item`].
 pub(crate) fn sliding_segmented_control(position: f32, widths: &[f32]) -> Div {
     let (left, width) = segmented_geometry(position, widths);
+    sliding_segmented_rect(left, width)
+}
+
+/// A [`segmented_control`] whose selection indicator springs directly in pixel
+/// space (`left` and `width`) so unequal item widths never cause velocity jumps
+/// or intermediate width pumping.
+pub(crate) fn sliding_segmented_for(
+    window: &mut Window,
+    key: &'static str,
+    selected_index: usize,
+    widths: &[f32],
+) -> Div {
+    use crate::motion::WindowMotion;
+    let last = widths.len().saturating_sub(1);
+    let idx = selected_index.min(last);
+    let target_left = 2.0 + widths[..idx].iter().sum::<f32>();
+    let target_width = widths.get(idx).copied().unwrap_or(0.0);
+    let left = window.spring((key, 0u64), target_left, SPRING_SNAP);
+    let width = window.spring((key, 1u64), target_width, SPRING_SNAP);
+    sliding_segmented_rect(left, width)
+}
+
+fn sliding_segmented_rect(left: f32, width: f32) -> Div {
     let (left, width) = crate::motion::snap_edge_pair(left, left + width);
     segmented_control().relative().child(
         div()

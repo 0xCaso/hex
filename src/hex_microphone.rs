@@ -719,11 +719,24 @@ static DEMO_RECORDED_LEN: AtomicUsize = AtomicUsize::new(0);
 static DEMO_PLAYBACK_GEN: AtomicU64 = AtomicU64::new(0);
 static DEMO_PLAYING_TRACK: AtomicU32 = AtomicU32::new(0); // 0 = none, 1 = CallHears, 2 = You
 static DEMO_PLAYBACK_PROGRESS_BITS: AtomicU32 = AtomicU32::new(0.0_f32.to_bits());
+static DEMO_CLOCK_EPOCH: OnceLock<Instant> = OnceLock::new();
+static DEMO_PLAYBACK_START_NS: AtomicU64 = AtomicU64::new(0);
+static DEMO_PLAYBACK_DURATION_NS: AtomicU64 = AtomicU64::new(0);
+static DEMO_RECORDING_START_NS: AtomicU64 = AtomicU64::new(0);
 static DEMO_RECOMPUTE_RUNNING: AtomicBool = AtomicBool::new(false);
 static DEMO_RECOMPUTE_DIRTY: AtomicBool = AtomicBool::new(false);
 
+fn demo_now_ns() -> u64 {
+    let epoch = DEMO_CLOCK_EPOCH.get_or_init(Instant::now);
+    epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 pub fn demo_is_busy() -> bool {
     DEMO_RECORDING_ACTIVE.load(Ordering::Acquire) || DEMO_PLAYING_TRACK.load(Ordering::Acquire) != 0
+}
+
+pub fn demo_recompute_is_running() -> bool {
+    DEMO_RECOMPUTE_RUNNING.load(Ordering::Acquire) || DEMO_RECOMPUTE_DIRTY.load(Ordering::Acquire)
 }
 
 pub fn prewarm_demo_async() {
@@ -944,6 +957,7 @@ pub fn start_demo_recording() {
     if let Ok(mut guard) = demo_buffers_lock().lock() {
         guard.recorded_samples.clear();
         DEMO_RECORDED_LEN.store(0, Ordering::Relaxed);
+        DEMO_RECORDING_START_NS.store(demo_now_ns(), Ordering::Release);
         DEMO_RECORDING_ACTIVE.store(true, Ordering::Release);
     }
 }
@@ -973,9 +987,18 @@ pub fn select_demo_source(source: DemoSourceKind) {
 }
 
 pub fn stop_demo_playback() {
+    if DEMO_PLAYING_TRACK.load(Ordering::Acquire) != 0 {
+        let start = DEMO_PLAYBACK_START_NS.load(Ordering::Acquire);
+        let dur = DEMO_PLAYBACK_DURATION_NS.load(Ordering::Acquire);
+        if dur > 0 {
+            let elapsed = demo_now_ns().saturating_sub(start);
+            let p = ((elapsed as f64) / (dur as f64)).clamp(0.0, 1.0) as f32;
+            DEMO_PLAYBACK_PROGRESS_BITS.store(p.to_bits(), Ordering::Release);
+        }
+    }
     DEMO_PLAYBACK_GEN.fetch_add(1, Ordering::AcqRel);
     DEMO_PLAYING_TRACK.store(0, Ordering::Release);
-    DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+    DRIVER_ACTION_SEQ.fetch_add(1, Ordering::AcqRel);
 }
 
 pub fn play_demo_track(track: DemoPlaybackTrack) {
@@ -1011,19 +1034,22 @@ pub fn play_demo_track(track: DemoPlaybackTrack) {
         DemoPlaybackTrack::CallHears => 1,
         DemoPlaybackTrack::You => 2,
     };
-    DEMO_PLAYING_TRACK.store(track_code, Ordering::Release);
+    let duration =
+        Duration::from_secs_f64((samples.len() as f64) / f64::from(HEX_MICROPHONE_SAMPLE_RATE));
+    DEMO_PLAYBACK_START_NS.store(demo_now_ns(), Ordering::Release);
+    DEMO_PLAYBACK_DURATION_NS.store(duration.as_nanos() as u64, Ordering::Release);
     DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+    DEMO_PLAYING_TRACK.store(track_code, Ordering::Release);
 
     thread::spawn(move || {
         let Ok(mut sink) = rodio::DeviceSinkBuilder::open_default_sink() else {
             if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) == generation {
                 DEMO_PLAYING_TRACK.store(0, Ordering::Release);
+                DRIVER_ACTION_SEQ.fetch_add(1, Ordering::AcqRel);
             }
             return;
         };
         sink.log_on_drop(false);
-        let duration =
-            Duration::from_secs_f64((samples.len() as f64) / f64::from(HEX_MICROPHONE_SAMPLE_RATE));
         let Some(ch) = std::num::NonZeroU16::new(1) else {
             return;
         };
@@ -1032,40 +1058,40 @@ pub fn play_demo_track(track: DemoPlaybackTrack) {
         };
         let buffer = rodio::buffer::SamplesBuffer::new(ch, sr, samples);
         sink.mixer().add(buffer);
+        DEMO_PLAYBACK_START_NS.store(demo_now_ns(), Ordering::Release);
         let started = Instant::now();
         while started.elapsed() < duration {
             if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) != generation {
                 return;
             }
-            let p = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
-            DEMO_PLAYBACK_PROGRESS_BITS.store(p.to_bits(), Ordering::Release);
-            thread::sleep(Duration::from_millis(30));
+            thread::sleep(Duration::from_millis(16));
         }
         if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) == generation {
+            DEMO_PLAYBACK_PROGRESS_BITS.store(1.0_f32.to_bits(), Ordering::Release);
             DEMO_PLAYING_TRACK.store(0, Ordering::Release);
-            DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+            DRIVER_ACTION_SEQ.fetch_add(1, Ordering::AcqRel);
         }
     });
 }
 
 pub fn simulate_silent_demo_playback(duration: Duration) {
     let generation = DEMO_PLAYBACK_GEN.fetch_add(1, Ordering::AcqRel) + 1;
-    DEMO_PLAYING_TRACK.store(1, Ordering::Release);
+    DEMO_PLAYBACK_START_NS.store(demo_now_ns(), Ordering::Release);
+    DEMO_PLAYBACK_DURATION_NS.store(duration.as_nanos() as u64, Ordering::Release);
     DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+    DEMO_PLAYING_TRACK.store(1, Ordering::Release);
     thread::spawn(move || {
         let started = Instant::now();
         while started.elapsed() < duration {
             if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) != generation {
                 return;
             }
-            let p =
-                (started.elapsed().as_secs_f32() / duration.as_secs_f32() * 0.72).clamp(0.0, 1.0);
-            DEMO_PLAYBACK_PROGRESS_BITS.store(p.to_bits(), Ordering::Release);
             thread::sleep(Duration::from_millis(16));
         }
         if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) == generation {
+            DEMO_PLAYBACK_PROGRESS_BITS.store(1.0_f32.to_bits(), Ordering::Release);
             DEMO_PLAYING_TRACK.store(0, Ordering::Release);
-            DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+            DRIVER_ACTION_SEQ.fetch_add(1, Ordering::AcqRel);
         }
     });
 }
@@ -1073,15 +1099,39 @@ pub fn simulate_silent_demo_playback(duration: Duration) {
 pub fn demo_snapshot() -> DemoSnapshot {
     let cfg = current_tuned_config();
     let is_recording = DEMO_RECORDING_ACTIVE.load(Ordering::Acquire);
-    let recorded_len = DEMO_RECORDED_LEN.load(Ordering::Relaxed);
-    let recording_progress =
-        ((recorded_len as f32) / (DEMO_RECORD_MAX_SAMPLES as f32)).clamp(0.0, 1.0);
+    let recording_progress = if is_recording {
+        let start = DEMO_RECORDING_START_NS.load(Ordering::Acquire);
+        let max_ns = (DEMO_RECORD_MAX_SAMPLES as u64) * 1_000_000_000
+            / u64::from(HEX_MICROPHONE_SAMPLE_RATE);
+        if max_ns > 0 && start > 0 {
+            let elapsed = demo_now_ns().saturating_sub(start);
+            ((elapsed as f64) / (max_ns as f64)).clamp(0.0, 1.0) as f32
+        } else {
+            let recorded_len = DEMO_RECORDED_LEN.load(Ordering::Relaxed);
+            ((recorded_len as f32) / (DEMO_RECORD_MAX_SAMPLES as f32)).clamp(0.0, 1.0)
+        }
+    } else {
+        1.0
+    };
     let playing = match DEMO_PLAYING_TRACK.load(Ordering::Acquire) {
         1 => Some(DemoPlaybackTrack::CallHears),
         2 => Some(DemoPlaybackTrack::You),
         _ => None,
     };
-    let playback_progress = f32::from_bits(DEMO_PLAYBACK_PROGRESS_BITS.load(Ordering::Acquire));
+    let playback_progress = if playing.is_some() {
+        let start = DEMO_PLAYBACK_START_NS.load(Ordering::Acquire);
+        let dur = DEMO_PLAYBACK_DURATION_NS.load(Ordering::Acquire);
+        if dur > 0 {
+            let elapsed = demo_now_ns().saturating_sub(start);
+            let p = ((elapsed as f64) / (dur as f64)).clamp(0.0, 1.0) as f32;
+            DEMO_PLAYBACK_PROGRESS_BITS.store(p.to_bits(), Ordering::Release);
+            p
+        } else {
+            f32::from_bits(DEMO_PLAYBACK_PROGRESS_BITS.load(Ordering::Acquire))
+        }
+    } else {
+        f32::from_bits(DEMO_PLAYBACK_PROGRESS_BITS.load(Ordering::Acquire))
+    };
 
     let Ok(mut guard) = demo_buffers_lock().lock() else {
         return DemoSnapshot {
