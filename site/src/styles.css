@@ -198,6 +198,25 @@ h1 {
   pointer-events: none;
 }
 
+.teeth-poster {
+  position: fixed;
+  z-index: -1;
+  top: max(4.5rem, 6vh);
+  left: 50%;
+  width: auto;
+  height: clamp(9rem, 24vh, 15rem);
+  transform: translateX(-50%);
+  opacity: 0.9;
+  pointer-events: none;
+  animation: teeth-poster-in 0.2s ease-out both;
+}
+
+@keyframes teeth-poster-in {
+  from {
+    opacity: 0;
+  }
+}
+
 .hero__copy p {
   max-width: 47ch;
   color: #9b9da3;
