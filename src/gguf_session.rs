@@ -11,6 +11,12 @@ use crate::transcription_models::{
     AUTO_LANGUAGE, ModelDefinition, ModelRuntime, TranscriptionSelection,
 };
 
+/// 8 s of audio reaches every stream window shape a dictation can use (the
+/// left context grows to 5.6 s), so the GPU driver compiles those kernels
+/// during launch. With a 1 s probe, a new build's first dictation compiled
+/// them in its finish step and took 3-4 s on an RTX 5070 Ti.
+const STREAM_PREWARM_SAMPLES: usize = 8 * 16_000;
+
 pub(crate) fn validate_gguf_artifact(
     path: &Path,
     definition: &ModelDefinition,
@@ -85,7 +91,8 @@ impl OfflineGgufSession {
 
     /// Streams only on a GPU (Metal, Vulkan): a CPU stream re-encodes each
     /// overlapping window and would cost several times the offline compute.
-    /// The probe also prewarms the stream graph. Without an extension
+    /// The probe also prewarms the stream graph (see
+    /// [`STREAM_PREWARM_SAMPLES`]). Without an extension
     /// Parakeet buffers with its largest left, chunk, and right context
     /// (Unified English: 5.6 s, 1.04 s, 1.04 s), its most accurate and least
     /// compute-intensive setting. `HEX_STREAMING=0` keeps the model offline
@@ -130,7 +137,7 @@ impl OfflineGgufSession {
             &stream_options,
             &transcribe_cpp::CancelToken::new(),
             |stream| {
-                stream.feed(&vec![0.0; 16_000])?;
+                stream.feed(&vec![0.0; STREAM_PREWARM_SAMPLES])?;
                 stream.finalize().map(|_| ())
             },
         );
