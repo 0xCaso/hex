@@ -21,10 +21,12 @@ frameworks="$bundle/Contents/Frameworks"
 export MACOSX_DEPLOYMENT_TARGET=15.0
 cargo build --locked --release --manifest-path "$root/Cargo.toml"
 rm -rf "$bundle"
-mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$frameworks"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$bundle/Contents/Library" "$frameworks"
 cp "$root/target/release/voice-control" "$executable"
 cp "$root/app/Info.plist" "$bundle/Contents/Info.plist"
 cp "$root/LICENSE" "$root/THIRD_PARTY_NOTICES.md" "$bundle/Contents/Resources/"
+HEX_VERSION="$version" HEX_BUILD_NUMBER="$build_number" VOICE_CONTROL_TEAM_ID="$team_id" VOICE_CONTROL_CODESIGN_IDENTITY="$identity" HEX_SKIP_INSTALL_SCRIPT=1 \
+  "$root/scripts/build-hex-microphone-driver.sh" "$bundle/Contents/Library" >&2
 (cd "$root/sdk/commands" && bun run build)
 mkdir -p "$bundle/Contents/Resources/commands-sdk"
 cp "$root/sdk/commands/package.json" "$bundle/Contents/Resources/commands-sdk/"
@@ -66,6 +68,7 @@ codesign --force --timestamp --options runtime --sign "$identity" "$sparkle/Upda
 codesign --force --timestamp --options runtime --sign "$identity" "$frameworks/Sparkle.framework"
 codesign --force --timestamp --options runtime --sign "$identity" "$frameworks/libonnxruntime.1.23.2.dylib"
 codesign --force --timestamp --options runtime --sign "$identity" "$frameworks/libmoonshine.dylib"
+codesign --force --timestamp --options runtime --sign "$identity" "$bundle/Contents/Library/HexMicrophone.driver"
 codesign --force --timestamp --options runtime --entitlements "$root/app/VoiceControl.entitlements" --sign "$identity" "$bundle"
 codesign --verify --deep --strict --verbose=2 "$bundle"
 echo "$bundle"

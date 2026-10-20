@@ -518,7 +518,10 @@ suppression, and the Markdown copy in the user's transcript folder.
 HEX_EXPERIMENTAL_MIC=1 or experimental.hex_microphone = true // fun.hex-microphone; macOS
 ├── Sidebar -> Fun pane + Settings > Experimental: Hex microphone
 ├── Hex Microphone card
-│   ├── Driver status -> Ready / In use by <app> | Driver not installed -> Copy install command
+│   ├── Driver status -> Installed v<ver> / In use by <app> + Uninstall
+│   │   ├── Version mismatch -> v<old> installed + Update + Uninstall
+│   │   ├── Not installed -> Install -> macOS admin prompt -> copies bundled HexMicrophone.driver + restarts coreaudiod
+│   │   └── Inline state -> Installing… / Uninstalling… / Cancelled / Failed with reason
 │   ├── Mode while dictating -> Muffled (default), Muted, Quiet, Normal, Chipmunk, Robot, Walkie, Underwater, Far
 │   ├── Key sliders -> Live mode tuning + Effect strength + Reset
 │   └── Try it -> Example clip OR Record 5s (in-memory only)
@@ -532,18 +535,22 @@ HEX_EXPERIMENTAL_MIC=1 or experimental.hex_microphone = true // fun.hex-micropho
 Sources: [voice_filter.rs](../../src/voice_filter.rs),
 [hex_microphone.rs](../../src/hex_microphone.rs),
 [HexMicrophoneDriver.c](../../macos/HexMicrophoneDriver/HexMicrophoneDriver.c),
+[build-app.sh](../../scripts/build-app.sh),
 and [app_window.rs](../../src/app_window.rs). Checks:
 `muffled_mode_attenuates_high_frequencies_and_preserves_length`,
 `muted_mode_with_comfort_noise_drops_speech_to_room_tone_floor`,
 `all_modes_produce_finite_bounded_samples`,
 `ring_buffer_transfers_samples_and_handles_underflow_and_overflow`,
-`driver_plugin_loopback_streams_at_48khz_under_20ms_latency`, and
+`driver_plugin_loopback_streams_at_48khz_under_20ms_latency`,
+`driver_plist_version_and_status_mismatch_are_detected`,
+`osascript_failure_classifies_user_cancel_and_errors`,
+`audio_service_restart_interrupts_stream_and_recovers`, and
 `experimental_fun_pane_appears_only_when_enabled`. Previews:
 `./scripts/capture-preview.sh /tmp/hex-fun.png fun` (with `--fun-driver-missing`
 and `--fun-mode <mode>`) and `./scripts/capture-preview.sh /tmp/hex-settings-mic.png settings --experimental-mic`.
 Proof limit: in-process `dlopen` loopback proves the compiled driver's 48 kHz
-`WriteMix`/`ReadInput` path at 5.33 ms (256 frames), not a live `coreaudiod`
-install or an active Slack/Zoom call.
+`WriteMix`/`ReadInput` path at 5.33 ms (256 frames), not an interactive macOS
+admin authorization prompt or an active Slack/Zoom call.
 
 ## Recover And Maintain
 

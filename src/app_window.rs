@@ -1021,7 +1021,7 @@ pub struct AppWindow {
     history_retention_open: bool,
     history_copied: Option<u64>,
     fun_comfort_noise_toggle: ToggleSpring,
-    fun_install_copied: bool,
+    fun_driver_action_seq: u64,
     fun_driver_missing_preview: bool,
     fun_active_slider: Option<FunSlider>,
 }
@@ -1042,9 +1042,11 @@ impl AppWindow {
                 if window
                     .update(cx, |window, cx| {
                         // The tour and the Fun demo recorder/player react at 100 ms.
-                        let fun_busy = window.pane == Pane::Fun && {
+                        let fun_busy = {
                             let snap = crate::hex_microphone::demo_snapshot();
-                            snap.is_recording || snap.playing.is_some()
+                            (window.pane == Pane::Fun
+                                && (snap.is_recording || snap.playing.is_some()))
+                                || crate::hex_microphone::driver_action_in_progress()
                         };
                         interval = if (window.setup_visible && !window.preview) || fun_busy {
                             Duration::from_millis(100)
@@ -1061,6 +1063,7 @@ impl AppWindow {
                         let personal_workspace_changed = window.poll_personal_workspace();
                         let history_changed = window.poll_history(cx);
                         let platform_changed = window.poll_platform(cx);
+                        let hex_mic_changed = window.poll_hex_microphone();
                         let tour_changed = window.poll_tour();
                         if window.tour_quit_requested {
                             cx.quit();
@@ -1076,6 +1079,7 @@ impl AppWindow {
                             || personal_workspace_changed
                             || history_changed
                             || platform_changed
+                            || hex_mic_changed
                             || fun_busy
                         {
                             cx.notify();
@@ -1534,7 +1538,7 @@ impl AppWindow {
                 .is_some_and(|preview| preview.open_history_retention),
             history_copied: None,
             fun_comfort_noise_toggle: ToggleSpring::new(hex_mic_comfort_noise),
-            fun_install_copied: false,
+            fun_driver_action_seq: crate::hex_microphone::driver_action_seq(),
             fun_driver_missing_preview: preview
                 .as_ref()
                 .is_some_and(|preview| preview.fun_driver_missing),
@@ -3805,6 +3809,13 @@ impl AppWindow {
                     platform::CAPABILITIES.fun
                         && self.settings.experimental.hex_microphone_available(),
                     |column| {
+                        let status = self.hex_microphone_status();
+                        let driver_row = self.render_hex_microphone_driver_row(
+                            "settings-hex-mic-driver-row",
+                            "settings-hex-mic-driver-action",
+                            &status,
+                            cx,
+                        );
                         let mode = self.settings.experimental.hex_microphone_mode;
                         let comfort_position =
                             self.fun_comfort_noise_toggle.render_position(window);
@@ -3850,6 +3861,7 @@ impl AppWindow {
                             .child(
                                 panel()
                                     .id("experimental-hex-microphone-panel")
+                                    .child(driver_row)
                                     .child(settings_row(
                                         tr("Mode while dictating"),
                                         Self::voice_filter_mode_description(mode),
@@ -4129,14 +4141,24 @@ impl AppWindow {
             .into_any_element()
     }
 
-    fn render_fun(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        use crate::hex_microphone::{DemoPlaybackTrack, DemoSourceKind, TunedFilterConfig};
-        use crate::voice_filter::VoiceFilterMode;
+    fn poll_hex_microphone(&mut self) -> bool {
+        let next = crate::hex_microphone::driver_action_seq();
+        if next != self.fun_driver_action_seq {
+            self.fun_driver_action_seq = next;
+            return true;
+        }
+        false
+    }
 
-        let status = if self.preview {
+    fn hex_microphone_status(&self) -> crate::hex_microphone::HexMicrophoneStatus {
+        if self.preview {
+            let bundled_version = env!("CARGO_PKG_VERSION").to_string();
             crate::hex_microphone::HexMicrophoneStatus {
                 driver_bundle_installed: !self.fun_driver_missing_preview,
                 driver_loaded: !self.fun_driver_missing_preview,
+                installed_version: (!self.fun_driver_missing_preview)
+                    .then(|| bundled_version.clone()),
+                bundled_version,
                 sink_streaming: !self.fun_driver_missing_preview,
                 mic_in_use: !self.fun_driver_missing_preview,
                 active_apps: if self.fun_driver_missing_preview {
@@ -4144,66 +4166,186 @@ impl AppWindow {
                 } else {
                     vec!["Slack".into()]
                 },
-                install_script_path: crate::hex_microphone::install_script_path(),
+                action_state: crate::hex_microphone::DriverActionState::Idle,
             }
         } else {
             crate::hex_microphone::status()
-        };
+        }
+    }
 
+    fn render_hex_microphone_driver_row(
+        &self,
+        row_id: &'static str,
+        action_prefix: &'static str,
+        status: &crate::hex_microphone::HexMicrophoneStatus,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        use crate::hex_microphone::DriverActionState;
+
+        match &status.action_state {
+            DriverActionState::Installing => {
+                return settings_row(
+                    tr("Virtual microphone driver"),
+                    tr("Installing driver and restarting Core Audio…"),
+                    tag(Tone::Neutral, tr("Installing…")),
+                )
+                .id(row_id);
+            }
+            DriverActionState::Uninstalling => {
+                return settings_row(
+                    tr("Virtual microphone driver"),
+                    tr("Removing driver and restarting Core Audio…"),
+                    tag(Tone::Neutral, tr("Uninstalling…")),
+                )
+                .id(row_id);
+            }
+            _ => {}
+        }
+
+        if status.needs_update() {
+            let installed = status.installed_version.as_deref().unwrap_or("1.0.0");
+            let desc = match &status.action_state {
+                DriverActionState::Cancelled => tr("Update cancelled").into(),
+                DriverActionState::Failed(reason) => tr_fill("Could not update driver: {}", reason),
+                _ => tr_fill("Update driver to v{}", &status.bundled_version),
+            };
+            let controls = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(tag(Tone::Accent, tr_fill("v{} installed", installed)))
+                .child(
+                    small_button(ButtonKind::Secondary, tr("Update"))
+                        .id((action_prefix, 1usize))
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            crate::hex_microphone::install_driver_async();
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    small_button(ButtonKind::Secondary, tr("Uninstall"))
+                        .id((action_prefix, 2usize))
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            crate::hex_microphone::uninstall_driver_async();
+                            cx.notify();
+                        })),
+                );
+            return settings_row(tr("Virtual microphone driver"), desc, controls).id(row_id);
+        }
+
+        if status.driver_loaded {
+            let version = status
+                .installed_version
+                .as_deref()
+                .unwrap_or(&status.bundled_version);
+            let desc = match &status.action_state {
+                DriverActionState::Cancelled => tr("Uninstall cancelled").into(),
+                DriverActionState::Failed(reason) => tr_fill("Could not update driver: {}", reason),
+                _ if !status.active_apps.is_empty() => tr_fill(
+                    "Streaming 48 kHz audio to {}",
+                    &status.active_apps.join(", "),
+                ),
+                _ => tr("Choose Hex Microphone as your input in Slack, Zoom, or Discord").into(),
+            };
+            let controls = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(tag(Tone::Success, tr_fill("Installed v{}", version)))
+                .child(
+                    small_button(ButtonKind::Secondary, tr("Uninstall"))
+                        .id((action_prefix, 2usize))
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            crate::hex_microphone::uninstall_driver_async();
+                            cx.notify();
+                        })),
+                );
+            return settings_row(tr("Virtual microphone driver"), desc, controls).id(row_id);
+        }
+
+        let (desc, status_badge) = match &status.action_state {
+            DriverActionState::DoneUninstalled => (
+                tr("Driver removed").into(),
+                Some(tag(Tone::Neutral, tr("Removed"))),
+            ),
+            DriverActionState::Cancelled => (
+                tr("Installation cancelled").into(),
+                Some(tag(Tone::Neutral, tr("Cancelled"))),
+            ),
+            DriverActionState::Failed(reason) => (
+                tr_fill("Could not install driver: {}", reason),
+                Some(tag(Tone::Danger, tr("Failed"))),
+            ),
+            _ => (
+                tr("Install the CoreAudio driver to choose Hex Microphone in Slack, Zoom, or Discord")
+                    .into(),
+                None,
+            ),
+        };
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .children(status_badge)
+            .child(
+                small_button(ButtonKind::Secondary, tr("Install"))
+                    .id((action_prefix, 0usize))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        crate::hex_microphone::install_driver_async();
+                        cx.notify();
+                    })),
+            );
+        settings_row(tr("Virtual microphone driver"), desc, controls).id(row_id)
+    }
+
+    fn render_fun(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use crate::hex_microphone::{
+            DemoPlaybackTrack, DemoSourceKind, DriverActionState, TunedFilterConfig,
+        };
+        use crate::voice_filter::VoiceFilterMode;
+
+        let status = self.hex_microphone_status();
         let cfg = crate::hex_microphone::current_tuned_config();
         let current_mode = cfg.mode;
         let demo = crate::hex_microphone::demo_snapshot();
 
-        let header_status = if !status.driver_loaded {
-            tag(Tone::Neutral, tr("Driver not installed")).into_any_element()
-        } else if !status.active_apps.is_empty() {
-            tag(
+        let header_status = match &status.action_state {
+            DriverActionState::Installing => {
+                tag(Tone::Neutral, tr("Installing…")).into_any_element()
+            }
+            DriverActionState::Uninstalling => {
+                tag(Tone::Neutral, tr("Uninstalling…")).into_any_element()
+            }
+            _ if !status.driver_loaded => {
+                tag(Tone::Neutral, tr("Driver not installed")).into_any_element()
+            }
+            _ if status.needs_update() => {
+                tag(Tone::Accent, tr_fill("Update v{}", &status.bundled_version)).into_any_element()
+            }
+            _ if !status.active_apps.is_empty() => tag(
                 Tone::Success,
                 tr_fill("In use by {}", &status.active_apps.join(", ")),
             )
-            .into_any_element()
-        } else {
-            tag(Tone::Success, tr("Ready")).into_any_element()
+            .into_any_element(),
+            _ => tag(
+                Tone::Success,
+                tr_fill(
+                    "Installed v{}",
+                    status
+                        .installed_version
+                        .as_deref()
+                        .unwrap_or(&status.bundled_version),
+                ),
+            )
+            .into_any_element(),
         };
 
-        let driver_row = if status.driver_loaded {
-            let desc = if status.active_apps.is_empty() {
-                tr("Choose Hex Microphone as your input in Slack, Zoom, or Discord").into()
-            } else {
-                tr_fill(
-                    "Streaming 48 kHz audio to {}",
-                    &status.active_apps.join(", "),
-                )
-            };
-            settings_row(
-                tr("Virtual microphone"),
-                desc,
-                tag(Tone::Success, tr("Installed")),
-            )
-            .id("fun-driver-row")
-        } else {
-            let script_path = status.install_script_path.display().to_string();
-            let copy_btn = small_button(
-                ButtonKind::Secondary,
-                if self.fun_install_copied {
-                    tr("Copied")
-                } else {
-                    tr("Copy install command")
-                },
-            )
-            .id("fun-copy-install-command")
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(script_path.clone()));
-                this.fun_install_copied = true;
-                cx.notify();
-            }));
-            settings_row(
-                tr("Virtual microphone driver"),
-                tr("Install the CoreAudio driver once, then choose Hex Microphone as your input in Slack, Zoom, or Discord"),
-                copy_btn,
-            )
-            .id("fun-driver-row")
-        };
+        let driver_row = self.render_hex_microphone_driver_row(
+            "fun-driver-row",
+            "fun-driver-action",
+            &status,
+            cx,
+        );
 
         let mode_bar = segmented_control().id("fun-mode-picker").children(
             VoiceFilterMode::ALL

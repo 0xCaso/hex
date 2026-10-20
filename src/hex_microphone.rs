@@ -346,26 +346,278 @@ pub fn push_capture_samples(samples: &[f32], sample_rate: u32) {
     }
 }
 
-// ── Status & Driver Discovery ───────────────────────────────────────────────
+// ── Status, Bundled Driver Discovery, and Privileged Install/Uninstall ──────
+
+const INSTALLED_DRIVER_PATH: &str = "/Library/Audio/Plug-Ins/HAL/HexMicrophone.driver";
+const EXPECTED_DRIVER_BUNDLE_ID: &str = "com.kitlangton.hex.microphone.driver";
+
+/// Fixed AppleScript for driver installation. No user input is ever interpolated
+/// into this script; `osascript` receives the verified bundled `.driver` path
+/// via `argv` and quotes it with `quoted form of (item 1 of argv)`.
+#[cfg(target_os = "macos")]
+const INSTALL_DRIVER_APPLESCRIPT: &str = r#"on run argv
+    set srcPath to quoted form of (item 1 of argv)
+    set dstDir to "'/Library/Audio/Plug-Ins/HAL'"
+    set dstPath to "'/Library/Audio/Plug-Ins/HAL/HexMicrophone.driver'"
+    set tmpPath to "'/Library/Audio/Plug-Ins/HAL/.HexMicrophone.driver.staging'"
+    do shell script "/bin/mkdir -p " & dstDir & " && /bin/rm -rf " & tmpPath & " && /usr/bin/ditto " & srcPath & " " & tmpPath & " && /usr/sbin/chown -R root:wheel " & tmpPath & " && /bin/chmod -R a+rX " & tmpPath & " && /bin/rm -rf " & dstPath & " && /bin/mv " & tmpPath & " " & dstPath & " && (/bin/launchctl kickstart -k system/com.apple.audio.coreaudiod || /usr/bin/killall coreaudiod)" with administrator privileges
+end run"#;
+
+/// Fixed AppleScript for driver removal. Takes no arguments and touches only
+/// `/Library/Audio/Plug-Ins/HAL/HexMicrophone.driver`.
+#[cfg(target_os = "macos")]
+const UNINSTALL_DRIVER_APPLESCRIPT: &str = r#"do shell script "/bin/rm -rf '/Library/Audio/Plug-Ins/HAL/HexMicrophone.driver' '/Library/Audio/Plug-Ins/HAL/.HexMicrophone.driver.staging' && (/bin/launchctl kickstart -k system/com.apple.audio.coreaudiod || /usr/bin/killall coreaudiod)" with administrator privileges"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriverActionState {
+    Idle,
+    Installing,
+    Uninstalling,
+    DoneInstalled(String),
+    DoneUninstalled,
+    Cancelled,
+    Failed(String),
+}
+
+static DRIVER_ACTION_SEQ: AtomicU64 = AtomicU64::new(0);
+static DRIVER_ACTION_STATE: OnceLock<Mutex<DriverActionState>> = OnceLock::new();
+
+fn driver_action_lock() -> &'static Mutex<DriverActionState> {
+    DRIVER_ACTION_STATE.get_or_init(|| Mutex::new(DriverActionState::Idle))
+}
+
+fn set_driver_action_state(state: DriverActionState) {
+    let mut guard = driver_action_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = state;
+    DRIVER_ACTION_SEQ.fetch_add(1, Ordering::AcqRel);
+}
+
+pub fn current_driver_action_state() -> DriverActionState {
+    driver_action_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+pub fn driver_action_seq() -> u64 {
+    DRIVER_ACTION_SEQ.load(Ordering::Acquire)
+}
+
+pub fn driver_action_in_progress() -> bool {
+    matches!(
+        current_driver_action_state(),
+        DriverActionState::Installing | DriverActionState::Uninstalling
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HexMicrophoneStatus {
     pub driver_bundle_installed: bool,
     pub driver_loaded: bool,
+    pub installed_version: Option<String>,
+    pub bundled_version: String,
     pub sink_streaming: bool,
     pub mic_in_use: bool,
     pub active_apps: Vec<String>,
-    pub install_script_path: PathBuf,
+    pub action_state: DriverActionState,
 }
 
-pub fn install_script_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/Users/kit"))
-        .join("Library/Caches/hex-mic/install-driver.sh")
+impl HexMicrophoneStatus {
+    pub fn needs_update(&self) -> bool {
+        self.driver_bundle_installed
+            && self.installed_version.as_deref() != Some(self.bundled_version.as_str())
+    }
+
+    #[cfg(test)]
+    pub fn is_up_to_date(&self) -> bool {
+        self.driver_loaded && !self.needs_update()
+    }
 }
 
 pub fn driver_bundle_installed() -> bool {
-    std::path::Path::new("/Library/Audio/Plug-Ins/HAL/HexMicrophone.driver").exists()
+    std::path::Path::new(INSTALLED_DRIVER_PATH).exists()
+}
+
+fn plist_string_value(plist_xml: &str, key: &str) -> Option<String> {
+    let needle = format!("<key>{key}</key>");
+    let after_key = &plist_xml[plist_xml.find(&needle)? + needle.len()..];
+    let start = after_key.find("<string>")? + "<string>".len();
+    let end = after_key[start..].find("</string>")?;
+    let value = after_key[start..start + end].trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn read_driver_bundle_version(bundle_dir: &std::path::Path) -> Option<String> {
+    let plist_path = bundle_dir.join("Contents/Info.plist");
+    let xml = std::fs::read_to_string(plist_path).ok()?;
+    if let Some(bundle_id) = plist_string_value(&xml, "CFBundleIdentifier")
+        && bundle_id != EXPECTED_DRIVER_BUNDLE_ID
+    {
+        return None;
+    }
+    plist_string_value(&xml, "CFBundleShortVersionString")
+}
+
+fn validate_driver_bundle(bundle_dir: &std::path::Path) -> Result<String, String> {
+    if bundle_dir.file_name().and_then(|s| s.to_str()) != Some("HexMicrophone.driver") {
+        return Err("Invalid driver bundle name".into());
+    }
+    let binary = bundle_dir.join("Contents/MacOS/HexMicrophoneDriver");
+    if !binary.is_file() {
+        return Err("Driver executable is missing from bundle".into());
+    }
+    read_driver_bundle_version(bundle_dir)
+        .ok_or_else(|| "Driver Info.plist is missing or invalid".into())
+}
+
+pub fn bundled_driver_path() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(contents_dir) = exe.parent().and_then(|p| p.parent())
+    {
+        candidates.push(contents_dir.join("Library/HexMicrophone.driver"));
+        candidates.push(contents_dir.join("Resources/HexMicrophone.driver"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Library/Caches/hex-mic/HexMicrophone.driver"));
+    }
+    candidates.push(PathBuf::from(
+        "/Applications/Hex.app/Contents/Library/HexMicrophone.driver",
+    ));
+    candidates
+        .into_iter()
+        .find(|candidate| validate_driver_bundle(candidate).is_ok())
+}
+
+pub fn bundled_driver_version() -> String {
+    bundled_driver_path()
+        .and_then(|path| read_driver_bundle_version(&path))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+pub fn installed_driver_version() -> Option<String> {
+    read_driver_bundle_version(std::path::Path::new(INSTALLED_DRIVER_PATH))
+}
+
+#[cfg(target_os = "macos")]
+fn classify_osascript_failure(stderr: &str, stdout: &str) -> DriverActionState {
+    let combined = format!("{stderr}\n{stdout}");
+    let lower = combined.to_ascii_lowercase();
+    if lower.contains("user canceled")
+        || lower.contains("user cancelled")
+        || lower.contains("(-128)")
+    {
+        return DriverActionState::Cancelled;
+    }
+    let detail = combined
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Authorization or Core Audio restart failed");
+    let cleaned = detail
+        .rsplit_once("execution error: ")
+        .map(|(_, tail)| tail)
+        .unwrap_or(detail);
+    DriverActionState::Failed(cleaned.chars().take(140).collect())
+}
+
+pub fn install_driver_async() {
+    #[cfg(target_os = "macos")]
+    {
+        if driver_action_in_progress() {
+            return;
+        }
+        set_driver_action_state(DriverActionState::Installing);
+        let _ = thread::Builder::new()
+            .name("hex-mic-install".into())
+            .spawn(|| {
+                let Some(src_bundle) = bundled_driver_path() else {
+                    set_driver_action_state(DriverActionState::Failed(
+                        "Bundled HexMicrophone.driver was not found in Hex.app".into(),
+                    ));
+                    return;
+                };
+                let version = match validate_driver_bundle(&src_bundle) {
+                    Ok(v) => v,
+                    Err(reason) => {
+                        set_driver_action_state(DriverActionState::Failed(reason));
+                        return;
+                    }
+                };
+                let output = std::process::Command::new("/usr/bin/osascript")
+                    .arg("-e")
+                    .arg(INSTALL_DRIVER_APPLESCRIPT)
+                    .arg(&src_bundle)
+                    .output();
+                match output {
+                    Ok(out) if out.status.success() => {
+                        crate::audio::notify_audio_service_restarted();
+                        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+                        while std::time::Instant::now() < deadline {
+                            let st = status();
+                            if st.driver_loaded {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        crate::audio::notify_audio_service_restarted();
+                        let final_version = installed_driver_version().unwrap_or(version);
+                        set_driver_action_state(DriverActionState::DoneInstalled(final_version));
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        set_driver_action_state(classify_osascript_failure(&stderr, &stdout));
+                    }
+                    Err(error) => {
+                        set_driver_action_state(DriverActionState::Failed(error.to_string()));
+                    }
+                }
+            });
+    }
+}
+
+pub fn uninstall_driver_async() {
+    #[cfg(target_os = "macos")]
+    {
+        if driver_action_in_progress() {
+            return;
+        }
+        set_driver_action_state(DriverActionState::Uninstalling);
+        let _ = thread::Builder::new()
+            .name("hex-mic-uninstall".into())
+            .spawn(|| {
+                let output = std::process::Command::new("/usr/bin/osascript")
+                    .arg("-e")
+                    .arg(UNINSTALL_DRIVER_APPLESCRIPT)
+                    .output();
+                match output {
+                    Ok(out) if out.status.success() => {
+                        crate::audio::notify_audio_service_restarted();
+                        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+                        while std::time::Instant::now() < deadline {
+                            let st = status();
+                            if !st.driver_bundle_installed && !st.driver_loaded {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        crate::audio::notify_audio_service_restarted();
+                        set_driver_action_state(DriverActionState::DoneUninstalled);
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        set_driver_action_state(classify_osascript_failure(&stderr, &stdout));
+                    }
+                    Err(error) => {
+                        set_driver_action_state(DriverActionState::Failed(error.to_string()));
+                    }
+                }
+            });
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -385,10 +637,12 @@ pub fn status() -> HexMicrophoneStatus {
     HexMicrophoneStatus {
         driver_bundle_installed: driver_bundle_installed(),
         driver_loaded,
+        installed_version: installed_driver_version(),
+        bundled_version: bundled_driver_version(),
         sink_streaming: SINK_STREAMING.load(Ordering::Acquire),
         mic_in_use,
         active_apps,
-        install_script_path: install_script_path(),
+        action_state: current_driver_action_state(),
     }
 }
 
@@ -397,10 +651,12 @@ pub fn status() -> HexMicrophoneStatus {
     HexMicrophoneStatus {
         driver_bundle_installed: false,
         driver_loaded: false,
+        installed_version: None,
+        bundled_version: env!("CARGO_PKG_VERSION").to_string(),
         sink_streaming: false,
         mic_in_use: false,
         active_apps: Vec::new(),
-        install_script_path: install_script_path(),
+        action_state: DriverActionState::Idle,
     }
 }
 
@@ -1039,10 +1295,16 @@ mod macos_hal {
 
             let Some(sink_id) = translate_uid_to_device(HEX_MICROPHONE_SINK_UID) else {
                 SINK_STREAMING.store(false, Ordering::Release);
-                thread::sleep(Duration::from_secs(2));
+                let wait = if super::driver_action_in_progress() {
+                    Duration::from_millis(200)
+                } else {
+                    Duration::from_secs(1)
+                };
+                thread::sleep(wait);
                 continue;
             };
 
+            let restart_gen = crate::audio::audio_service_restart_generation();
             set_preferred_buffer_size(sink_id, 256);
             CAPTURE_RING.clear();
 
@@ -1065,7 +1327,7 @@ mod macos_hal {
                     status = create_status,
                     "failed to create Hex Microphone sink IOProc; retrying"
                 );
-                thread::sleep(Duration::from_secs(2));
+                thread::sleep(Duration::from_millis(500));
                 continue;
             }
 
@@ -1076,7 +1338,7 @@ mod macos_hal {
                     status = start_status,
                     "failed to start Hex Microphone sink IOProc; retrying"
                 );
-                thread::sleep(Duration::from_secs(2));
+                thread::sleep(Duration::from_millis(500));
                 continue;
             }
 
@@ -1087,7 +1349,10 @@ mod macos_hal {
                 "Hex Microphone virtual sink streaming started"
             );
 
-            while crate::app_settings::hex_microphone_enabled() && device_is_alive(sink_id) {
+            while crate::app_settings::hex_microphone_enabled()
+                && device_is_alive(sink_id)
+                && crate::audio::audio_service_restart_generation() == restart_gen
+            {
                 thread::sleep(Duration::from_millis(250));
             }
 
@@ -1154,6 +1419,52 @@ mod tests {
         assert_eq!(snap.peaks_call.len(), WAVEFORM_BARS);
         assert!(snap.peaks_you.iter().any(|&p| p > 0.05));
         assert!(snap.peaks_call.iter().any(|&p| p > 0.02));
+    }
+
+    #[test]
+    fn driver_plist_version_and_status_mismatch_are_detected() {
+        let plist = include_str!("../macos/HexMicrophoneDriver/Info.plist");
+        assert_eq!(
+            plist_string_value(plist, "CFBundleIdentifier").as_deref(),
+            Some(EXPECTED_DRIVER_BUNDLE_ID)
+        );
+        assert_eq!(
+            plist_string_value(plist, "CFBundleShortVersionString").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+
+        let mismatch_status = HexMicrophoneStatus {
+            driver_bundle_installed: true,
+            driver_loaded: true,
+            installed_version: Some("1.0.0".into()),
+            bundled_version: "2.3.0".into(),
+            sink_streaming: true,
+            mic_in_use: false,
+            active_apps: Vec::new(),
+            action_state: DriverActionState::Idle,
+        };
+        assert!(mismatch_status.needs_update());
+        assert!(!mismatch_status.is_up_to_date());
+
+        let current_status = HexMicrophoneStatus {
+            installed_version: Some("2.3.0".into()),
+            ..mismatch_status
+        };
+        assert!(!current_status.needs_update());
+        assert!(current_status.is_up_to_date());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn osascript_failure_classifies_user_cancel_and_errors() {
+        assert_eq!(
+            classify_osascript_failure("36:112: execution error: User canceled. (-128)", ""),
+            DriverActionState::Cancelled
+        );
+        assert_eq!(
+            classify_osascript_failure("0:42: execution error: Permission denied (1)", ""),
+            DriverActionState::Failed("Permission denied (1)".into())
+        );
     }
 
     #[cfg(target_os = "macos")]

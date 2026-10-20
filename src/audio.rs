@@ -1,8 +1,75 @@
 use std::ops::Add;
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
+
+static AUDIO_SERVICE_RESTART_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn notify_audio_service_restarted() {
+    AUDIO_SERVICE_RESTART_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+pub fn audio_service_restart_generation() -> u64 {
+    AUDIO_SERVICE_RESTART_GENERATION.load(Ordering::Acquire)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_coreaudio_restart_listener() {
+    use std::ffi::c_void;
+    use std::sync::Once;
+
+    #[repr(C)]
+    struct AudioObjectPropertyAddress {
+        m_selector: u32,
+        m_scope: u32,
+        m_element: u32,
+    }
+
+    type PropertyListenerProc =
+        unsafe extern "C" fn(u32, u32, *const AudioObjectPropertyAddress, *mut c_void) -> i32;
+
+    unsafe extern "C" {
+        fn AudioObjectAddPropertyListener(
+            in_object_id: u32,
+            in_address: *const AudioObjectPropertyAddress,
+            in_listener: PropertyListenerProc,
+            in_client_data: *mut c_void,
+        ) -> i32;
+    }
+
+    unsafe extern "C" fn on_service_restarted(
+        _in_object_id: u32,
+        _in_number_addresses: u32,
+        _in_addresses: *const AudioObjectPropertyAddress,
+        _in_client_data: *mut c_void,
+    ) -> i32 {
+        tracing::warn!("CoreAudio daemon (coreaudiod) restarted; recovering microphone stream");
+        notify_audio_service_restarted();
+        0
+    }
+
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| {
+        const SYSTEM_OBJECT: u32 = 1;
+        const SERVICE_RESTARTED_SELECTOR: u32 = u32::from_be_bytes(*b"srst");
+        const GLOBAL_SCOPE: u32 = u32::from_be_bytes(*b"glob");
+        let addr = AudioObjectPropertyAddress {
+            m_selector: SERVICE_RESTARTED_SELECTOR,
+            m_scope: GLOBAL_SCOPE,
+            m_element: 0,
+        };
+        let _ = unsafe {
+            AudioObjectAddPropertyListener(
+                SYSTEM_OBJECT,
+                &addr,
+                on_service_restarted,
+                std::ptr::null_mut(),
+            )
+        };
+    });
+}
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -118,6 +185,8 @@ pub struct AudioInput {
     pub sample_rate: u32,
     pub device_name: String,
     stream_errors: Receiver<String>,
+    watch_service_restarts: bool,
+    restart_generation: u64,
 }
 
 pub enum AudioInputEvent {
@@ -246,9 +315,17 @@ impl AudioInput {
                 stream_errors,
                 sample_rate: 48_000,
                 device_name: "Test microphone".into(),
+                watch_service_restarts: false,
+                restart_generation: audio_service_restart_generation(),
             },
             sender,
         )
+    }
+
+    #[cfg(test)]
+    pub fn watch_service_restarts_for_test(&mut self) {
+        self.watch_service_restarts = true;
+        self.restart_generation = audio_service_restart_generation();
     }
 
     pub fn open(device_queries: &[&str]) -> Result<Self> {
@@ -284,6 +361,9 @@ impl AudioInput {
     }
 
     fn open_device(device: Device) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        ensure_coreaudio_restart_listener();
+        let restart_generation = audio_service_restart_generation();
         let device_name = device.to_string();
         let supported = device
             .default_input_config()
@@ -332,16 +412,28 @@ impl AudioInput {
             sample_rate,
             device_name,
             stream_errors,
+            watch_service_restarts: true,
+            restart_generation,
         })
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> AudioInputEvent {
+        if self.watch_service_restarts
+            && audio_service_restart_generation() != self.restart_generation
+        {
+            return AudioInputEvent::StreamFailed("CoreAudio service restarted".into());
+        }
         // A stream failure reported before or during the wait outranks any
         // chunk delivered alongside it.
         if let Ok(error) = self.stream_errors.try_recv() {
             return AudioInputEvent::StreamFailed(error);
         }
         let received = self.chunks.recv_timeout(timeout);
+        if self.watch_service_restarts
+            && audio_service_restart_generation() != self.restart_generation
+        {
+            return AudioInputEvent::StreamFailed("CoreAudio service restarted".into());
+        }
         if let Ok(error) = self.stream_errors.try_recv() {
             return AudioInputEvent::StreamFailed(error);
         }
@@ -1112,5 +1204,39 @@ mod tests {
         recovery.request_selection_change(2, now + Duration::from_millis(100));
         assert!(recovery.blocks_audio());
         assert!(recovery.should_attempt(now + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn audio_service_restart_interrupts_stream_and_recovers() {
+        let mut input = RecoveringAudioInput::closed(None, 1, Some("Test microphone"));
+        let (mut opened, _samples) = AudioInput::channel_for_test();
+        opened.watch_service_restarts_for_test();
+        input.finish_initial_open(Ok(opened), Instant::now());
+        assert!(input.is_open());
+
+        notify_audio_service_restarted();
+        assert!(matches!(
+            input.recv_timeout(Duration::ZERO, true),
+            RecoveringAudioInputEvent::Interrupted
+        ));
+        assert!(input.is_recovering());
+
+        let (sender, receiver) = mpsc::channel();
+        input.replacement = Some(receiver);
+        let (reopened, samples_after) = AudioInput::channel_for_test();
+        sender.send((1, Ok(reopened))).unwrap();
+
+        assert!(matches!(
+            input.recv_timeout(Duration::ZERO, true),
+            RecoveringAudioInputEvent::Reopened
+        ));
+        assert!(!input.is_recovering());
+        let at = CaptureInstant::from_nanos(10_000_000_000);
+        samples_after.send((vec![0.5; 240], at)).unwrap();
+        assert!(matches!(
+            input.recv_timeout(Duration::ZERO, true),
+            RecoveringAudioInputEvent::Chunk { samples, captured_through }
+                if samples == vec![0.5; 240] && captured_through == at
+        ));
     }
 }

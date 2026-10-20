@@ -39,6 +39,9 @@ plist_value() {
 [ "$(plist_value LSUIElement)" = true ] || fail "menu-bar application policy is disabled"
 [ -x "$bundle/Contents/MacOS/hex" ] || fail "packaged executable is missing"
 [ "$(lipo -archs "$bundle/Contents/MacOS/hex")" = arm64 ] || fail "packaged executable is not arm64-only"
+[ -x "$bundle/Contents/Library/HexMicrophone.driver/Contents/MacOS/HexMicrophoneDriver" ] || fail "bundled HexMicrophone.driver is missing"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Library/HexMicrophone.driver/Contents/Info.plist")" = com.kitlangton.hex.microphone.driver ] || fail "bundled driver has wrong bundle identifier"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$bundle/Contents/Library/HexMicrophone.driver/Contents/Info.plist")" = "$version" ] || fail "bundled driver has wrong version"
 
 codesign --verify --deep --strict --verbose=2 "$bundle"
 signature=$(codesign -d --verbose=4 "$bundle" 2>&1)
