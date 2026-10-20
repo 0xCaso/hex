@@ -63,12 +63,22 @@ export default function App() {
         <div className="show__head" ref={head}>
           <img src="/shout-idle.webp" alt="" width="640" height="640" decoding="async" fetchPriority="high" />
         </div>
-        <OptionKey phase={shout.phase} onStart={shout.start} onIntent={shout.load} />
+        <OptionKey phase={shout.phase} onStart={shout.start} onIntent={shout.load} onPress={shout.pressKey} />
       </div>
 
       <section className="hero">
         <div className="hero__copy" data-avoid>
-          <h1>Speak. It appears.</h1>
+          <h1 aria-label="Speak. It appears.">
+            <span className="hero__word" data-title-word="0">
+              Speak.
+            </span>{" "}
+            <span className="hero__word" data-title-word="1">
+              It
+            </span>{" "}
+            <span className="hero__word" data-title-word="2">
+              appears.
+            </span>
+          </h1>
           <p>
             Local voice dictation for {PLATFORM_NAMES[platform]}. Hold {SHORTCUTS[platform]}, say what you mean, and
             Hex pastes it where you are.

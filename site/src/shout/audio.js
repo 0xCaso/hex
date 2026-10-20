@@ -135,6 +135,50 @@ export class AudioEngine {
     if (file) this.play(file, { bus: "ui", ...opts })
   }
 
+  // Immediate synthesized mechanical key bottom-out + sub-bass detonation on click (zero network wait).
+  keyBoom() {
+    this.log?.push({ t: +this.clock().toFixed(4), file: "synth-key-boom", bus: "impacts", gain: 0.9, rate: 1, pan: 0, i: +(this.i ?? 0).toFixed(3), duck: this.duck })
+    if (!this.on || !this.ctx || !this.buses?.impacts) return
+    try {
+      const ctx = this.ctx
+      const now = ctx.currentTime
+      const bus = this.buses.impacts
+
+      // 1. Sub-bass detonation thump (135 Hz -> 34 Hz)
+      const osc = ctx.createOscillator()
+      const og = ctx.createGain()
+      osc.type = "sine"
+      osc.frequency.setValueAtTime(135, now)
+      osc.frequency.exponentialRampToValueAtTime(34, now + 0.26)
+      og.gain.setValueAtTime(0.65, now)
+      og.gain.exponentialRampToValueAtTime(0.001, now + 0.3)
+      osc.connect(og).connect(bus)
+      osc.start(now)
+      osc.stop(now + 0.32)
+
+      // 2. Crisp switch clack + plastic shatter noise burst
+      const len = Math.floor(ctx.sampleRate * 0.18)
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate)
+      const data = buf.getChannelData(0)
+      for (let i = 0; i < len; i++) {
+        const env = i < ctx.sampleRate * 0.006 ? 1 : Math.exp(-i / (ctx.sampleRate * 0.038))
+        data[i] = (Math.random() * 2 - 1) * env
+      }
+      const nSrc = ctx.createBufferSource()
+      nSrc.buffer = buf
+      const bp = ctx.createBiquadFilter()
+      bp.type = "bandpass"
+      bp.frequency.setValueAtTime(2200, now)
+      bp.frequency.exponentialRampToValueAtTime(520, now + 0.16)
+      bp.Q.value = 1.4
+      const ng = ctx.createGain()
+      ng.gain.setValueAtTime(0.55, now)
+      ng.gain.exponentialRampToValueAtTime(0.001, now + 0.18)
+      nSrc.connect(bp).connect(ng).connect(bus)
+      nSrc.start(now)
+    } catch {}
+  }
+
   voice(file, opts = {}) {
     this.play(file, { bus: "voice", ...opts })
     if (opts.duck) {
