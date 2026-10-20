@@ -1053,11 +1053,20 @@ pub(crate) fn menu() -> Div {
         .occlude()
 }
 
+/// A [`menu`] whose entrance progress (`0.0..=1.0`) fades its opacity.
+pub(crate) fn menu_with_progress(progress: f32) -> Div {
+    menu().opacity(progress.clamp(0.0, 1.0))
+}
+
 /// A [`menu`] that drops [`MENU_OFFSET`] below the [`CONTROL_HEIGHT`] control
-/// that opens it. Put both in a `relative` wrapper and pin the menu to the
-/// control's left or right edge.
-pub(crate) fn dropdown_menu() -> Div {
-    menu().absolute().top(px(CONTROL_HEIGHT + MENU_OFFSET))
+/// that opens it, with entrance progress (`0.0..=1.0`) fading and sliding
+/// [`MENU_ENTER_OFFSET`] down from its trigger.
+pub(crate) fn dropdown_menu_with_progress(progress: f32) -> Div {
+    let progress = progress.clamp(0.0, 1.0);
+    let offset = ((1.0 - progress) * MENU_ENTER_OFFSET * 2.0).round() * 0.5;
+    menu_with_progress(progress)
+        .absolute()
+        .top(px(CONTROL_HEIGHT + MENU_OFFSET - offset))
 }
 
 /// One choice inside a [`menu`].
@@ -1155,6 +1164,7 @@ pub(crate) fn segmented_item(selected: bool) -> Div {
 /// width in order; append the items with [`sliding_segmented_item`].
 pub(crate) fn sliding_segmented_control(position: f32, widths: &[f32]) -> Div {
     let (left, width) = segmented_geometry(position, widths);
+    let (left, width) = crate::motion::snap_edge_pair(left, left + width);
     segmented_control().relative().child(
         div()
             .absolute()

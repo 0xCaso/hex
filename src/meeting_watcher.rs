@@ -311,7 +311,39 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
     let (indicator_sender, indicator_receiver) = dictation_indicator::channel();
     if dictation_preview {
         let preview_sender = indicator_sender.clone();
+        let fast_hud = std::env::var("HEX_PREVIEW_CHOREOGRAPHY").ok().as_deref() == Some("hud");
         thread::spawn(move || {
+            if fast_hud {
+                thread::sleep(Duration::from_millis(120));
+                preview_sender.send(DictationIndicatorEvent::Started);
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_millis(1350) {
+                    let wave = (started.elapsed().as_secs_f32() * 7.5).sin() * 0.5 + 0.5;
+                    preview_sender.send(DictationIndicatorEvent::Meter {
+                        average: 0.03 + wave * 0.09,
+                        peak: 0.18 + wave * 0.58,
+                    });
+                    thread::sleep(Duration::from_millis(20));
+                }
+                preview_sender.send(DictationIndicatorEvent::Submitted { job_id: 0 });
+                preview_sender.send(DictationIndicatorEvent::Transcribing { job_id: 0 });
+                thread::sleep(Duration::from_millis(750));
+                preview_sender.send(DictationIndicatorEvent::Processing { job_id: 0 });
+                thread::sleep(Duration::from_millis(750));
+                preview_sender.send(DictationIndicatorEvent::JobCompleted { job_id: 0 });
+                thread::sleep(Duration::from_millis(650));
+                preview_sender.send(DictationIndicatorEvent::Started);
+                let second = Instant::now();
+                while second.elapsed() < Duration::from_millis(800) {
+                    let wave = (second.elapsed().as_secs_f32() * 8.0).sin() * 0.5 + 0.5;
+                    preview_sender.send(DictationIndicatorEvent::Meter {
+                        average: 0.03 + wave * 0.08,
+                        peak: 0.16 + wave * 0.52,
+                    });
+                    thread::sleep(Duration::from_millis(20));
+                }
+                return;
+            }
             loop {
                 preview_sender.send(DictationIndicatorEvent::Started);
                 thread::sleep(Duration::from_millis(450));

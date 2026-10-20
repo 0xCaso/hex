@@ -5,11 +5,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    PathPromptOptions, Pixels, Point, Render, SharedString, Subscription, Timer, TitlebarOptions,
-    Window, WindowBounds, WindowHandle, WindowOptions, actions, deferred, div, img, prelude::*, px,
-    rgb, size,
+    AnyElement, AnyView, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
+    IntoElement, KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, PathPromptOptions, Pixels, Point, Render, SharedString, StyleRefinement,
+    Subscription, Timer, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowHandle,
+    WindowOptions, actions, deferred, div, img, prelude::*, px, rgb, size,
 };
 
 use crate::app_settings::{
@@ -29,11 +29,11 @@ use crate::desktop_transcription_picker::{
 use crate::desktop_ui::{
     ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, danger_menu_item, detail_body,
     detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
-    disclosure_frame, dropdown_menu, error_message, error_panel, hotkey_keycaps, icon, icon_button,
-    inline_error, list_row, list_row_meta, list_row_title, listener_status, menu, menu_item,
-    mix_color, navigation_item, pane_body, pane_content, pane_detail, pane_header,
-    pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header, progress_track,
-    section_label, segmented_control, segmented_item, settings_copy, settings_row,
+    disclosure_frame, dropdown_menu_with_progress, error_message, error_panel, hotkey_keycaps,
+    icon, icon_button, inline_error, list_row, list_row_meta, list_row_title, listener_status,
+    menu_item, menu_with_progress, mix_color, navigation_item, pane_body, pane_content,
+    pane_detail, pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel,
+    panel_header, progress_track, section_label, settings_copy, settings_row,
     settings_section_label, sidebar_frame, sliding_segmented_control, sliding_segmented_item,
     small_button, status_dot, tag, toggle, truncated_line, window_frame,
 };
@@ -46,6 +46,7 @@ use crate::events::{
 };
 use crate::history::{History, HistoryEntry, HistoryKind, HistoryRetention};
 use crate::login_item::{LoginItemRequest, LoginItemResponse, LoginItemStatus, LoginItemWorker};
+use crate::motion::{ToggleSpring, WindowMotion};
 use crate::onboarding::{PermissionState, SetupStatus};
 use crate::personal_commands::{HostState, StatusSnapshot, StatusTransformation};
 use crate::text_input::{
@@ -139,11 +140,12 @@ fn microphone_picker_menu(
     choices: Vec<Option<String>>,
     selected: Option<String>,
     error: Option<String>,
+    progress: f32,
     choose: impl Fn(&Option<String>, &mut Window, &mut App) + 'static,
     dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<Div> {
     let choose = Rc::new(choose);
-    dropdown_menu()
+    dropdown_menu_with_progress(progress)
         .id("microphone-picker")
         .debug_selector(|| "microphone-picker".into())
         .right_0()
@@ -535,13 +537,6 @@ fn personal_workspace_state(
     }
 }
 
-struct ToggleSpring {
-    position: f32,
-    velocity: f32,
-    target: f32,
-    last_frame: Instant,
-}
-
 struct ProcessingInput {
     entity: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
@@ -861,67 +856,314 @@ impl HotkeyCaptureState {
     }
 }
 
-impl ToggleSpring {
-    fn new(enabled: bool) -> Self {
-        let position = if enabled { 1.0 } else { 0.0 };
-        Self::at(position)
-    }
+struct NavigationSidebar {
+    window_entity: WeakEntity<AppWindow>,
+    pane: Pane,
+    meetings_available: bool,
+    fun_available: bool,
+    update_available: bool,
+    preview: bool,
+}
 
-    fn at(position: f32) -> Self {
+impl Render for NavigationSidebar {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let items = Pane::all_with_fun(
+            platform::CAPABILITIES,
+            crate::DEVELOPER_FEATURES_ENABLED,
+            self.meetings_available,
+            self.fun_available,
+        )
+        .into_iter()
+        .enumerate()
+        .map(|(index, pane)| {
+            let selected = self.pane == pane;
+            let window_entity = self.window_entity.clone();
+            navigation_item(pane.icon(), selected)
+                .id(("app-nav", index))
+                .child(pane.label())
+                .on_click(move |_, _, cx| {
+                    let _ = window_entity.update(cx, |this, cx| {
+                        this.select_pane(pane, cx);
+                    });
+                })
+        });
+
+        let update_button = self.update_available.then(|| {
+            let window_entity = self.window_entity.clone();
+            let preview = self.preview;
+            sidebar_update_button().on_click(move |_, window, cx| {
+                #[cfg(target_os = "macos")]
+                if !preview {
+                    window.dispatch_action(Box::new(CheckForUpdates), cx);
+                    window.refresh();
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = (window, preview);
+                let _ = window_entity.update(cx, |this, cx| {
+                    this.install_update(cx);
+                });
+            })
+        });
+
+        platform::sidebar(sidebar_frame())
+            .child(div().flex().flex_col().gap_0p5().children(items))
+            .child(platform::window_drag_region(div().flex_1()))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .h(px(CONTROL_HEIGHT))
+                    .mt_3()
+                    .child(
+                        div()
+                            .flex_none()
+                            .pl_3()
+                            .text_caption()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .child(tr_fill("Version {}", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .children(update_button),
+            )
+    }
+}
+
+struct FunWaveformView {
+    bars_you: Vec<crate::motion::Spring>,
+    bars_call: Vec<crate::motion::Spring>,
+    progress_spring: crate::motion::Spring,
+    progress_visibility: crate::motion::Spring,
+    was_active: bool,
+    last_step: Instant,
+}
+
+impl FunWaveformView {
+    fn new() -> Self {
         Self {
-            position,
-            velocity: 0.0,
-            target: position,
-            last_frame: Instant::now(),
+            bars_you: Vec::new(),
+            bars_call: Vec::new(),
+            progress_spring: crate::motion::Spring::at(0.0),
+            progress_visibility: crate::motion::Spring::at(0.0),
+            was_active: false,
+            last_step: Instant::now(),
         }
     }
+}
 
-    fn set_enabled(&mut self, enabled: bool) {
-        self.set_target(if enabled { 1.0 } else { 0.0 });
-    }
+impl Render for FunWaveformView {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use crate::hex_microphone::DemoSourceKind;
 
-    fn set_target(&mut self, target: f32) {
-        if self.target == target {
-            return;
-        }
-        self.target = target;
-        self.last_frame = Instant::now();
-    }
-
-    fn advance(&mut self, elapsed: Duration) {
-        /// Critically damped spring stiffness in rad/s; higher settles faster.
-        const STIFFNESS: f32 = 40.0;
-        let mut remaining = elapsed.as_secs_f32().min(0.1);
-        while remaining > 0.0 {
-            let dt = remaining.min(1.0 / 240.0);
-            let acceleration = -STIFFNESS.powi(2) * (self.position - self.target)
-                - 2.0 * STIFFNESS * self.velocity;
-            self.velocity += acceleration * dt;
-            self.position += self.velocity * dt;
-            remaining -= dt;
-        }
-        if self.is_settled() {
-            self.position = self.target;
-            self.velocity = 0.0;
-        }
-    }
-
-    fn render_position(&mut self, window: &mut Window) -> f32 {
+        let _frame_guard = crate::motion::begin_frame("FunWaveform");
+        let demo = crate::hex_microphone::demo_snapshot();
         let now = Instant::now();
-        self.advance(now.duration_since(self.last_frame));
-        self.last_frame = now;
-        if !self.is_settled() {
+        let dt = now
+            .saturating_duration_since(self.last_step)
+            .as_secs_f32()
+            .clamp(0.0, 1.0 / 20.0);
+        self.last_step = now;
+        let reduced =
+            crate::motion::reduced_motion() || std::env::var_os("HEX_PREVIEW_BEFORE").is_some();
+
+        let step_bars = |bars: &mut Vec<crate::motion::Spring>, targets: &[f32]| -> bool {
+            let first_init = bars.len() != targets.len();
+            if first_init {
+                *bars = targets
+                    .iter()
+                    .map(|&p| crate::motion::Spring::at(p.clamp(0.06, 1.0)))
+                    .collect();
+                return false;
+            }
+            let mut any_moving = false;
+            for (spring, &target) in bars.iter_mut().zip(targets.iter()) {
+                let target = target.clamp(0.06, 1.0);
+                if reduced {
+                    spring.jump(target);
+                } else {
+                    spring.to(target);
+                    if dt > 0.0 {
+                        spring.step(SPRING_SNAP, dt);
+                        spring.settle(SPRING_SNAP, 0.002);
+                    }
+                    if !spring.settled(SPRING_SNAP, 0.002) {
+                        any_moving = true;
+                    }
+                }
+            }
+            any_moving
+        };
+
+        let moving_you = step_bars(&mut self.bars_you, &demo.peaks_you);
+        let moving_call = step_bars(&mut self.bars_call, &demo.peaks_call);
+
+        let active = demo.is_recording || demo.playing.is_some();
+        let raw_progress = if demo.is_recording {
+            demo.recording_progress
+        } else {
+            demo.playback_progress
+        }
+        .clamp(0.0, 1.0);
+
+        if active && !self.was_active {
+            self.progress_spring.jump(raw_progress);
+        } else if !active && self.was_active {
+            crate::motion::log_pane_summary("FunWaveform", "demo_stopped");
+            crate::motion::log_pane_summary("Fun", "demo_stopped");
+        }
+        self.was_active = active;
+
+        let vis_target = if active { 1.0 } else { 0.0 };
+        if reduced {
+            self.progress_visibility.jump(vis_target);
+            self.progress_spring.jump(raw_progress);
+        } else {
+            self.progress_visibility.to(vis_target);
+            self.progress_spring.to(raw_progress);
+            if dt > 0.0 {
+                self.progress_visibility.step(SPRING_REFLOW, dt);
+                self.progress_visibility.settle(SPRING_REFLOW, 0.002);
+                self.progress_spring.step(SPRING_SETTLE, dt);
+                self.progress_spring.settle(SPRING_SETTLE, 0.002);
+            }
+        }
+        let moving_vis = !reduced && !self.progress_visibility.settled(SPRING_REFLOW, 0.002);
+        let moving_prog = !reduced && active && !self.progress_spring.settled(SPRING_SETTLE, 0.002);
+
+        if moving_you || moving_call || moving_vis || moving_prog {
             window.request_animation_frame();
         }
-        self.position
-    }
 
-    fn is_settled(&self) -> bool {
-        (self.position - self.target).abs() < 0.001 && self.velocity.abs() < 0.01
-    }
+        let duration_s = (demo.duration_ms as f64) / 1000.0;
+        let span_start_s = format!("{:.1}s", demo.span.start_ms / 1000.0);
+        let span_end_s = format!("{:.1}s", demo.span.end_ms / 1000.0);
+        let span_badge = tag(Tone::Accent, format!("{} – {}", span_start_s, span_end_s));
+        let clip_quote = match demo.source {
+            DemoSourceKind::Example => {
+                "“Yeah, I’m looking at the new layout now — Reply to Olive: pick up dinner…”"
+            }
+            DemoSourceKind::Recording => tr("Your 5s sample"),
+        };
 
-    fn enabled(&self) -> bool {
-        self.target >= 0.5
+        let total_bars = self.bars_you.len().max(1);
+        let duration_f = (demo.duration_ms.max(1)) as f64;
+        let render_waveform_bars = |bars: &[crate::motion::Spring], call_track: bool| -> Div {
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .h(px(28.0))
+                .px_2()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .rounded(RADIUS_SMALL)
+                .bg(rgb(SURFACE))
+                .children(bars.iter().enumerate().map(|(idx, spring)| {
+                    let bar_ms = ((idx as f64) + 0.5) / (total_bars as f64) * duration_f;
+                    let in_span = bar_ms >= demo.span.start_ms && bar_ms <= demo.span.end_ms;
+                    let height = ((spring.x.clamp(0.06, 1.0) * 20.0) * 64.0).round() / 64.0;
+                    let color = if call_track {
+                        if in_span { ACCENT_TEXT } else { TEXT_SECONDARY }
+                    } else if in_span {
+                        TEXT_PRIMARY
+                    } else {
+                        TEXT_TERTIARY
+                    };
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(height))
+                        .rounded(RADIUS_KNOB)
+                        .bg(rgb(color))
+                }))
+        };
+
+        let vis = self.progress_visibility.x.clamp(0.0, 1.0);
+        let progress = self.progress_spring.x.clamp(0.0, 1.0);
+
+        div()
+            .id("fun-waveform-card")
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2p5()
+            .rounded(RADIUS_CONTROL)
+            .border_1()
+            .border_color(rgb(LINE))
+            .bg(rgb(CANVAS))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_footnote()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child(clip_quote),
+                            )
+                            .child(span_badge),
+                    )
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_monospace()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .child(format!("{duration_s:.1}s")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(80.0))
+                            .flex_none()
+                            .text_caption()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .child(tr("You")),
+                    )
+                    .child(render_waveform_bars(&self.bars_you, false)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(80.0))
+                            .flex_none()
+                            .text_caption()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(ACCENT_TEXT))
+                            .child(tr("Call hears")),
+                    )
+                    .child(render_waveform_bars(&self.bars_call, true)),
+            )
+            .when(vis > 0.001, |card| {
+                card.child(
+                    div()
+                        .h(px(6.0 * vis))
+                        .opacity(vis)
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .child(progress_track(div().w(gpui::relative(progress)))),
+                )
+            })
     }
 }
 
@@ -929,6 +1171,9 @@ impl ToggleSpring {
 pub struct AppWindow {
     preview: bool,
     pane: Pane,
+    navigation_sidebar: Entity<NavigationSidebar>,
+    navigation_view: AnyView,
+    fun_waveform: Entity<FunWaveformView>,
     event_reader: EventReader,
     activity: DesktopActivity,
     platform: platform::Platform,
@@ -1005,6 +1250,7 @@ pub struct AppWindow {
     _activation_subscription: Subscription,
     personal_commands_status: StatusSnapshot,
     personal_workspace: PathBuf,
+    personal_config_exists: bool,
     personal_workspace_receiver: Option<Receiver<Result<PathBuf, String>>>,
     personal_workspace_error: Option<String>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1023,6 +1269,14 @@ pub struct AppWindow {
     fun_comfort_noise_toggle: ToggleSpring,
     fun_driver_action_seq: u64,
     fun_driver_missing_preview: bool,
+    fun_mic_status: crate::hex_microphone::HexMicrophoneStatus,
+    fun_mic_status_receiver: Option<Receiver<crate::hex_microphone::HexMicrophoneStatus>>,
+    fun_demo_button_state: (
+        crate::hex_microphone::DemoSourceKind,
+        bool,
+        bool,
+        Option<crate::hex_microphone::DemoPlaybackTrack>,
+    ),
     fun_active_slider: Option<FunSlider>,
 }
 
@@ -1042,12 +1296,9 @@ impl AppWindow {
                 if window
                     .update(cx, |window, cx| {
                         // The tour and the Fun demo recorder/player react at 100 ms.
-                        let fun_busy = {
-                            let snap = crate::hex_microphone::demo_snapshot();
-                            (window.pane == Pane::Fun
-                                && (snap.is_recording || snap.playing.is_some()))
-                                || crate::hex_microphone::driver_action_in_progress()
-                        };
+                        let fun_busy = (window.pane == Pane::Fun
+                            && crate::hex_microphone::demo_is_busy())
+                            || crate::hex_microphone::driver_action_in_progress();
                         interval = if (window.setup_visible && !window.preview) || fun_busy {
                             Duration::from_millis(100)
                         } else {
@@ -1063,7 +1314,7 @@ impl AppWindow {
                         let personal_workspace_changed = window.poll_personal_workspace();
                         let history_changed = window.poll_history(cx);
                         let platform_changed = window.poll_platform(cx);
-                        let hex_mic_changed = window.poll_hex_microphone();
+                        let hex_mic_changed = window.poll_hex_microphone(cx);
                         let tour_changed = window.poll_tour();
                         if window.tour_quit_requested {
                             cx.quit();
@@ -1080,7 +1331,6 @@ impl AppWindow {
                             || history_changed
                             || platform_changed
                             || hex_mic_changed
-                            || fun_busy
                         {
                             cx.notify();
                         }
@@ -1357,11 +1607,43 @@ impl AppWindow {
         };
         let history_search = Self::history_search_input(cx);
         let hex_mic_comfort_noise = settings.experimental.hex_microphone_comfort_noise;
+        let initial_pane = preview.as_ref().map_or(Pane::default(), |preview| {
+            Pane::from_developer(preview.pane)
+        });
+        let fun_driver_missing = preview
+            .as_ref()
+            .is_some_and(|preview| preview.fun_driver_missing);
+        let fun_mic_status = Self::preview_hex_microphone_status(fun_driver_missing);
+        let personal_config_exists =
+            !preview_mode && personal_workspace.join("hex.config.ts").is_file();
+        let weak_self = cx.weak_entity();
+        let navigation_sidebar = cx.new(|_| NavigationSidebar {
+            window_entity: weak_self,
+            pane: initial_pane,
+            meetings_available: settings.meetings.available(),
+            fun_available: settings.experimental.hex_microphone_available()
+                || initial_pane == Pane::Fun,
+            update_available: false,
+            preview: preview_mode,
+        });
+        let navigation_view = AnyView::from(navigation_sidebar.clone()).cached(
+            StyleRefinement::default()
+                .w(px(SIDEBAR_WIDTH))
+                .h_full()
+                .flex_none(),
+        );
+        let fun_waveform = cx.new(|_| FunWaveformView::new());
+        if std::env::var_os("HEX_PREVIEW_BEFORE").is_none()
+            && (settings.experimental.hex_microphone_available() || initial_pane == Pane::Fun)
+        {
+            crate::hex_microphone::prewarm_demo_async();
+        }
         let mut window = Self {
             preview: preview_mode,
-            pane: preview.as_ref().map_or(Pane::default(), |preview| {
-                Pane::from_developer(preview.pane)
-            }),
+            pane: initial_pane,
+            navigation_sidebar,
+            navigation_view,
+            fun_waveform,
             event_reader: EventReader::open(event_path),
             activity: DesktopActivity::default(),
             platform,
@@ -1521,6 +1803,7 @@ impl AppWindow {
             settings_save_override: None,
             personal_commands_status,
             personal_workspace,
+            personal_config_exists,
             personal_workspace_receiver: None,
             personal_workspace_error: None,
             personal_commands_prompt_copied: false,
@@ -1539,23 +1822,126 @@ impl AppWindow {
             history_copied: None,
             fun_comfort_noise_toggle: ToggleSpring::new(hex_mic_comfort_noise),
             fun_driver_action_seq: crate::hex_microphone::driver_action_seq(),
-            fun_driver_missing_preview: preview
-                .as_ref()
-                .is_some_and(|preview| preview.fun_driver_missing),
+            fun_driver_missing_preview: fun_driver_missing,
+            fun_mic_status,
+            fun_mic_status_receiver: None,
+            fun_demo_button_state: (
+                crate::hex_microphone::DemoSourceKind::Example,
+                false,
+                false,
+                None,
+            ),
             fun_active_slider: None,
         };
         window.platform_opened(preview.as_ref());
         if !window.preview {
             window.reload_events();
+            window.request_hex_microphone_status();
         }
         window.reload_history(cx);
         if window.preview {
             window.selected_history = window.history_entries.first().map(|entry| entry.id);
+            window.spawn_preview_choreography(cx);
         }
         if window.pane == Pane::Modes {
             window.ensure_application_catalog_load();
         }
         window
+    }
+
+    fn spawn_preview_choreography(&self, cx: &mut Context<Self>) {
+        let Ok(kind) = std::env::var("HEX_PREVIEW_CHOREOGRAPHY") else {
+            return;
+        };
+        cx.spawn(async move |window, cx| {
+            use crate::voice_filter::VoiceFilterMode;
+            match kind.as_str() {
+                "fun" => {
+                    Timer::after(Duration::from_millis(650)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.set_hex_microphone_mode(VoiceFilterMode::Muted, cx);
+                    });
+                    Timer::after(Duration::from_millis(850)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.set_hex_microphone_mode(VoiceFilterMode::Robot, cx);
+                    });
+                    Timer::after(Duration::from_millis(850)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        crate::hex_microphone::simulate_silent_demo_playback(
+                            Duration::from_millis(1100),
+                        );
+                        this.fun_waveform.update(cx, |_, cx| cx.notify());
+                        cx.notify();
+                    });
+                    Timer::after(Duration::from_millis(1250)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.set_hex_microphone_mode(VoiceFilterMode::Chipmunk, cx);
+                    });
+                    Timer::after(Duration::from_millis(750)).await;
+                    crate::motion::log_pane_summary("Fun", "choreography_done");
+                    crate::motion::log_pane_summary("FunWaveform", "choreography_done");
+                }
+                "panes" => {
+                    Timer::after(Duration::from_millis(600)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.microphone_picker_open = true;
+                        cx.notify();
+                    });
+                    Timer::after(Duration::from_millis(650)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.microphone_picker_open = false;
+                        this.set_shortcut_mode(crate::dictation::ShortcutMode::Toggle, cx);
+                    });
+                    Timer::after(Duration::from_millis(650)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.select_pane(Pane::Modes, cx);
+                    });
+                    Timer::after(Duration::from_millis(650)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.select_pane(Pane::Fun, cx);
+                    });
+                    Timer::after(Duration::from_millis(650)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.select_pane(Pane::Settings, cx);
+                    });
+                    Timer::after(Duration::from_millis(550)).await;
+                    crate::motion::log_pane_summary("Settings", "choreography_done");
+                    crate::motion::log_pane_summary("Modes", "choreography_done");
+                    crate::motion::log_pane_summary("Fun", "choreography_done");
+                }
+                #[cfg(target_os = "macos")]
+                "hud" => {
+                    Timer::after(Duration::from_millis(550)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.platform.hud_demo = platform::HudDemoState::Recording;
+                        this.apply_hud_lab();
+                        cx.notify();
+                    });
+                    Timer::after(Duration::from_millis(900)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.platform.hud_demo = platform::HudDemoState::Transcribing;
+                        this.platform.hud_queued = 2;
+                        this.apply_hud_lab();
+                        cx.notify();
+                    });
+                    Timer::after(Duration::from_millis(900)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.platform.hud_demo = platform::HudDemoState::Processing;
+                        this.platform.hud_queued = 0;
+                        this.select_hud_style(1, cx);
+                    });
+                    Timer::after(Duration::from_millis(900)).await;
+                    let _ = window.update(cx, |this, cx| {
+                        this.platform.hud_demo = platform::HudDemoState::Recording;
+                        this.select_hud_style(0, cx);
+                    });
+                    Timer::after(Duration::from_millis(650)).await;
+                    crate::motion::log_pane_summary("HUD Lab", "choreography_done");
+                }
+                _ => {}
+            }
+        })
+        .detach();
     }
 
     /// Refreshes disk-backed meeting and activity data while retaining valid
@@ -1580,6 +1966,9 @@ impl AppWindow {
     }
 
     fn select_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        if self.pane != pane {
+            crate::motion::log_pane_summary(self.pane.label(), "pane_switched");
+        }
         if self.pane == Pane::Fun && pane != Pane::Fun {
             crate::hex_microphone::stop_demo_playback();
             crate::hex_microphone::stop_demo_recording();
@@ -1594,8 +1983,21 @@ impl AppWindow {
             Pane::Commands | Pane::Activity => self.reload_events(),
             Pane::History => self.reload_history(cx),
             Pane::Modes => self.ensure_application_catalog_load(),
-            Pane::Fun | Pane::VoiceAction => {}
-            Pane::Settings => self.permission_refresh_at = Instant::now(),
+            Pane::Fun => {
+                if std::env::var_os("HEX_PREVIEW_BEFORE").is_none() {
+                    crate::hex_microphone::prewarm_demo_async();
+                }
+                if !self.preview {
+                    self.request_hex_microphone_status();
+                }
+            }
+            Pane::VoiceAction => {}
+            Pane::Settings => {
+                self.permission_refresh_at = Instant::now();
+                if !self.preview && self.settings.experimental.hex_microphone_available() {
+                    self.request_hex_microphone_status();
+                }
+            }
         }
         cx.notify();
     }
@@ -1865,12 +2267,15 @@ impl AppWindow {
         if self.preview {
             return false;
         }
+        let config_exists = self.personal_workspace.join("hex.config.ts").is_file();
+        let config_changed = config_exists != self.personal_config_exists;
+        self.personal_config_exists = config_exists;
         let Ok(mut status) = crate::personal_commands::load_status() else {
-            return false;
+            return config_changed;
         };
         crate::personal_commands::include_builtin_transformations(&mut status);
         if status == self.personal_commands_status {
-            return false;
+            return config_changed;
         }
         self.personal_commands_status = status;
         self.personal_commands_changed();
@@ -1887,6 +2292,7 @@ impl AppWindow {
         self.personal_workspace_receiver = None;
         match result {
             Ok(workspace) => {
+                self.personal_config_exists = workspace.join("hex.config.ts").is_file();
                 self.personal_workspace = workspace;
                 self.personal_workspace_error = None;
             }
@@ -2144,7 +2550,7 @@ impl AppWindow {
         cx.notify();
     }
 
-    fn render_history(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let retention = self.settings.history_retention;
         let search = div()
             .w(px(SEARCH_FIELD_WIDTH))
@@ -2159,11 +2565,16 @@ impl AppWindow {
             this.history_retention_open = true;
             cx.notify();
         }));
+        let retention_menu_progress = window.spring_when(
+            "history-retention-menu-progress",
+            self.history_retention_open,
+            SPRING_SNAP,
+        );
         let retention_control = div().relative().child(retention_control).when(
             self.history_retention_open,
             |control| {
                 control.child(deferred(
-                    dropdown_menu()
+                    dropdown_menu_with_progress(retention_menu_progress)
                         .id("history-retention-menu")
                         .right_0()
                         .w(px(MENU_WIDTH))
@@ -2381,47 +2792,28 @@ impl AppWindow {
     }
 
     fn render_navigation(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let items = Pane::all_with_fun(
-            platform::CAPABILITIES,
-            crate::DEVELOPER_FEATURES_ENABLED,
-            self.settings.meetings.available(),
-            self.settings.experimental.hex_microphone_available() || self.pane == Pane::Fun,
-        )
-        .into_iter()
-        .enumerate()
-        .map(|(index, pane)| {
-            let selected = self.pane == pane;
-            navigation_item(pane.icon(), selected)
-                .id(("app-nav", index))
-                .child(pane.label())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.select_pane(pane, cx);
-                }))
+        let meetings_available = self.settings.meetings.available();
+        let fun_available =
+            self.settings.experimental.hex_microphone_available() || self.pane == Pane::Fun;
+        let update_available = self.platform_update_button(cx).is_some();
+        let pane = self.pane;
+        let preview = self.preview;
+        self.navigation_sidebar.update(cx, |sidebar, cx| {
+            if sidebar.pane != pane
+                || sidebar.meetings_available != meetings_available
+                || sidebar.fun_available != fun_available
+                || sidebar.update_available != update_available
+                || sidebar.preview != preview
+            {
+                sidebar.pane = pane;
+                sidebar.meetings_available = meetings_available;
+                sidebar.fun_available = fun_available;
+                sidebar.update_available = update_available;
+                sidebar.preview = preview;
+                cx.notify();
+            }
         });
-
-        platform::sidebar(sidebar_frame())
-            .child(div().flex().flex_col().gap_0p5().children(items))
-            .child(platform::window_drag_region(div().flex_1()))
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .h(px(CONTROL_HEIGHT))
-                    .mt_3()
-                    .child(
-                        div()
-                            .flex_none()
-                            .pl_3()
-                            .text_caption()
-                            .text_color(rgb(TEXT_TERTIARY))
-                            .child(tr_fill("Version {}", env!("CARGO_PKG_VERSION"))),
-                    )
-                    .children(self.platform_update_button(cx)),
-            )
-            .into_any_element()
+        self.navigation_view.clone().into_any_element()
     }
 
     fn render_hotkey_control(
@@ -2982,15 +3374,33 @@ impl AppWindow {
             deletion_error: self.transcription_deletion_error.clone(),
             language: selected_language.to_string(),
             models,
+            open_progress: 1.0,
+            language_progress: 1.0,
         }
     }
 
     fn render_transcription_picker(
         &mut self,
         selected_language: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        render_shared_transcription_picker(self.transcription_picker_view(selected_language), cx)
+        let mut lang_hash = 0xcbf29ce484222325u64;
+        for b in selected_language.as_bytes() {
+            lang_hash ^= u64::from(*b);
+            lang_hash = lang_hash.wrapping_mul(0x100000001b3);
+        }
+        let open_progress = window.spring_when(
+            "transcription-picker-open",
+            self.transcription_picker_language.is_some(),
+            SPRING_SETTLE,
+        );
+        let language_progress =
+            window.spring_transition("transcription-picker-lang", lang_hash, SPRING_SETTLE);
+        let mut view = self.transcription_picker_view(selected_language);
+        view.open_progress = open_progress;
+        view.language_progress = language_progress;
+        render_shared_transcription_picker(view, cx)
     }
 
     fn dismiss_transcription_picker(&mut self, cx: &mut Context<Self>) {
@@ -2999,7 +3409,7 @@ impl AppWindow {
         cx.notify();
     }
 
-    fn render_microphone_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_microphone_picker(&self, progress: f32, cx: &mut Context<Self>) -> AnyElement {
         let choices = std::iter::once(None)
             .chain(self.microphone_devices.iter().cloned().map(Some))
             .collect::<Vec<_>>();
@@ -3007,6 +3417,7 @@ impl AppWindow {
             choices,
             self.settings.microphone.clone(),
             self.microphone_picker_error.clone(),
+            progress,
             cx.listener(|this, device: &Option<String>, _, cx| {
                 if this.update_settings(cx, |settings| settings.microphone = device.clone()) {
                     this.microphone_picker_open = false;
@@ -3172,11 +3583,20 @@ impl AppWindow {
         )
     }
 
-    fn render_interface_language_control(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_interface_language_control(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = self.settings.ui_language.clone();
         let label = tr(crate::desktop_i18n::choice_name(selected.as_deref()));
+        let menu_progress = window.spring_when(
+            "interface-language-picker-progress",
+            self.interface_language_open,
+            SPRING_SNAP,
+        );
         let menu = self.interface_language_open.then(|| {
-            dropdown_menu()
+            dropdown_menu_with_progress(menu_progress)
                 .id("interface-language-picker")
                 .right_0()
                 .w(px(DISCLOSURE_WIDTH))
@@ -3340,7 +3760,7 @@ impl AppWindow {
             );
         let interface_language_control = capabilities
             .interface_language
-            .then(|| self.render_interface_language_control(cx));
+            .then(|| self.render_interface_language_control(window, cx));
         let software_update_control = capabilities
             .software_updates
             .then(|| self.render_software_update_control(cx))
@@ -3351,9 +3771,14 @@ impl AppWindow {
             .microphone
             .clone()
             .unwrap_or_else(|| tr("Automatic").into());
+        let microphone_picker_progress = window.spring_when(
+            "microphone-picker-progress",
+            self.microphone_picker_open,
+            SPRING_SNAP,
+        );
         let microphone_picker = self
             .microphone_picker_open
-            .then(|| self.render_microphone_picker(cx));
+            .then(|| self.render_microphone_picker(microphone_picker_progress, cx));
         let sound_volume_position = self.sound_volume_spring.render_position(window);
         let selected_volume = sound_volume_index(&self.settings);
         let sound_volume =
@@ -3819,27 +4244,43 @@ impl AppWindow {
                         let mode = self.settings.experimental.hex_microphone_mode;
                         let comfort_position =
                             self.fun_comfort_noise_toggle.render_position(window);
-                        let mode_pills = segmented_control()
-                            .id("settings-hex-mic-mode")
-                            .children(
-                                [
-                                    crate::voice_filter::VoiceFilterMode::Muffled,
-                                    crate::voice_filter::VoiceFilterMode::Muted,
-                                    crate::voice_filter::VoiceFilterMode::Quiet,
-                                    crate::voice_filter::VoiceFilterMode::Normal,
-                                ]
+                        const SETTINGS_FUN_MODE_WIDTHS: [f32; 4] = [66.0, 56.0, 52.0, 62.0];
+                        let settings_choices = [
+                            crate::voice_filter::VoiceFilterMode::Muffled,
+                            crate::voice_filter::VoiceFilterMode::Muted,
+                            crate::voice_filter::VoiceFilterMode::Quiet,
+                            crate::voice_filter::VoiceFilterMode::Normal,
+                        ];
+                        let settings_mode_idx = settings_choices
+                            .iter()
+                            .position(|&c| c == mode)
+                            .unwrap_or(0);
+                        let settings_mode_pos = window.spring(
+                            "settings-hex-mic-mode-index",
+                            settings_mode_idx as f32,
+                            SPRING_SNAP,
+                        );
+                        let mode_pills = sliding_segmented_control(
+                            settings_mode_pos,
+                            &SETTINGS_FUN_MODE_WIDTHS,
+                        )
+                        .id("settings-hex-mic-mode")
+                        .children(
+                            settings_choices
                                 .into_iter()
                                 .enumerate()
                                 .map(|(index, choice)| {
-                                    segmented_item(mode == choice)
-                                        .id(("settings-hex-mic-mode-item", index))
-                                        .cursor_pointer()
-                                        .child(Self::voice_filter_mode_label(choice))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_hex_microphone_mode(choice, cx);
-                                        }))
+                                    sliding_segmented_item(
+                                        SETTINGS_FUN_MODE_WIDTHS[index],
+                                        mode == choice,
+                                    )
+                                    .id(("settings-hex-mic-mode-item", index))
+                                    .child(Self::voice_filter_mode_label(choice))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_hex_microphone_mode(choice, cx);
+                                    }))
                                 }),
-                            );
+                        );
                         let comfort_control = div()
                             .id("settings-hex-mic-comfort-noise")
                             .flex()
@@ -3931,6 +4372,7 @@ impl AppWindow {
         crate::hex_microphone::update_tuned_config(|cfg| {
             cfg.mode = mode;
         });
+        self.fun_waveform.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
 
@@ -4141,35 +4583,93 @@ impl AppWindow {
             .into_any_element()
     }
 
-    fn poll_hex_microphone(&mut self) -> bool {
+    fn poll_hex_microphone(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        if let Some(receiver) = &self.fun_mic_status_receiver
+            && let Ok(next_status) = receiver.try_recv()
+        {
+            self.fun_mic_status_receiver = None;
+            if next_status != self.fun_mic_status {
+                self.fun_mic_status = next_status;
+                changed = true;
+            }
+        }
         let next = crate::hex_microphone::driver_action_seq();
         if next != self.fun_driver_action_seq {
             self.fun_driver_action_seq = next;
-            return true;
+            self.fun_waveform.update(cx, |_, cx| cx.notify());
+            if !self.preview {
+                self.request_hex_microphone_status();
+            }
+            changed = true;
         }
-        false
+        if !self.preview
+            && self.fun_mic_status_receiver.is_none()
+            && (self.pane == Pane::Fun
+                || (self.pane == Pane::Settings
+                    && self.settings.experimental.hex_microphone_available())
+                || crate::hex_microphone::driver_action_in_progress())
+        {
+            self.request_hex_microphone_status();
+        }
+        if self.pane == Pane::Fun && crate::hex_microphone::demo_is_busy() {
+            self.fun_waveform.update(cx, |_, cx| cx.notify());
+            let snap = crate::hex_microphone::demo_snapshot();
+            let button_state = (
+                snap.source,
+                snap.has_recording,
+                snap.is_recording,
+                snap.playing,
+            );
+            if button_state != self.fun_demo_button_state
+                || std::env::var_os("HEX_PREVIEW_BEFORE").is_some()
+            {
+                self.fun_demo_button_state = button_state;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn request_hex_microphone_status(&mut self) {
+        if self.preview || self.fun_mic_status_receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(crate::hex_microphone::status());
+        });
+        self.fun_mic_status_receiver = Some(receiver);
+    }
+
+    fn preview_hex_microphone_status(missing: bool) -> crate::hex_microphone::HexMicrophoneStatus {
+        let bundled_version = env!("CARGO_PKG_VERSION").to_string();
+        crate::hex_microphone::HexMicrophoneStatus {
+            driver_bundle_installed: !missing,
+            driver_loaded: !missing,
+            installed_version: (!missing).then(|| bundled_version.clone()),
+            bundled_version,
+            sink_streaming: !missing,
+            mic_in_use: !missing,
+            active_apps: if missing {
+                Vec::new()
+            } else {
+                vec!["Slack".into()]
+            },
+            action_state: crate::hex_microphone::DriverActionState::Idle,
+        }
     }
 
     fn hex_microphone_status(&self) -> crate::hex_microphone::HexMicrophoneStatus {
+        if std::env::var_os("HEX_PREVIEW_BEFORE").is_some() {
+            let _ = crate::hex_microphone::status();
+        }
         if self.preview {
-            let bundled_version = env!("CARGO_PKG_VERSION").to_string();
-            crate::hex_microphone::HexMicrophoneStatus {
-                driver_bundle_installed: !self.fun_driver_missing_preview,
-                driver_loaded: !self.fun_driver_missing_preview,
-                installed_version: (!self.fun_driver_missing_preview)
-                    .then(|| bundled_version.clone()),
-                bundled_version,
-                sink_streaming: !self.fun_driver_missing_preview,
-                mic_in_use: !self.fun_driver_missing_preview,
-                active_apps: if self.fun_driver_missing_preview {
-                    Vec::new()
-                } else {
-                    vec!["Slack".into()]
-                },
-                action_state: crate::hex_microphone::DriverActionState::Idle,
-            }
+            Self::preview_hex_microphone_status(self.fun_driver_missing_preview)
         } else {
-            crate::hex_microphone::status()
+            let mut status = self.fun_mic_status.clone();
+            status.action_state = crate::hex_microphone::current_driver_action_state();
+            status
         }
     }
 
@@ -4308,8 +4808,31 @@ impl AppWindow {
         let cfg = crate::hex_microphone::current_tuned_config();
         let current_mode = cfg.mode;
         let demo = crate::hex_microphone::demo_snapshot();
+        self.fun_demo_button_state = (
+            demo.source,
+            demo.has_recording,
+            demo.is_recording,
+            demo.playing,
+        );
 
-        let header_status = match &status.action_state {
+        let driver_status_key = match &status.action_state {
+            DriverActionState::Installing => 1u64,
+            DriverActionState::Uninstalling => 2,
+            DriverActionState::Failed(_) => 3,
+            DriverActionState::Cancelled => 4,
+            DriverActionState::DoneUninstalled => 5,
+            _ if !status.driver_loaded => 6,
+            _ if status.needs_update() => 7,
+            _ if !status.active_apps.is_empty() => 8,
+            _ => 9,
+        };
+        let driver_status_fade = window.spring_fade_transition(
+            "fun-driver-status-fade",
+            driver_status_key,
+            SPRING_SETTLE,
+        );
+
+        let header_status_badge = match &status.action_state {
             DriverActionState::Installing => {
                 tag(Tone::Neutral, tr("Installing…")).into_any_element()
             }
@@ -4339,29 +4862,43 @@ impl AppWindow {
             )
             .into_any_element(),
         };
+        let header_status = div()
+            .opacity(driver_status_fade)
+            .child(header_status_badge)
+            .into_any_element();
 
-        let driver_row = self.render_hex_microphone_driver_row(
-            "fun-driver-row",
-            "fun-driver-action",
-            &status,
-            cx,
-        );
+        let driver_row = self
+            .render_hex_microphone_driver_row("fun-driver-row", "fun-driver-action", &status, cx)
+            .opacity(driver_status_fade);
 
-        let mode_bar = segmented_control().id("fun-mode-picker").children(
-            VoiceFilterMode::ALL
-                .into_iter()
-                .enumerate()
-                .map(|(index, choice)| {
-                    segmented_item(current_mode == choice)
-                        .id(("fun-mode-item", index))
-                        .px_2p5()
-                        .cursor_pointer()
-                        .child(Self::voice_filter_mode_label(choice))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_hex_microphone_mode(choice, cx);
-                        }))
-                }),
+        const FUN_MODE_WIDTHS: [f32; 9] = [66.0, 56.0, 52.0, 62.0, 76.0, 54.0, 60.0, 86.0, 44.0];
+        let current_mode_index = VoiceFilterMode::ALL
+            .iter()
+            .position(|&m| m == current_mode)
+            .unwrap_or(0);
+        let mode_position = window.spring("fun-mode-index", current_mode_index as f32, SPRING_SNAP);
+        let mode_bar = sliding_segmented_control(mode_position, &FUN_MODE_WIDTHS)
+            .id("fun-mode-picker")
+            .children(
+                VoiceFilterMode::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, choice)| {
+                        sliding_segmented_item(FUN_MODE_WIDTHS[index], current_mode == choice)
+                            .id(("fun-mode-item", index))
+                            .child(Self::voice_filter_mode_label(choice))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_hex_microphone_mode(choice, cx);
+                            }))
+                    }),
+            );
+
+        let sliders_transition = window.spring_transition(
+            "fun-mode-sliders-transition",
+            current_mode_index as u64,
+            SPRING_SETTLE,
         );
+        let sliders_offset_y = (1.0 - sliders_transition) * 4.0;
 
         let mode_sliders: Vec<AnyElement> = match current_mode {
             VoiceFilterMode::Normal => Vec::new(),
@@ -4402,7 +4939,14 @@ impl AppWindow {
         };
 
         let comfort_position = self.fun_comfort_noise_toggle.render_position(window);
-        let comfort_row = (current_mode == VoiceFilterMode::Muted).then(|| {
+        let comfort_visibility = window
+            .spring_when(
+                "fun-comfort-noise-visibility",
+                current_mode == VoiceFilterMode::Muted,
+                SPRING_REFLOW,
+            )
+            .clamp(0.0, 1.0);
+        let comfort_row = (comfort_visibility > 0.001).then(|| {
             let control = div()
                 .id("fun-comfort-noise-toggle")
                 .flex()
@@ -4413,35 +4957,50 @@ impl AppWindow {
                     let next = !this.settings.experimental.hex_microphone_comfort_noise;
                     this.set_hex_microphone_comfort_noise(next, cx);
                 }));
-            settings_row(
-                tr("Comfort noise"),
-                tr("Keeps a quiet room tone while muted so callers know the line is live"),
-                control,
-            )
+            div()
+                .h(px(SETTINGS_ROW_MIN_HEIGHT * comfort_visibility))
+                .overflow_hidden()
+                .opacity(comfort_visibility)
+                .child(settings_row(
+                    tr("Comfort noise"),
+                    tr("Keeps a quiet room tone while muted so callers know the line is live"),
+                    control,
+                ))
         });
 
         let source_picker = demo.has_recording.then(|| {
-            segmented_control()
+            const SOURCE_WIDTHS: [f32; 2] = [72.0, 82.0];
+            let source_idx = if demo.source == DemoSourceKind::Recording {
+                1.0
+            } else {
+                0.0
+            };
+            let source_pos = window.spring("fun-demo-source-index", source_idx, SPRING_SNAP);
+            sliding_segmented_control(source_pos, &SOURCE_WIDTHS)
                 .id("fun-demo-source")
                 .child(
-                    segmented_item(demo.source == DemoSourceKind::Example)
-                        .id("fun-demo-source-example")
-                        .cursor_pointer()
-                        .child(tr("Example"))
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            crate::hex_microphone::select_demo_source(DemoSourceKind::Example);
-                            cx.notify();
-                        })),
+                    sliding_segmented_item(
+                        SOURCE_WIDTHS[0],
+                        demo.source == DemoSourceKind::Example,
+                    )
+                    .id("fun-demo-source-example")
+                    .child(tr("Example"))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        crate::hex_microphone::select_demo_source(DemoSourceKind::Example);
+                        cx.notify();
+                    })),
                 )
                 .child(
-                    segmented_item(demo.source == DemoSourceKind::Recording)
-                        .id("fun-demo-source-recording")
-                        .cursor_pointer()
-                        .child(tr("Your voice"))
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            crate::hex_microphone::select_demo_source(DemoSourceKind::Recording);
-                            cx.notify();
-                        })),
+                    sliding_segmented_item(
+                        SOURCE_WIDTHS[1],
+                        demo.source == DemoSourceKind::Recording,
+                    )
+                    .id("fun-demo-source-recording")
+                    .child(tr("Your voice"))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        crate::hex_microphone::select_demo_source(DemoSourceKind::Recording);
+                        cx.notify();
+                    })),
                 )
         });
 
@@ -4449,63 +5008,19 @@ impl AppWindow {
             button(ButtonKind::Danger, status_dot(DANGER))
                 .id("fun-demo-record")
                 .child(tr("Stop recording"))
-                .on_click(cx.listener(|_, _, _, cx| {
+                .on_click(cx.listener(|this, _, _, cx| {
                     crate::hex_microphone::stop_demo_recording();
+                    this.fun_waveform.update(cx, |_, cx| cx.notify());
                     cx.notify();
                 }))
         } else {
             button(ButtonKind::Secondary, status_dot(DANGER))
                 .id("fun-demo-record")
                 .child(tr("Record 5s"))
-                .on_click(cx.listener(|_, _, _, cx| {
+                .on_click(cx.listener(|this, _, _, cx| {
                     crate::hex_microphone::start_demo_recording();
+                    this.fun_waveform.update(cx, |_, cx| cx.notify());
                     cx.notify();
-                }))
-        };
-
-        let duration_s = (demo.duration_ms as f64) / 1000.0;
-        let span_start_s = format!("{:.1}s", demo.span.start_ms / 1000.0);
-        let span_end_s = format!("{:.1}s", demo.span.end_ms / 1000.0);
-        let span_badge = tag(Tone::Accent, format!("{} – {}", span_start_s, span_end_s));
-        let clip_quote = match demo.source {
-            DemoSourceKind::Example => {
-                "“Yeah, I’m looking at the new layout now — Reply to Olive: pick up dinner…”"
-            }
-            DemoSourceKind::Recording => tr("Your 5s sample"),
-        };
-
-        let total_bars = demo.peaks_you.len().max(1);
-        let duration_f = (demo.duration_ms.max(1)) as f64;
-        let render_waveform_bars = |peaks: &[f32], call_track: bool| -> Div {
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .h(px(28.0))
-                .px_2()
-                .py_1()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .rounded(RADIUS_SMALL)
-                .bg(rgb(SURFACE))
-                .children(peaks.iter().enumerate().map(|(idx, &peak)| {
-                    let bar_ms = ((idx as f64) + 0.5) / (total_bars as f64) * duration_f;
-                    let in_span = bar_ms >= demo.span.start_ms && bar_ms <= demo.span.end_ms;
-                    let height = (peak.clamp(0.06, 1.0) * 20.0).round();
-                    let color = if call_track {
-                        if in_span { ACCENT_TEXT } else { TEXT_SECONDARY }
-                    } else if in_span {
-                        TEXT_PRIMARY
-                    } else {
-                        TEXT_TERTIARY
-                    };
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h(px(height))
-                        .rounded(RADIUS_KNOB)
-                        .bg(rgb(color))
                 }))
         };
 
@@ -4521,12 +5036,13 @@ impl AppWindow {
             },
         )
         .id("fun-play-call-hears")
-        .on_click(cx.listener(move |_, _, _, cx| {
+        .on_click(cx.listener(move |this, _, _, cx| {
             if playing_call {
                 crate::hex_microphone::stop_demo_playback();
             } else {
                 crate::hex_microphone::play_demo_track(DemoPlaybackTrack::CallHears);
             }
+            this.fun_waveform.update(cx, |_, cx| cx.notify());
             cx.notify();
         }));
 
@@ -4539,12 +5055,13 @@ impl AppWindow {
             },
         )
         .id("fun-play-you")
-        .on_click(cx.listener(move |_, _, _, cx| {
+        .on_click(cx.listener(move |this, _, _, cx| {
             if playing_you {
                 crate::hex_microphone::stop_demo_playback();
             } else {
                 crate::hex_microphone::play_demo_track(DemoPlaybackTrack::You);
             }
+            this.fun_waveform.update(cx, |_, cx| cx.notify());
             cx.notify();
         }));
 
@@ -4603,6 +5120,9 @@ impl AppWindow {
                                     sec.child(
                                         div()
                                             .pt_1()
+                                            .opacity(sliders_transition.clamp(0.0, 1.0))
+                                            .mt(px(sliders_offset_y))
+                                            .mb(px(-sliders_offset_y))
                                             .flex()
                                             .flex_wrap()
                                             .gap_4()
@@ -4637,87 +5157,7 @@ impl AppWindow {
                                                 .child(record_btn),
                                         ),
                                 )
-                                .child(
-                                    div()
-                                        .id("fun-waveform-card")
-                                        .p_3()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2p5()
-                                        .rounded(RADIUS_CONTROL)
-                                        .border_1()
-                                        .border_color(rgb(LINE))
-                                        .bg(rgb(CANVAS))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap_3()
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .min_w_0()
-                                                        .child(
-                                                            div()
-                                                                .text_footnote()
-                                                                .text_color(rgb(TEXT_SECONDARY))
-                                                                .child(clip_quote),
-                                                        )
-                                                        .child(span_badge),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_caption()
-                                                        .text_monospace()
-                                                        .text_color(rgb(TEXT_TERTIARY))
-                                                        .child(format!("{duration_s:.1}s")),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_3()
-                                                .child(
-                                                    div()
-                                                        .w(px(80.0))
-                                                        .flex_none()
-                                                        .text_caption()
-                                                        .text_color(rgb(TEXT_TERTIARY))
-                                                        .child(tr("You")),
-                                                )
-                                                .child(render_waveform_bars(&demo.peaks_you, false)),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_3()
-                                                .child(
-                                                    div()
-                                                        .w(px(80.0))
-                                                        .flex_none()
-                                                        .text_caption()
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .text_color(rgb(ACCENT_TEXT))
-                                                        .child(tr("Call hears")),
-                                                )
-                                                .child(render_waveform_bars(&demo.peaks_call, true)),
-                                        )
-                                        .when(demo.is_recording || demo.playing.is_some(), |card| {
-                                            let progress = if demo.is_recording {
-                                                demo.recording_progress
-                                            } else {
-                                                demo.playback_progress
-                                            };
-                                            card.child(progress_track(
-                                                div().w(gpui::relative(progress.clamp(0.0, 1.0))),
-                                            ))
-                                        }),
-                                )
+                                .child(self.fun_waveform.clone())
                                 .child(
                                     div()
                                         .flex()
@@ -5310,10 +5750,19 @@ impl AppWindow {
             .into_any_element()
     }
 
-    fn render_mode_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_mode_context_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu_progress = window.spring_when(
+            "mode-context-menu",
+            self.mode_context_menu.is_some(),
+            SPRING_SETTLE,
+        );
         let position = self.mode_context_menu?;
         Some(
-            menu()
+            menu_with_progress(menu_progress)
                 .absolute()
                 .left(position.x)
                 .top(position.y)
@@ -5355,9 +5804,9 @@ impl AppWindow {
         let processing_unavailable =
             opencode_unavailable_copy(&self.model_catalog, OpenCodeFeature::Transformation);
         let corrections = self.render_mode_replacements(selection, cx);
-        let transformations = self.render_mode_transformations(selection, cx);
+        let transformations = self.render_mode_transformations(selection, window, cx);
         let application_picker =
-            (!is_default).then(|| self.render_application_picker(selection, cx));
+            (!is_default).then(|| self.render_application_picker(selection, window, cx));
         let basics = if is_default {
             panel()
                 .child(
@@ -5588,10 +6037,16 @@ impl AppWindow {
     fn render_mode_transformations(
         &self,
         selection: ModeSelection,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = self.mode_settings(selection).transformations.clone();
         let catalog = &self.personal_commands_status.transformations;
+        let picker_progress = window.spring_when(
+            "transformation-picker-open",
+            self.transformation_picker_open && !catalog.is_empty(),
+            SPRING_SETTLE,
+        );
         let selected_rows = selected
             .iter()
             .enumerate()
@@ -5751,20 +6206,28 @@ impl AppWindow {
             ))
             .children(selected_rows)
             .when(self.transformation_picker_open && !catalog_empty, |panel| {
-                panel
-                    .when(available_empty, |list| {
-                        list.child(
-                            div()
-                                .border_t_1()
-                                .border_color(rgb(LINE))
-                                .px_4()
-                                .py_3()
-                                .text_footnote()
-                                .text_color(rgb(TEXT_TERTIARY))
-                                .child(tr("Every registered transformation is already included.")),
-                        )
-                    })
-                    .children(available_rows)
+                panel.child(
+                    div()
+                        .opacity(picker_progress.clamp(0.0, 1.0))
+                        .mt(px(
+                            -(1.0 - picker_progress.clamp(0.0, 1.0)) * MENU_ENTER_OFFSET
+                        ))
+                        .when(available_empty, |list| {
+                            list.child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(rgb(LINE))
+                                    .px_4()
+                                    .py_3()
+                                    .text_footnote()
+                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .child(tr(
+                                        "Every registered transformation is already included.",
+                                    )),
+                            )
+                        })
+                        .children(available_rows),
+                )
             })
             .children(workspace)
             .into_any_element()
@@ -5790,7 +6253,7 @@ impl AppWindow {
                 Some(error),
                 Some(tr("Retry setup")),
             )
-        } else if !crate::personal_commands::workspace_configured() {
+        } else if !self.personal_config_exists {
             (
                 tr("Create a TypeScript workspace to define reusable transformations."),
                 None,
@@ -5849,8 +6312,14 @@ impl AppWindow {
     fn render_application_picker(
         &self,
         selection: ModeSelection,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let tray_progress = window.spring_when(
+            "application-picker-open",
+            self.application_picker_open,
+            SPRING_SETTLE,
+        );
         let selected = self.mode_settings(selection).applications.clone();
         let selected_rows = selected.iter().enumerate().map(|(index, name)| {
             let application = self.application_named(name);
@@ -5944,9 +6413,12 @@ impl AppWindow {
             _ => None,
         };
         let tray = self.application_picker_open.then(|| {
+            let clamped = tray_progress.clamp(0.0, 1.0);
             div()
                 .mx_4()
                 .mb_4()
+                .mt(px(-(1.0 - clamped) * MENU_ENTER_OFFSET))
+                .opacity(clamped)
                 .p_2()
                 .flex()
                 .flex_col()
@@ -6275,45 +6747,47 @@ impl AppWindow {
                 )
             }
         };
-        let suggestions =
-            (focused && (!matches.is_empty() || default_label.is_some())).then(|| {
-                menu()
-                    .mt_1()
-                    .when_some(default_label.clone(), |list, label| {
-                        list.child(
-                            model_choice_row(
-                                tr("Use OpenCode default"),
-                                label,
-                                self.model_picker_highlight == 0,
-                            )
-                            .id("opencode-default")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.select_model(target, None, cx);
-                                    window.blur();
-                                }),
-                            ),
-                        )
-                    })
-                    .children(matches.into_iter().enumerate().map(|(index, choice)| {
-                        let key = choice.key.clone();
-                        let row_index = index + usize::from(default_label.is_some());
+        let suggestions_open = focused && (!matches.is_empty() || default_label.is_some());
+        let suggestions_progress =
+            window.spring_when("processing-suggestions", suggestions_open, SPRING_SETTLE);
+        let suggestions = suggestions_open.then(|| {
+            menu_with_progress(suggestions_progress)
+                .mt_1()
+                .when_some(default_label.clone(), |list, label| {
+                    list.child(
                         model_choice_row(
-                            choice.name,
-                            choice.key,
-                            self.model_picker_highlight == row_index,
+                            tr("Use OpenCode default"),
+                            label,
+                            self.model_picker_highlight == 0,
                         )
-                        .id(("model-choice", index))
+                        .id("opencode-default")
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, window, cx| {
-                                this.select_model(target, Some(key.clone()), cx);
+                                this.select_model(target, None, cx);
                                 window.blur();
                             }),
-                        )
-                    }))
-            });
+                        ),
+                    )
+                })
+                .children(matches.into_iter().enumerate().map(|(index, choice)| {
+                    let key = choice.key.clone();
+                    let row_index = index + usize::from(default_label.is_some());
+                    model_choice_row(
+                        choice.name,
+                        choice.key,
+                        self.model_picker_highlight == row_index,
+                    )
+                    .id(("model-choice", index))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.select_model(target, Some(key.clone()), cx);
+                            window.blur();
+                        }),
+                    )
+                }))
+        });
         let effective_variant = selected_variant.or_else(|| {
             selected_model.is_none().then(|| {
                 let ModelCatalogState::Loaded(catalog) = &self.model_catalog else {
@@ -6324,13 +6798,17 @@ impl AppWindow {
         });
         let has_variants = !variants.is_empty();
         let variant_open = self.variant_picker_open == Some(target);
+        let variant_progress = window.spring_when(
+            "processing-variants",
+            has_variants && variant_open,
+            SPRING_SETTLE,
+        );
         let variant_list = (has_variants && variant_open).then(|| {
             let choices = std::iter::once(None)
                 .chain(variants.iter().cloned().map(Some))
                 .collect::<Vec<_>>();
-            menu()
-                .mt_1()
-                .children(choices.into_iter().enumerate().map(|(index, variant)| {
+            menu_with_progress(variant_progress).mt_1().children(
+                choices.into_iter().enumerate().map(|(index, variant)| {
                     let selected = effective_variant == variant.as_deref();
                     let label = variant.clone().unwrap_or_else(|| tr("Default").into());
                     menu_item(selected)
@@ -6340,7 +6818,8 @@ impl AppWindow {
                             this.variant_picker_open = None;
                             this.set_model_variant(target, variant.clone(), cx);
                         }))
-                }))
+                }),
+            )
         });
         let variant_control = div()
             .w(px(160.0))
@@ -6897,6 +7376,14 @@ impl TranscriptionPickerDelegate for AppWindow {
 
 impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _frame_guard = crate::motion::begin_frame(self.pane.label());
+        let pane_epoch = self.pane as u64;
+        let pane_fade = window
+            .spring_fade_transition("pane-fade", pane_epoch, SPRING_REFLOW)
+            .clamp(0.0, 1.0);
+        let pane_slide = window
+            .spring_transition("pane-slide", pane_epoch, SPRING_REFLOW)
+            .clamp(0.0, 1.0);
         let model_notice = self.render_model_notice(cx);
         let content = match self.pane {
             Pane::HudLab | Pane::Meetings | Pane::Commands => {
@@ -6906,7 +7393,7 @@ impl Render for AppWindow {
                 }
             }
             Pane::Activity => self.render_activity(cx),
-            Pane::History => self.render_history(cx),
+            Pane::History => self.render_history(window, cx),
             Pane::Modes => self.render_modes(window, cx),
             Pane::VoiceAction => self.render_voice_action(window, cx),
             Pane::Fun => self.render_fun(window, cx),
@@ -6915,10 +7402,10 @@ impl Render for AppWindow {
         let transcription_picker = self
             .transcription_picker_language
             .clone()
-            .map(|language| self.render_transcription_picker(&language, cx));
+            .map(|language| self.render_transcription_picker(&language, window, cx));
         let setup = self.setup_visible.then(|| self.render_tour(window, cx));
         let mode_context_menu = (self.pane == Pane::Modes)
-            .then(|| self.render_mode_context_menu(cx))
+            .then(|| self.render_mode_context_menu(window, cx))
             .flatten();
         platform::frame(window_frame())
             .track_focus(&self.window_focus)
@@ -6991,7 +7478,14 @@ impl Render for AppWindow {
                                 .child(error_message(tr("Settings error:"), error)),
                         )
                     })
-                    .child(div().flex_1().min_h_0().child(content)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .opacity(pane_fade)
+                            .mt(px((1.0 - pane_slide) * PANE_ENTER_OFFSET))
+                            .child(content),
+                    ),
             )
             .children(setup)
             .children(transcription_picker)
@@ -8593,6 +9087,7 @@ mod tests {
                                 vec![None, Some("Studio Microphone".into())],
                                 None,
                                 None,
+                                1.0,
                                 move |device, _, _| {
                                     chosen.borrow_mut().chosen = Some(device.clone());
                                 },
@@ -8960,8 +9455,8 @@ mod tests {
         let at_120_hz = simulate(120);
         assert!(at_60_hz.is_settled());
         assert!(at_120_hz.is_settled());
-        assert!((at_60_hz.position - at_120_hz.position).abs() < 0.001);
-        assert_eq!(at_60_hz.position, 1.0);
+        assert!((at_60_hz.position() - at_120_hz.position()).abs() < 0.001);
+        assert_eq!(at_60_hz.position(), 1.0);
     }
 
     #[test]

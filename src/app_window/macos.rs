@@ -11,10 +11,7 @@ use gpui::{MouseMoveEvent, ScrollHandle, relative};
 
 use super::*;
 use crate::commands::{CommandConfig, CommandInfo, CommandScope};
-use crate::desktop_ui::{
-    disabled_menu_item, empty_state, list_section_label, menu_separator, segmented_control,
-    segmented_item,
-};
+use crate::desktop_ui::{disabled_menu_item, empty_state, list_section_label, menu_separator};
 use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender, HudTuning};
 use crate::meeting::{
     self, MeetingManifest, MeetingRequest, MeetingSource, MeetingStatus, TranscriptEntry,
@@ -356,8 +353,8 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         match pane {
-            Pane::HudLab => Some(self.render_hud_lab(cx)),
-            Pane::Meetings => Some(self.render_meetings(cx)),
+            Pane::HudLab => Some(self.render_hud_lab(window, cx)),
+            Pane::Meetings => Some(self.render_meetings(window, cx)),
             Pane::Commands => Some(self.render_commands(window, cx)),
             _ => None,
         }
@@ -1813,7 +1810,11 @@ impl AppWindow {
         .detach();
     }
 
-    pub(super) fn render_meetings(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_meetings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let active_meeting = meeting::active(&self.platform.meetings);
         let action = match active_meeting.map(|meeting| meeting.status) {
             _ if self.platform.meeting_stop_pending => {
@@ -1964,14 +1965,18 @@ impl AppWindow {
                                 .flex()
                                 .gap_5()
                                 .child(list)
-                                .child(pane_detail(self.render_meeting_detail(cx))),
+                                .child(pane_detail(self.render_meeting_detail(window, cx))),
                         ),
                 ),
             )
             .into_any_element()
     }
 
-    pub(super) fn render_meeting_detail(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_meeting_detail(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(meeting) = self
             .platform
             .selected_meeting
@@ -2144,13 +2149,18 @@ impl AppWindow {
                     this.platform.meeting_actions_open = true;
                     cx.notify();
                 }));
+            let menu_progress = window.spring_when(
+                "meeting-actions-menu-progress",
+                self.platform.meeting_actions_open,
+                SPRING_SNAP,
+            );
             actions.push(
                 div()
                     .relative()
                     .child(trigger)
                     .when(self.platform.meeting_actions_open, |more| {
                         more.child(deferred(
-                            dropdown_menu()
+                            dropdown_menu_with_progress(menu_progress)
                                 .id("meeting-actions-menu")
                                 .debug_selector(|| "meeting-actions-menu".into())
                                 .left_0()
@@ -2368,7 +2378,7 @@ impl AppWindow {
     ) -> AnyElement {
         let config_path = self.personal_workspace.join("hex.config.ts");
         let workspace_state = personal_workspace_state(
-            !self.preview && config_path.is_file(),
+            !self.preview && self.personal_config_exists,
             self.personal_workspace_receiver.is_some(),
             &self.personal_commands_status,
         );
@@ -2947,7 +2957,11 @@ impl AppWindow {
             .into_any_element()
     }
 
-    pub(super) fn render_hud_lab(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_hud_lab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let styles = [
             (
                 "A",
@@ -3000,8 +3014,15 @@ impl AppWindow {
                             cx.listener(move |this, _, _, cx| this.select_hud_style(index, cx)),
                         )
                 });
+        const HUD_STATE_WIDTHS: [f32; 3] = [88.0, 102.0, 92.0];
+        let state_idx = match self.platform.hud_demo {
+            HudDemoState::Recording => 0.0,
+            HudDemoState::Transcribing => 1.0,
+            HudDemoState::Processing => 2.0,
+        };
+        let state_pos = window.spring("hud-lab-state-index", state_idx, SPRING_SNAP);
         let state_button = |state, label: &'static str, index: usize| {
-            segmented_item(self.platform.hud_demo == state)
+            sliding_segmented_item(HUD_STATE_WIDTHS[index], self.platform.hud_demo == state)
                 .id(("hud-state", index))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -3010,8 +3031,14 @@ impl AppWindow {
                     cx.notify();
                 }))
         };
+        const HUD_QUEUE_WIDTHS: [f32; 4] = [34.0; 4];
+        let queue_pos = window.spring(
+            "hud-lab-queue-index",
+            self.platform.hud_queued.min(3) as f32,
+            SPRING_SNAP,
+        );
         let queue_buttons = (0..=3).map(|count| {
-            segmented_item(self.platform.hud_queued == count)
+            sliding_segmented_item(HUD_QUEUE_WIDTHS[count], self.platform.hud_queued == count)
                 .id(("hud-queue", count))
                 .child(count.to_string())
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -3061,11 +3088,13 @@ impl AppWindow {
                             .flex()
                             .items_center()
                             .gap_4()
-                            .child(segmented_control().children([
-                                state_button(HudDemoState::Recording, tr("Recording"), 0),
-                                state_button(HudDemoState::Transcribing, tr("Transcribing"), 1),
-                                state_button(HudDemoState::Processing, tr("Processing"), 2),
-                            ]))
+                            .child(
+                                sliding_segmented_control(state_pos, &HUD_STATE_WIDTHS).children([
+                                    state_button(HudDemoState::Recording, tr("Recording"), 0),
+                                    state_button(HudDemoState::Transcribing, tr("Transcribing"), 1),
+                                    state_button(HudDemoState::Processing, tr("Processing"), 2),
+                                ]),
+                            )
                             .child(
                                 div()
                                     .flex()
@@ -3077,7 +3106,10 @@ impl AppWindow {
                                             .text_color(rgb(TEXT_TERTIARY))
                                             .child("Queued"),
                                     )
-                                    .child(segmented_control().children(queue_buttons)),
+                                    .child(
+                                        sliding_segmented_control(queue_pos, &HUD_QUEUE_WIDTHS)
+                                            .children(queue_buttons),
+                                    ),
                             ),
                     )
                     .child(div().flex().gap_3().children(style_cards))

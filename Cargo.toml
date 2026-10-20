@@ -119,11 +119,9 @@ windows-future = "0.3.2"
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
 transcribe-cpp = { version = "=0.2.4", features = ["vulkan"] }
 
-# GPUI 0.2.2 (and Zed main) unwraps the Wayland XKB state on modifier and key
-# events, which a compositor can send before any XkbV1 keymap: a seat whose
-# only keyboard is a keymap-less virtual one, as right after a wtype paste on
-# wlroots compositors. Hona/gpui is 0.2.2 plus one commit that turns the three
-# unwraps in src/platform/linux/wayland/client.rs into early returns. Drop this
-# once GPUI handles a missing keymap.
+# GPUI 0.2.2 plus:
+# 1. Wayland XKB early-return when key/modifier events arrive before any keymap (from Hona/gpui a0c6474).
+# 2. macOS CAMetalLayer sRGB colorspace tag, triangular gradient/shadow dithering,
+#    luminance glyph dilation (Zed #54886), and CVDisplayLinkCreateWithCGDisplay fallback.
 [patch.crates-io]
-gpui = { git = "https://github.com/Hona/gpui", rev = "a0c6474ddf4859ebdd69ae2cc636ae25c227a9ac" }
+gpui = { git = "https://github.com/kitlangton/gpui", rev = "2582af8ad01dc39ae6500e872e8e994b0a9b8a6e" }

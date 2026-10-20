@@ -60,6 +60,8 @@ pub(crate) struct TranscriptionPickerView {
     pub(crate) deletion_error: Option<String>,
     pub(crate) language: String,
     pub(crate) models: Vec<TranscriptionPickerModel>,
+    pub(crate) open_progress: f32,
+    pub(crate) language_progress: f32,
 }
 
 pub(crate) trait TranscriptionPickerDelegate: Sized + 'static {
@@ -299,6 +301,10 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
             }))
     });
 
+    let open_progress = view.open_progress.clamp(0.0, 1.0);
+    let modal_offset = ((1.0 - open_progress) * PANE_ENTER_OFFSET * 2.0).round() * 0.5;
+    let language_progress = view.language_progress.clamp(0.0, 1.0);
+
     div()
         .id("transcription-picker-backdrop")
         .absolute()
@@ -310,6 +316,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
         .items_center()
         .justify_center()
         .bg(rgba(SCRIM))
+        .opacity(open_progress)
         .on_click(cx.listener(|this, _, _, cx| {
             this.dismiss_transcription_picker(cx);
         }))
@@ -318,6 +325,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                 .id("transcription-picker")
                 .w(px(MODAL_WIDTH))
                 .h(px(MODAL_HEIGHT))
+                .mt(px(modal_offset * 2.0))
                 .flex()
                 .flex_col()
                 .rounded(RADIUS_MODAL)
@@ -376,6 +384,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                                 .flex_col()
                                 .gap_2()
                                 .overflow_y_scroll()
+                                .opacity(language_progress)
                                 .when_some(view.error, |list, error| {
                                     list.child(error_panel(
                                         tr("Model could not be installed."),

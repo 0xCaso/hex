@@ -226,6 +226,38 @@ pub(crate) const ONBOARDING_BADGE_SIZE: f32 = 28.0;
 pub(crate) const STEP_DOT_SIZE: f32 = 6.0;
 pub(crate) const STEP_DOT_ACTIVE_WIDTH: f32 = 16.0;
 
+// Motion presets (`duration` + `bounce`, SwiftUI mapping) and transition offsets.
+pub(crate) use crate::motion::Spec as SpringSpec;
+#[allow(dead_code)]
+pub(crate) const SPRING_INSTANT: SpringSpec = crate::motion::presets::INSTANT;
+pub(crate) const SPRING_SNAP: SpringSpec = crate::motion::presets::SNAP;
+#[allow(dead_code)]
+pub(crate) const SPRING_SNAP_EXIT: SpringSpec = crate::motion::presets::SNAP_EXIT;
+pub(crate) const SPRING_SETTLE: SpringSpec = crate::motion::presets::SETTLE;
+#[allow(dead_code)]
+pub(crate) const SPRING_SETTLE_EXIT: SpringSpec = crate::motion::presets::SETTLE_EXIT;
+pub(crate) const SPRING_REFLOW: SpringSpec = crate::motion::presets::REFLOW;
+#[allow(dead_code)]
+pub(crate) const SPRING_REFLOW_EXIT: SpringSpec = crate::motion::presets::REFLOW_EXIT;
+#[allow(dead_code)]
+pub(crate) const SPRING_GLIDE: SpringSpec = crate::motion::presets::GLIDE;
+#[allow(dead_code)]
+pub(crate) const SPRING_GLIDE_EXIT: SpringSpec = crate::motion::presets::GLIDE_EXIT;
+#[allow(dead_code)]
+pub(crate) const SPRING_MORPH: SpringSpec = crate::motion::presets::MORPH;
+#[allow(dead_code)]
+pub(crate) const SPRING_MORPH_EXIT: SpringSpec = crate::motion::presets::MORPH_EXIT;
+#[allow(dead_code)]
+pub(crate) const SPRING_POP: SpringSpec = crate::motion::presets::POP;
+#[allow(dead_code)]
+pub(crate) const SPRING_POP_EXIT: SpringSpec = crate::motion::presets::POP_EXIT;
+#[allow(dead_code)]
+pub(crate) const SPRING_REDUCED_FADE: SpringSpec = crate::motion::presets::REDUCED_FADE;
+/// Vertical travel (in px) of a pane's entrance transition when Reduce Motion is off.
+pub(crate) const PANE_ENTER_OFFSET: f32 = 4.0;
+/// Vertical travel (in px) of a dropdown menu opening from its trigger.
+pub(crate) const MENU_ENTER_OFFSET: f32 = 4.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

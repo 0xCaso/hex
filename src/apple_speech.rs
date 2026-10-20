@@ -2,9 +2,12 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_float, c_int, c_void};
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::transcription::Transcript;
 use color_eyre::eyre::{Result, eyre};
+
+const READINESS_CACHE_TTL: Duration = Duration::from_secs(5);
 
 unsafe extern "C" {
     fn hex_apple_speech_ready(locale: *const c_char) -> c_int;
@@ -24,7 +27,10 @@ pub struct AppleSpeech {
     selection: crate::transcription_models::TranscriptionSelection,
 }
 
+type ReadinessCacheMap = HashMap<String, (Instant, Option<bool>)>;
+
 static READY_LOCALES: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+static READINESS_CACHE: OnceLock<Mutex<ReadinessCacheMap>> = OnceLock::new();
 
 // The retained Swift actor is safe to move to the dedicated inference thread.
 unsafe impl Send for AppleSpeech {}
@@ -39,9 +45,24 @@ impl AppleSpeech {
         {
             return Some(true);
         }
+        let cache = READINESS_CACHE.get_or_init(Default::default);
+        if let Some((checked_at, cached)) = cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(language)
+            .copied()
+            && checked_at.elapsed() < READINESS_CACHE_TTL
+        {
+            return cached;
+        }
         let ready =
             with_locale(language, |locale| unsafe { hex_apple_speech_ready(locale) }).unwrap_or(-1);
-        (ready >= 0).then_some(ready != 0)
+        let status = (ready >= 0).then_some(ready != 0);
+        cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(language.to_string(), (Instant::now(), status));
+        status
     }
 
     pub fn is_ready(language: &str) -> bool {

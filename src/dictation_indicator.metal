@@ -297,5 +297,13 @@ fragment float4 indicator_fragment(
     screen(result, float3(1.0, 0.58, 0.48), recording_flash_rim * recording_flash * 0.82);
 
     result *= uniforms.opacity;
+    if (result.a > 0.0) {
+        float2 pixel = floor(input.position.xy);
+        float n1 = fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715))));
+        float n2 = fract(
+            52.9829189 * fract(dot(pixel + float2(17.0, 31.0), float2(0.06711056, 0.00583715))));
+        float dither = ((n1 - n2) / 255.0) * result.a;
+        result.rgb = clamp(result.rgb + float3(dither), float3(0.0), float3(result.a));
+    }
     return result;
 }

@@ -110,6 +110,8 @@ mod moonshine;
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod moonshine_lab;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+mod motion;
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod onboarding;
 #[cfg(target_os = "macos")]
 mod parakeet;

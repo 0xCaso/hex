@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use core_graphics_types::geometry::CGSize;
-use core_video::base::{CVOptionFlags, CVTimeStamp};
+use core_video::base::{CVOptionFlags, CVTimeStamp, CVTimeStampFlags};
 use core_video::display_link::{CVDisplayLink, CVDisplayLinkRef};
 use core_video::r#return::CVReturn;
 use gpui::App;
@@ -24,6 +24,15 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 use objc2_quartz_core::CALayer;
 
 use crate::app_settings::IndicatorPosition;
+use crate::motion::{Spec, Spring, reduced_motion};
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    static kCGColorSpaceSRGB: *const c_void;
+    fn CGColorSpaceCreateWithName(name: *const c_void) -> *mut c_void;
+    fn CGColorSpaceRelease(space: *mut c_void);
+    fn CGMainDisplayID() -> u32;
+}
 
 const WINDOW_WIDTH: f32 = 112.0;
 const WINDOW_HEIGHT: f32 = 64.0;
@@ -169,11 +178,86 @@ impl DictationIndicatorUi {
     }
 }
 
+const DISPLAY_LINK_RETRY_INITIAL: Duration = Duration::from_millis(100);
+const DISPLAY_LINK_RETRY_MAX: Duration = Duration::from_millis(2000);
+
+struct AttachedDisplayLink {
+    display_link: CVDisplayLink,
+    context: *const SharedRenderer,
+}
+
+impl AttachedDisplayLink {
+    fn create(renderer: &Arc<SharedRenderer>) -> Result<Self, CVReturn> {
+        let display_link = CVDisplayLink::from_active_cg_displays()
+            .or_else(|_| CVDisplayLink::from_cg_display(unsafe { CGMainDisplayID() }))?;
+        let context = Arc::into_raw(renderer.clone());
+        let configured = unsafe {
+            display_link
+                .set_output_callback(display_link_callback, context.cast_mut().cast::<c_void>())
+        };
+        if let Err(status) = configured {
+            unsafe { drop(Arc::from_raw(context)) };
+            return Err(status);
+        }
+        Ok(Self {
+            display_link,
+            context,
+        })
+    }
+
+    fn is_running(&self) -> bool {
+        self.display_link.is_running()
+    }
+
+    fn start(&mut self) -> Result<(), CVReturn> {
+        self.display_link.start()
+    }
+
+    fn stop(&mut self) {
+        let _ = self.display_link.stop();
+    }
+}
+
+impl Drop for AttachedDisplayLink {
+    fn drop(&mut self) {
+        let _ = self.display_link.stop();
+        unsafe { drop(Arc::from_raw(self.context)) };
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DisplayOutputTime {
+    video_seconds: f64,
+    refresh_period: Option<f32>,
+}
+
+fn output_timestamp(output_time: *const CVTimeStamp) -> Option<DisplayOutputTime> {
+    if output_time.is_null() {
+        return None;
+    }
+    let ts = unsafe { &*output_time };
+    let video_valid = (ts.flags & (CVTimeStampFlags::kCVTimeStampVideoTimeValid as u64)) != 0;
+    if !video_valid || ts.videoTimeScale <= 0 {
+        return None;
+    }
+    let scale = f64::from(ts.videoTimeScale);
+    let video_seconds = (ts.videoTime as f64) / scale;
+    let refresh_valid =
+        (ts.flags & (CVTimeStampFlags::kCVTimeStampVideoRefreshPeriodValid as u64)) != 0;
+    let refresh_period = (refresh_valid && ts.videoRefreshPeriod > 0)
+        .then(|| ((ts.videoRefreshPeriod as f64) / scale) as f32);
+    Some(DisplayOutputTime {
+        video_seconds,
+        refresh_period,
+    })
+}
+
 struct MetalIndicator {
     window: Retained<NSPanel>,
     renderer: Arc<SharedRenderer>,
-    display_link: CVDisplayLink,
-    display_link_context: *const SharedRenderer,
+    display_link: Option<AttachedDisplayLink>,
+    display_link_retry_delay: Duration,
+    display_link_next_retry: Instant,
     ordered: bool,
 }
 
@@ -218,26 +302,45 @@ impl MetalIndicator {
         );
         unsafe { window.setReleasedWhenClosed(false) };
 
-        let display_link = CVDisplayLink::from_active_cg_displays()
-            .map_err(|status| format!("could not create display link: {status}"))?;
-        let display_link_context = Arc::into_raw(renderer.clone());
-        unsafe {
-            display_link.set_output_callback(
-                display_link_callback,
-                display_link_context.cast_mut().cast::<c_void>(),
-            )
-        }
-        .map_err(|status| format!("could not configure display link: {status}"))?;
-
+        let now = Instant::now();
         let mut indicator = Self {
             window,
             renderer,
-            display_link,
-            display_link_context,
+            display_link: None,
+            display_link_retry_delay: DISPLAY_LINK_RETRY_INITIAL,
+            display_link_next_retry: now,
             ordered: false,
         };
+        indicator.ensure_display_link(true);
         indicator.position_on_pointer_screen();
         Ok(indicator)
+    }
+
+    fn ensure_display_link(&mut self, force: bool) {
+        if self.display_link.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        if !force && now < self.display_link_next_retry {
+            return;
+        }
+        match AttachedDisplayLink::create(&self.renderer) {
+            Ok(link) => {
+                self.display_link = Some(link);
+                self.display_link_retry_delay = DISPLAY_LINK_RETRY_INITIAL;
+                self.display_link_next_retry = now;
+            }
+            Err(status) => {
+                tracing::warn!(
+                    status,
+                    retry_ms = self.display_link_retry_delay.as_millis(),
+                    "could not attach indicator display link yet; Metal pipeline and panel remain prewarmed"
+                );
+                self.display_link_next_retry = now + self.display_link_retry_delay;
+                self.display_link_retry_delay =
+                    (self.display_link_retry_delay * 2).min(DISPLAY_LINK_RETRY_MAX);
+            }
+        }
     }
 
     fn handle(&mut self, event: DictationIndicatorEvent) {
@@ -250,12 +353,23 @@ impl MetalIndicator {
             self.position_on_pointer_screen();
             self.window.orderFrontRegardless();
             self.ordered = true;
+            if std::env::var_os("HEX_RECORD_HUD_WINDOW").is_some() {
+                let num = self.window.windowNumber();
+                if num > 0 {
+                    crate::motion::maybe_start_self_window_recorder(Some(num as u32));
+                }
+            }
             tracing::info!("Metal dictation indicator shown");
         }
-        if !self.display_link.is_running()
-            && let Err(status) = self.display_link.start()
-        {
-            tracing::error!(status, "could not start indicator display link");
+        self.ensure_display_link(true);
+        if let Some(display_link) = &mut self.display_link {
+            if !display_link.is_running()
+                && let Err(status) = display_link.start()
+            {
+                tracing::error!(status, "could not start indicator display link");
+            }
+        } else {
+            self.renderer.draw(None);
         }
     }
 
@@ -267,9 +381,19 @@ impl MetalIndicator {
                 self.window.orderFrontRegardless();
                 self.ordered = true;
             }
+            self.ensure_display_link(false);
+            if let Some(display_link) = &mut self.display_link {
+                if !display_link.is_running() {
+                    let _ = display_link.start();
+                }
+            } else {
+                self.renderer.draw(None);
+            }
         } else {
-            if self.display_link.is_running() {
-                let _ = self.display_link.stop();
+            if let Some(display_link) = &mut self.display_link
+                && display_link.is_running()
+            {
+                display_link.stop();
             }
             if self.ordered {
                 self.window.orderOut(None);
@@ -284,13 +408,17 @@ impl MetalIndicator {
         };
         let pointer = NSEvent::mouseLocation();
         let screens = NSScreen::screens(mtm);
-        let Some(screen) = screens.iter().find(|screen| {
-            let frame = screen.frame();
-            pointer.x >= frame.origin.x
-                && pointer.x < frame.origin.x + frame.size.width
-                && pointer.y >= frame.origin.y
-                && pointer.y < frame.origin.y + frame.size.height
-        }) else {
+        let Some(screen) = screens
+            .iter()
+            .find(|screen| {
+                let frame = screen.frame();
+                pointer.x >= frame.origin.x
+                    && pointer.x < frame.origin.x + frame.size.width
+                    && pointer.y >= frame.origin.y
+                    && pointer.y < frame.origin.y + frame.size.height
+            })
+            .or_else(|| NSScreen::mainScreen(mtm))
+        else {
             return;
         };
         let screen_frame = screen.frame();
@@ -320,8 +448,7 @@ impl MetalIndicator {
 
 impl Drop for MetalIndicator {
     fn drop(&mut self) {
-        let _ = self.display_link.stop();
-        unsafe { drop(Arc::from_raw(self.display_link_context)) };
+        self.display_link.take();
         self.window.close();
     }
 }
@@ -329,13 +456,13 @@ impl Drop for MetalIndicator {
 extern "C" fn display_link_callback(
     _display_link: CVDisplayLinkRef,
     _now: *const CVTimeStamp,
-    _output_time: *const CVTimeStamp,
+    output_time: *const CVTimeStamp,
     _flags_in: CVOptionFlags,
     _flags_out: *mut CVOptionFlags,
     context: *mut c_void,
 ) -> CVReturn {
     let renderer = unsafe { &*context.cast::<SharedRenderer>() };
-    renderer.draw();
+    renderer.draw(output_timestamp(output_time));
     0
 }
 
@@ -371,12 +498,12 @@ impl SharedRenderer {
         self.renderer.lock().unwrap().set_scale(scale);
     }
 
-    fn draw(&self) {
+    fn draw(&self, output_time: Option<DisplayOutputTime>) {
         if !self.active.load(Ordering::Acquire) {
             return;
         }
         let mut renderer = self.renderer.lock().unwrap();
-        if !renderer.draw() {
+        if !renderer.draw(output_time) {
             self.active.store(false, Ordering::Release);
         }
     }
@@ -478,8 +605,9 @@ struct MetalRenderer {
     editing: bool,
     jobs: BTreeMap<u64, JobPhase>,
     phase_started: Instant,
-    render_started: Instant,
     last_frame: Instant,
+    last_output_seconds: Option<f64>,
+    shader_time: f32,
     exiting: bool,
     completion_pending: bool,
     scale: f32,
@@ -502,6 +630,15 @@ impl MetalRenderer {
         let layer = MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        unsafe {
+            let color_space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            if !color_space.is_null() {
+                let any_layer = &*(layer.as_ref() as *const metal::MetalLayerRef)
+                    .cast::<objc2::runtime::AnyObject>();
+                let _: () = objc2::msg_send![any_layer, setColorspace: color_space];
+                CGColorSpaceRelease(color_space);
+            }
+        }
         layer.set_opaque(false);
         layer.set_presents_with_transaction(false);
         layer.set_display_sync_enabled(true);
@@ -534,9 +671,13 @@ impl MetalRenderer {
         let pipeline = device
             .new_render_pipeline_state(&descriptor)
             .map_err(|error| format!("could not create indicator pipeline: {error}"))?;
+        let command_queue = device.new_command_queue();
+        // Prewarm the command queue so the first keypress never pays driver submission setup.
+        let prewarm = command_queue.new_command_buffer();
+        prewarm.commit();
         let now = Instant::now();
         Ok(Self {
-            command_queue: device.new_command_queue(),
+            command_queue,
             layer,
             pipeline,
             phase: Phase::Hidden,
@@ -544,21 +685,22 @@ impl MetalRenderer {
             editing: false,
             jobs: BTreeMap::new(),
             phase_started: now,
-            render_started: now,
             last_frame: now,
+            last_output_seconds: None,
+            shader_time: 0.0,
             exiting: true,
             completion_pending: false,
             scale: 2.0,
             target_average: 0.0,
             target_peak: 0.0,
-            average: Spring::new(0.0),
-            peak: Spring::new(0.0),
-            width: Spring::new(CAPSULE_WIDTH),
-            opacity: Spring::new(0.0),
-            visual_scale: Spring::new(HIDDEN_SCALE),
-            softness: Spring::new(HIDDEN_SOFTNESS),
-            processing: Spring::new(0.0),
-            post_processing: Spring::new(0.0),
+            average: Spring::at(0.0),
+            peak: Spring::at(0.0),
+            width: Spring::at(CAPSULE_WIDTH),
+            opacity: Spring::at(0.0),
+            visual_scale: Spring::at(HIDDEN_SCALE),
+            softness: Spring::at(HIDDEN_SOFTNESS),
+            processing: Spring::at(0.0),
+            post_processing: Spring::at(0.0),
             tuning: HudTuning::default(),
         })
     }
@@ -573,6 +715,7 @@ impl MetalRenderer {
                 self.jobs.clear();
                 self.phase = Phase::Hidden;
                 self.completion_pending = false;
+                self.last_output_seconds = None;
                 self.freeze_visual_state();
             }
             DictationIndicatorEvent::Configure(tuning) => {
@@ -583,20 +726,24 @@ impl MetalRenderer {
                 self.editing = editing_started;
                 self.phase = Phase::Recording;
                 self.phase_started = now;
-                self.render_started = now;
                 self.last_frame = now;
+                self.last_output_seconds = None;
+                self.shader_time = 0.0;
                 self.exiting = false;
                 self.completion_pending = false;
                 self.target_average = 0.0;
                 self.target_peak = 0.0;
-                self.average.reset(0.0);
-                self.peak.reset(0.0);
-                self.width.reset(CAPSULE_WIDTH);
-                self.opacity.reset(0.0);
-                self.visual_scale.reset(HIDDEN_SCALE);
-                self.softness.reset(HIDDEN_SOFTNESS);
-                self.processing.reset(0.0);
-                self.post_processing.reset(0.0);
+                let reduce = reduced_motion();
+                self.average.jump(0.0);
+                self.peak.jump(0.0);
+                self.width.jump(CAPSULE_WIDTH);
+                self.opacity.jump(0.0);
+                self.visual_scale
+                    .jump(if reduce { 1.0 } else { HIDDEN_SCALE });
+                self.softness
+                    .jump(if reduce { 0.0 } else { HIDDEN_SOFTNESS });
+                self.processing.jump(0.0);
+                self.post_processing.jump(0.0);
             }
             DictationIndicatorEvent::PromotedToVoiceAction => {
                 self.editing = true;
@@ -694,13 +841,13 @@ impl MetalRenderer {
     }
 
     fn freeze_visual_state(&mut self) {
-        self.target_average = self.average.value;
-        self.target_peak = self.peak.value;
-        self.average.velocity = 0.0;
-        self.peak.velocity = 0.0;
-        self.width.velocity = 0.0;
-        self.processing.velocity = 0.0;
-        self.post_processing.velocity = 0.0;
+        self.target_average = self.average.x;
+        self.target_peak = self.peak.x;
+        self.average.v = 0.0;
+        self.peak.v = 0.0;
+        self.width.v = 0.0;
+        self.processing.v = 0.0;
+        self.post_processing.v = 0.0;
     }
 
     fn set_scale(&mut self, scale: f32) {
@@ -715,23 +862,40 @@ impl MetalRenderer {
         ));
     }
 
-    fn draw(&mut self) -> bool {
+    fn frame_dt(&mut self, now: Instant, output_time: Option<DisplayOutputTime>) -> f32 {
+        let dt = if let Some(out) = output_time {
+            let delta = self
+                .last_output_seconds
+                .map(|prev| (out.video_seconds - prev) as f32)
+                .filter(|&d| d > 0.0 && d <= 0.25)
+                .or(out.refresh_period)
+                .unwrap_or(1.0 / 60.0);
+            self.last_output_seconds = Some(out.video_seconds);
+            delta
+        } else {
+            now.duration_since(self.last_frame).as_secs_f32()
+        };
+        self.last_frame = now;
+        dt.clamp(1.0 / 240.0, 1.0 / 20.0)
+    }
+
+    fn draw(&mut self, output_time: Option<DisplayOutputTime>) -> bool {
         let now = Instant::now();
         if self.completion_pending
             && now.duration_since(self.phase_started) >= PROCESSING_MORPH_DURATION
         {
-            self.width.reset(CAPSULE_HEIGHT);
-            self.processing.reset(1.0);
+            self.width.jump(CAPSULE_HEIGHT);
+            self.processing.jump(1.0);
             self.phase = Phase::Completed;
             self.phase_started = now;
             self.completion_pending = false;
             self.freeze_visual_state();
         }
-        let dt = now
-            .duration_since(self.last_frame)
-            .as_secs_f32()
-            .min(1.0 / 20.0);
-        self.last_frame = now;
+        let dt = self.frame_dt(now, output_time);
+        let reduce = reduced_motion();
+        if !reduce {
+            self.shader_time += dt;
+        }
         let elapsed = now.duration_since(self.phase_started);
         let terminal_finished = self
             .phase
@@ -740,21 +904,21 @@ impl MetalRenderer {
         let visible = !matches!(self.phase, Phase::Hidden) && !terminal_finished;
         if !visible && !self.exiting {
             // Reversing an in-flight entrance velocity would briefly grow or sharpen the HUD.
-            self.opacity.velocity = 0.0;
-            self.visual_scale.velocity = 0.0;
-            self.softness.velocity = 0.0;
+            self.opacity.v = 0.0;
+            self.visual_scale.v = 0.0;
+            self.softness.v = 0.0;
             self.exiting = true;
         }
         let target_width = match self.phase {
             Phase::Recording => CAPSULE_WIDTH,
             Phase::Transcribing => CAPSULE_HEIGHT,
-            Phase::Hidden | Phase::Completed | Phase::Cancelled | Phase::Failed => self.width.value,
+            Phase::Hidden | Phase::Completed | Phase::Cancelled | Phase::Failed => self.width.x,
         };
         let target_processing = match self.phase {
             Phase::Recording => 0.0,
             Phase::Transcribing => 1.0,
             Phase::Hidden | Phase::Completed | Phase::Cancelled | Phase::Failed => {
-                self.processing.value
+                self.processing.x
             }
         };
         let target_post_processing = if self
@@ -767,31 +931,56 @@ impl MetalRenderer {
             0.0
         };
 
-        self.average.step_critical(self.target_average, dt, 22.0);
-        self.peak.step_critical(self.target_peak, dt, 26.0);
-        self.width
-            .step_critical(target_width, dt, GEOMETRY_ANGULAR_FREQUENCY);
-        self.processing
-            .step_critical(target_processing, dt, GEOMETRY_ANGULAR_FREQUENCY);
-        self.post_processing
-            .step_critical(target_post_processing, dt, GEOMETRY_ANGULAR_FREQUENCY);
+        let meter_average_spec = Spec::from_omega(22.0);
+        let meter_peak_spec = Spec::from_omega(26.0);
+        let geometry_spec = Spec::from_omega(GEOMETRY_ANGULAR_FREQUENCY);
         let visibility_frequency = if visible {
             ENTRANCE_ANGULAR_FREQUENCY
         } else {
             EXIT_ANGULAR_FREQUENCY
         };
-        self.opacity
-            .step_critical(if visible { 1.0 } else { 0.0 }, dt, visibility_frequency);
-        self.visual_scale.step_critical(
-            if visible { 1.0 } else { HIDDEN_SCALE },
-            dt,
-            visibility_frequency,
-        );
-        self.softness.step_critical(
-            if visible { 0.0 } else { HIDDEN_SOFTNESS },
-            dt,
-            visibility_frequency,
-        );
+        let visibility_spec = Spec::from_omega(visibility_frequency);
+
+        self.average
+            .step_to(self.target_average, meter_average_spec, dt);
+        self.peak.step_to(self.target_peak, meter_peak_spec, dt);
+        let snap_before = std::env::var_os("HEX_PREVIEW_BEFORE").is_some();
+        if reduce || snap_before {
+            self.width.jump(target_width);
+            self.processing.jump(target_processing);
+            self.post_processing.jump(target_post_processing);
+            if snap_before {
+                self.opacity.jump(if visible { 1.0 } else { 0.0 });
+                self.average.jump(self.target_average);
+                self.peak.jump(self.target_peak);
+            } else {
+                self.opacity.step_to(
+                    if visible { 1.0 } else { 0.0 },
+                    crate::motion::presets::REDUCED_FADE,
+                    dt,
+                );
+            }
+            self.visual_scale.jump(1.0);
+            self.softness.jump(0.0);
+        } else {
+            self.width.step_to(target_width, geometry_spec, dt);
+            self.processing
+                .step_to(target_processing, geometry_spec, dt);
+            self.post_processing
+                .step_to(target_post_processing, geometry_spec, dt);
+            self.opacity
+                .step_to(if visible { 1.0 } else { 0.0 }, visibility_spec, dt);
+            self.visual_scale.step_to(
+                if visible { 1.0 } else { HIDDEN_SCALE },
+                visibility_spec,
+                dt,
+            );
+            self.softness.step_to(
+                if visible { 0.0 } else { HIDDEN_SOFTNESS },
+                visibility_spec,
+                dt,
+            );
+        }
         self.target_peak *= 0.91_f32.powf(dt * 60.0);
 
         let Some(drawable) = self.layer.next_drawable() else {
@@ -809,16 +998,16 @@ impl MetalRenderer {
         encoder.set_render_pipeline_state(&self.pipeline);
         let uniforms = Uniforms {
             resolution: [WINDOW_WIDTH * self.scale, WINDOW_HEIGHT * self.scale],
-            time: now.duration_since(self.render_started).as_secs_f32(),
-            width: self.width.value,
+            time: self.shader_time,
+            width: self.width.x,
             height: CAPSULE_HEIGHT,
-            opacity: self.opacity.value.clamp(0.0, 1.0),
-            scale: self.visual_scale.value.max(0.01),
-            softness: self.softness.value.clamp(0.0, HIDDEN_SOFTNESS),
-            average: self.average.value.clamp(0.0, 1.0),
-            peak: self.peak.value.clamp(0.0, 1.0),
-            processing: self.processing.value.clamp(0.0, 1.0),
-            post_processing: self.post_processing.value.clamp(0.0, 1.0),
+            opacity: self.opacity.x.clamp(0.0, 1.0),
+            scale: self.visual_scale.x.max(0.01),
+            softness: self.softness.x.clamp(0.0, HIDDEN_SOFTNESS),
+            average: self.average.x.clamp(0.0, 1.0),
+            peak: self.peak.x.clamp(0.0, 1.0),
+            processing: self.processing.x.clamp(0.0, 1.0),
+            post_processing: self.post_processing.x.clamp(0.0, 1.0),
             capturing: if self.capturing { 1.0 } else { 0.0 },
             editing: if self.editing { 1.0 } else { 0.0 },
             queued_count: if self.capturing {
@@ -829,7 +1018,7 @@ impl MetalRenderer {
             line_style: self.tuning.style,
             line_count: self.tuning.line_count,
             line_curvature: self.tuning.curvature,
-            line_speed: self.tuning.speed,
+            line_speed: if reduce { 0.0 } else { self.tuning.speed },
             line_sharpness: self.tuning.sharpness,
             line_glow: self.tuning.glow,
             sphere_depth: self.tuning.depth,
@@ -853,46 +1042,15 @@ impl MetalRenderer {
         command_buffer.present_drawable(drawable);
         command_buffer.commit();
 
+        let exit_spec = if reduce {
+            crate::motion::presets::REDUCED_FADE
+        } else {
+            Spec::from_omega(EXIT_ANGULAR_FREQUENCY)
+        };
         visible
-            || !self.opacity.is_settled(0.0, 0.002, EXIT_ANGULAR_FREQUENCY)
-            || !self
-                .visual_scale
-                .is_settled(HIDDEN_SCALE, 0.002, EXIT_ANGULAR_FREQUENCY)
-            || !self
-                .softness
-                .is_settled(HIDDEN_SOFTNESS, 0.02, EXIT_ANGULAR_FREQUENCY)
-    }
-}
-
-struct Spring {
-    value: f32,
-    velocity: f32,
-}
-
-impl Spring {
-    fn new(value: f32) -> Self {
-        Self {
-            value,
-            velocity: 0.0,
-        }
-    }
-
-    fn reset(&mut self, value: f32) {
-        self.value = value;
-        self.velocity = 0.0;
-    }
-
-    fn step_critical(&mut self, target: f32, dt: f32, angular_frequency: f32) {
-        let displacement = self.value - target;
-        let coefficient = self.velocity + angular_frequency * displacement;
-        let decay = (-angular_frequency * dt).exp();
-        self.value = target + (displacement + coefficient * dt) * decay;
-        self.velocity = (self.velocity - angular_frequency * coefficient * dt) * decay;
-    }
-
-    fn is_settled(&self, target: f32, value_epsilon: f32, angular_frequency: f32) -> bool {
-        (self.value - target).abs() <= value_epsilon
-            && self.velocity.abs() <= value_epsilon * angular_frequency
+            || !self.opacity.settled(exit_spec, 0.002)
+            || (!reduce && !self.visual_scale.settled(exit_spec, 0.002))
+            || (!reduce && !self.softness.settled(exit_spec, 0.02))
     }
 }
 
@@ -913,20 +1071,21 @@ mod tests {
 
     #[test]
     fn entrance_reaches_recording_state_in_about_250ms_without_overshoot() {
+        let spec = Spec::from_omega(ENTRANCE_ANGULAR_FREQUENCY);
         let simulate = |frame_rate: usize| {
-            let mut opacity = Spring::new(0.0);
-            let mut scale = Spring::new(HIDDEN_SCALE);
-            let mut softness = Spring::new(HIDDEN_SOFTNESS);
+            let mut opacity = Spring::at(0.0);
+            let mut scale = Spring::at(HIDDEN_SCALE);
+            let mut softness = Spring::at(HIDDEN_SOFTNESS);
             for _ in 0..frame_rate / 4 {
                 let dt = 1.0 / frame_rate as f32;
-                opacity.step_critical(1.0, dt, ENTRANCE_ANGULAR_FREQUENCY);
-                scale.step_critical(1.0, dt, ENTRANCE_ANGULAR_FREQUENCY);
-                softness.step_critical(0.0, dt, ENTRANCE_ANGULAR_FREQUENCY);
-                assert!((0.0..=1.0).contains(&opacity.value));
-                assert!((HIDDEN_SCALE..=1.0).contains(&scale.value));
-                assert!((0.0..=HIDDEN_SOFTNESS).contains(&softness.value));
+                opacity.step_to(1.0, spec, dt);
+                scale.step_to(1.0, spec, dt);
+                softness.step_to(0.0, spec, dt);
+                assert!((0.0..=1.0).contains(&opacity.x));
+                assert!((HIDDEN_SCALE..=1.0).contains(&scale.x));
+                assert!((0.0..=HIDDEN_SOFTNESS).contains(&softness.x));
             }
-            (opacity.value, scale.value, softness.value)
+            (opacity.x, scale.x, softness.x)
         };
 
         let at_60_hz = simulate(60);
@@ -941,24 +1100,25 @@ mod tests {
 
     #[test]
     fn lifecycle_exit_is_monotonic_and_visually_gone_in_about_250ms() {
-        let mut opacity = Spring::new(1.0);
-        let mut scale = Spring::new(1.0);
-        let mut softness = Spring::new(0.0);
-        let mut previous = (opacity.value, scale.value, softness.value);
+        let spec = Spec::from_omega(EXIT_ANGULAR_FREQUENCY);
+        let mut opacity = Spring::at(1.0);
+        let mut scale = Spring::at(1.0);
+        let mut softness = Spring::at(0.0);
+        let mut previous = (opacity.x, scale.x, softness.x);
 
         for _ in 0..15 {
-            opacity.step_critical(0.0, 1.0 / 60.0, EXIT_ANGULAR_FREQUENCY);
-            scale.step_critical(HIDDEN_SCALE, 1.0 / 60.0, EXIT_ANGULAR_FREQUENCY);
-            softness.step_critical(HIDDEN_SOFTNESS, 1.0 / 60.0, EXIT_ANGULAR_FREQUENCY);
-            assert!((0.0..=previous.0).contains(&opacity.value));
-            assert!((HIDDEN_SCALE..=previous.1).contains(&scale.value));
-            assert!((previous.2..=HIDDEN_SOFTNESS).contains(&softness.value));
-            previous = (opacity.value, scale.value, softness.value);
+            opacity.step_to(0.0, spec, 1.0 / 60.0);
+            scale.step_to(HIDDEN_SCALE, spec, 1.0 / 60.0);
+            softness.step_to(HIDDEN_SOFTNESS, spec, 1.0 / 60.0);
+            assert!((0.0..=previous.0).contains(&opacity.x));
+            assert!((HIDDEN_SCALE..=previous.1).contains(&scale.x));
+            assert!((previous.2..=HIDDEN_SOFTNESS).contains(&softness.x));
+            previous = (opacity.x, scale.x, softness.x);
         }
 
-        assert!(opacity.value < 0.02);
-        assert!((scale.value - HIDDEN_SCALE).abs() < 0.004);
-        assert!((softness.value - HIDDEN_SOFTNESS).abs() < 0.08);
+        assert!(opacity.x < 0.02);
+        assert!((scale.x - HIDDEN_SCALE).abs() < 0.004);
+        assert!((softness.x - HIDDEN_SOFTNESS).abs() < 0.08);
     }
 
     #[test]
@@ -1012,28 +1172,60 @@ mod tests {
 
     #[test]
     fn processing_morph_duration_matches_geometry_spring() {
-        let mut width = Spring::new(CAPSULE_WIDTH);
+        let spec = Spec::from_omega(GEOMETRY_ANGULAR_FREQUENCY);
+        let mut width = Spring::at(CAPSULE_WIDTH);
         for _ in 0..15 {
-            width.step_critical(CAPSULE_HEIGHT, 1.0 / 60.0, GEOMETRY_ANGULAR_FREQUENCY);
+            width.step_to(CAPSULE_HEIGHT, spec, 1.0 / 60.0);
         }
-        assert!(width.value < CAPSULE_HEIGHT + 0.7);
+        assert!(width.x < CAPSULE_HEIGHT + 0.7);
         assert_eq!(PROCESSING_MORPH_DURATION, Duration::from_millis(250));
     }
 
     #[test]
     fn processing_morph_only_contracts_the_capsule() {
-        let mut width = Spring::new(CAPSULE_WIDTH);
-        let mut height = Spring::new(CAPSULE_HEIGHT);
-        let mut previous_width = width.value;
+        let spec = Spec::from_omega(GEOMETRY_ANGULAR_FREQUENCY);
+        let mut width = Spring::at(CAPSULE_WIDTH);
+        let mut height = Spring::at(CAPSULE_HEIGHT);
+        let mut previous_width = width.x;
 
         for _ in 0..15 {
-            width.step_critical(CAPSULE_HEIGHT, 1.0 / 60.0, GEOMETRY_ANGULAR_FREQUENCY);
-            height.step_critical(CAPSULE_HEIGHT, 1.0 / 60.0, GEOMETRY_ANGULAR_FREQUENCY);
-            assert!((CAPSULE_HEIGHT..=previous_width).contains(&width.value));
-            assert_eq!(height.value, CAPSULE_HEIGHT);
-            previous_width = width.value;
+            width.step_to(CAPSULE_HEIGHT, spec, 1.0 / 60.0);
+            height.step_to(CAPSULE_HEIGHT, spec, 1.0 / 60.0);
+            assert!((CAPSULE_HEIGHT..=previous_width).contains(&width.x));
+            assert_eq!(height.x, CAPSULE_HEIGHT);
+            previous_width = width.x;
         }
 
-        assert!(width.value < CAPSULE_HEIGHT + 0.7);
+        assert!(width.x < CAPSULE_HEIGHT + 0.7);
+    }
+
+    #[test]
+    fn output_timestamp_extracts_video_seconds_and_refresh_period() {
+        use core_video::base::CVSMPTETime;
+        let ts = CVTimeStamp {
+            version: 0,
+            videoTimeScale: 24_000,
+            videoTime: 48_000,
+            hostTime: 0,
+            rateScalar: 1.0,
+            videoRefreshPeriod: 200,
+            smpteTime: CVSMPTETime {
+                subframes: 0,
+                subframeDivisor: 0,
+                counter: 0,
+                type_: 0,
+                flags: 0,
+                hours: 0,
+                minutes: 0,
+                seconds: 0,
+                frames: 0,
+            },
+            flags: (CVTimeStampFlags::kCVTimeStampVideoTimeValid as u64)
+                | (CVTimeStampFlags::kCVTimeStampVideoRefreshPeriodValid as u64),
+            reserved: 0,
+        };
+        let parsed = output_timestamp(&raw const ts).expect("valid timestamp");
+        assert!((parsed.video_seconds - 2.0).abs() < 1e-9);
+        assert!((parsed.refresh_period.unwrap() - (1.0 / 120.0)).abs() < 1e-6);
     }
 }

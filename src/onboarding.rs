@@ -697,26 +697,9 @@ pub fn open_permission_settings(permission: &str) {
     }
 }
 
-/// The system's Reduce Motion setting, read once per process.
+/// The system's Reduce Motion setting (or `HEX_REDUCE_MOTION` override).
 pub fn reduce_motion() -> bool {
-    static REDUCE_MOTION: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *REDUCE_MOTION.get_or_init(|| {
-        #[cfg(target_os = "macos")]
-        {
-            let Some(class) = AnyClass::get(c"NSWorkspace") else {
-                return false;
-            };
-            let reduce: Bool = unsafe {
-                let workspace: *mut objc2::runtime::AnyObject = msg_send![class, sharedWorkspace];
-                msg_send![workspace, accessibilityDisplayShouldReduceMotion]
-            };
-            reduce.as_bool()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
-        }
-    })
+    crate::motion::reduced_motion()
 }
 
 /// Reopens the installed app once this process exits. Returns false outside

@@ -156,6 +156,31 @@ HERO_KEYCAP_SIZE 56 · HERO_KEYCAP_DEPTH 3 · ONBOARDING_BADGE_SIZE 28
 ONBOARDING_PRIMARY_WIDTH 180 · STEP_DOT_SIZE 6 · STEP_DOT_ACTIVE_WIDTH 16
 ```
 
+### Motion
+
+Springs live in [`src/motion.rs`](../src/motion.rs) and are named through
+`design_tokens`:
+
+```ts
+SPRING_INSTANT      0.10s · bounce 0.00  // pointer-tied meters, live waveform scrub
+SPRING_SNAP         0.25s · bounce 0.00  // toggles, sliding pills, menu/picker open
+SPRING_SNAP_EXIT    0.20s · bounce 0.00  // menu/picker close, quick exits
+SPRING_SETTLE       0.30s · bounce 0.00  // default state change, pane cross-fade + offset
+SPRING_SETTLE_EXIT  0.24s · bounce 0.00  // state exit
+SPRING_REFLOW       0.40s · bounce 0.00  // layout disclosures, row height/width reflow
+SPRING_GLIDE        0.32s · bounce 0.00  // modal sheets, onboarding page transitions
+SPRING_MORPH        0.30s · bounce 0.16  // chip-to-panel morphs
+SPRING_POP          0.25s · bounce 0.15  // press/release confirmation
+SPRING_REDUCED_FADE 0.16s · bounce 0.00  // opacity-only fallback when Reduce Motion is on
+PANE_ENTER_OFFSET   4 px · MENU_ENTER_OFFSET 4 px
+```
+
+Drive desktop transitions with `window.spring(id, target, spec, cx)` or
+`window.spring_fade(id, target, spec, cx)`. Every spring retargets in-flight
+with velocity carry-over, requests animation frames only while unsettled, and
+honors `NSWorkspace.accessibilityDisplayShouldReduceMotion` (or
+`HEX_REDUCE_MOTION=1`).
+
 ## Components
 
 | Job | Component |

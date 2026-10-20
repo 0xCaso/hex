@@ -283,6 +283,9 @@ pub fn update_tuned_config(mutate: impl FnOnce(&mut TunedFilterConfig)) {
         *slot = Some(next_engine);
         PENDING_ENGINE_SWAP.store(true, Ordering::Release);
     }
+    if DEMO_BUFFERS.get().is_some() {
+        schedule_demo_recompute();
+    }
 }
 
 pub fn sync_from_settings(mode: VoiceFilterMode, comfort_noise: bool, strength: f32) {
@@ -492,9 +495,14 @@ pub fn bundled_driver_path() -> Option<PathBuf> {
 }
 
 pub fn bundled_driver_version() -> String {
-    bundled_driver_path()
-        .and_then(|path| read_driver_bundle_version(&path))
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            bundled_driver_path()
+                .and_then(|path| read_driver_bundle_version(&path))
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+        })
+        .clone()
 }
 
 pub fn installed_driver_version() -> Option<String> {
@@ -711,6 +719,84 @@ static DEMO_RECORDED_LEN: AtomicUsize = AtomicUsize::new(0);
 static DEMO_PLAYBACK_GEN: AtomicU64 = AtomicU64::new(0);
 static DEMO_PLAYING_TRACK: AtomicU32 = AtomicU32::new(0); // 0 = none, 1 = CallHears, 2 = You
 static DEMO_PLAYBACK_PROGRESS_BITS: AtomicU32 = AtomicU32::new(0.0_f32.to_bits());
+static DEMO_RECOMPUTE_RUNNING: AtomicBool = AtomicBool::new(false);
+static DEMO_RECOMPUTE_DIRTY: AtomicBool = AtomicBool::new(false);
+
+pub fn demo_is_busy() -> bool {
+    DEMO_RECORDING_ACTIVE.load(Ordering::Acquire) || DEMO_PLAYING_TRACK.load(Ordering::Acquire) != 0
+}
+
+pub fn prewarm_demo_async() {
+    if DEMO_BUFFERS.get().is_some() {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("hex-mic-demo-init".into())
+        .spawn(|| {
+            let _ = demo_buffers_lock();
+            DRIVER_ACTION_SEQ.fetch_add(1, Ordering::AcqRel);
+        });
+}
+
+fn schedule_demo_recompute() {
+    DEMO_RECOMPUTE_DIRTY.store(true, Ordering::Release);
+    if DEMO_RECOMPUTE_RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("hex-mic-demo-dsp".into())
+        .spawn(|| {
+            while DEMO_RECOMPUTE_DIRTY.swap(false, Ordering::AcqRel) {
+                let cfg = current_tuned_config();
+                let Some((source, active_samples)) = ({
+                    let Ok(guard) = demo_buffers_lock().lock() else {
+                        break;
+                    };
+                    if guard.cached_mode.as_ref() == Some(&cfg)
+                        && guard.cached_source == Some(guard.source)
+                    {
+                        None
+                    } else {
+                        let samples = match guard.source {
+                            DemoSourceKind::Example => guard.example_samples.clone(),
+                            DemoSourceKind::Recording => {
+                                if guard.recorded_samples.is_empty() {
+                                    guard.example_samples.clone()
+                                } else {
+                                    guard.recorded_samples.clone()
+                                }
+                            }
+                        };
+                        Some((guard.source, samples))
+                    }
+                }) else {
+                    continue;
+                };
+                let span = span_for_source(source, active_samples.len());
+                let spec = cfg.build_mode_spec();
+                let processed_samples = crate::voice_filter::render(
+                    &active_samples,
+                    f64::from(HEX_MICROPHONE_SAMPLE_RATE),
+                    &spec,
+                    &[span],
+                    f64::from(cfg.strength),
+                );
+                let peaks_you = compute_peaks(&active_samples, WAVEFORM_BARS);
+                let peaks_call = compute_peaks(&processed_samples, WAVEFORM_BARS);
+                if let Ok(mut guard) = demo_buffers_lock().lock()
+                    && guard.source == source
+                {
+                    guard.processed_samples = processed_samples;
+                    guard.peaks_you = peaks_you;
+                    guard.peaks_call = peaks_call;
+                    guard.cached_mode = Some(cfg);
+                    guard.cached_source = Some(source);
+                    DRIVER_ACTION_SEQ.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+            DEMO_RECOMPUTE_RUNNING.store(false, Ordering::Release);
+        });
+}
 
 struct DemoBuffers {
     source: DemoSourceKind,
@@ -882,9 +968,8 @@ pub fn select_demo_source(source: DemoSourceKind) {
             return;
         }
         guard.source = source;
-        guard.cached_mode = None;
-        recompute_demo_cache(&mut guard);
     }
+    schedule_demo_recompute();
 }
 
 pub fn stop_demo_playback() {
@@ -963,6 +1048,28 @@ pub fn play_demo_track(track: DemoPlaybackTrack) {
     });
 }
 
+pub fn simulate_silent_demo_playback(duration: Duration) {
+    let generation = DEMO_PLAYBACK_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    DEMO_PLAYING_TRACK.store(1, Ordering::Release);
+    DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+    thread::spawn(move || {
+        let started = Instant::now();
+        while started.elapsed() < duration {
+            if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) != generation {
+                return;
+            }
+            let p =
+                (started.elapsed().as_secs_f32() / duration.as_secs_f32() * 0.72).clamp(0.0, 1.0);
+            DEMO_PLAYBACK_PROGRESS_BITS.store(p.to_bits(), Ordering::Release);
+            thread::sleep(Duration::from_millis(16));
+        }
+        if DEMO_PLAYBACK_GEN.load(Ordering::Acquire) == generation {
+            DEMO_PLAYING_TRACK.store(0, Ordering::Release);
+            DEMO_PLAYBACK_PROGRESS_BITS.store(0.0_f32.to_bits(), Ordering::Release);
+        }
+    });
+}
+
 pub fn demo_snapshot() -> DemoSnapshot {
     let cfg = current_tuned_config();
     let is_recording = DEMO_RECORDING_ACTIVE.load(Ordering::Acquire);
@@ -994,8 +1101,13 @@ pub fn demo_snapshot() -> DemoSnapshot {
         };
     };
 
-    if guard.cached_mode.as_ref() != Some(&cfg) || guard.cached_source != Some(guard.source) {
-        recompute_demo_cache(&mut guard);
+    if guard.cached_mode.is_none() || std::env::var_os("HEX_PREVIEW_BEFORE").is_some() {
+        if guard.cached_mode.as_ref() != Some(&cfg) || guard.cached_source != Some(guard.source) {
+            recompute_demo_cache(&mut guard);
+        }
+    } else if guard.cached_mode.as_ref() != Some(&cfg) || guard.cached_source != Some(guard.source)
+    {
+        schedule_demo_recompute();
     }
 
     let sample_len = match guard.source {

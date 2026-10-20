@@ -594,15 +594,19 @@ impl AppWindow {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(
-                    status_dot(ACCENT).with_animation(
-                        ("setup-waiting", setup_item_index(item)),
-                        Animation::new(LISTENING_LOOP)
-                            .repeat()
-                            .with_easing(ease_in_out),
-                        |dot, phase| dot.opacity(pulse(phase)),
-                    ),
-                )
+                .child(if crate::onboarding::reduce_motion() {
+                    status_dot(ACCENT).into_any_element()
+                } else {
+                    status_dot(ACCENT)
+                        .with_animation(
+                            ("setup-waiting", setup_item_index(item)),
+                            Animation::new(LISTENING_LOOP)
+                                .repeat()
+                                .with_easing(ease_in_out),
+                            |dot, phase| dot.opacity(pulse(phase)),
+                        )
+                        .into_any_element()
+                })
                 .child(grant(
                     if item == SetupItem::Microphone {
                         tr("Allow")
