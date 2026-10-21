@@ -56,14 +56,16 @@ core-video = "0.4.3"
 crossterm = "0.29.0"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 gpui-symbols = { version = "0.6.1", default-features = false, features = ["component", "cache"] }
+image = { version = "0.25.10", default-features = false }
 metal = "0.29.0"
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
 objc2-core-audio = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-foundation = "0.3.2"
-objc2-quartz-core = { version = "0.3.2", features = ["CALayer"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CATransaction"] }
 objc2-service-management = { version = "0.3.2", features = ["SMAppService"] }
+raw-window-handle = "0.6.2"
 ratatui = "0.30.2"
 rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
 screencapturekit = { version = "=11.0.0", features = ["macos_15_0"] }

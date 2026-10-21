@@ -10,11 +10,9 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::design_tokens::{
-    ACCENT, BODY, CANVAS, CONTROL_HEIGHT, LINE, MULTILINE_INPUT_HEIGHT, RADIUS_CONTROL, SELECTION,
-    TEXT_PRIMARY, TEXT_TERTIARY, Typography,
+    BODY, CONTROL_HEIGHT, FILL_QUIET, HAIRLINE, Hairlines, LINE_STRONG, MULTILINE_INPUT_HEIGHT,
+    RADIUS_CONTROL, SELECTION, TEXT_PRIMARY, TEXT_TERTIARY, Typography,
 };
-
-const FOCUS: u32 = ACCENT;
 
 actions!(
     text_input,
@@ -1348,11 +1346,7 @@ fn multiline_selection_quads(
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = if self.focus_handle.is_focused(window) {
-            FOCUS
-        } else {
-            LINE
-        };
+        let focused = self.focus_handle.is_focused(window);
         div()
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
@@ -1404,11 +1398,13 @@ impl Render for TextInput {
                 CONTROL_HEIGHT
             }))
             .px_2p5()
-            .py(px((CONTROL_HEIGHT - 2.0 - BODY.line_height) / 2.0))
+            .py(px((CONTROL_HEIGHT - BODY.line_height) / 2.0))
             .rounded(RADIUS_CONTROL)
-            .border_1()
-            .border_color(rgb(border))
-            .bg(rgb(CANVAS))
+            .border(HAIRLINE)
+            .border_color(rgb(LINE_STRONG))
+            .bg(rgb(FILL_QUIET))
+            // Text fields always show the ring while focused, as AppKit's do.
+            .when(focused, |field| field.focus_ring())
             .overflow_hidden()
             .text_color(rgb(TEXT_PRIMARY))
             .text_body()

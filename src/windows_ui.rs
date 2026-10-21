@@ -18,7 +18,7 @@ use winreg::RegKey;
 use winreg::enums::HKEY_LOCAL_MACHINE;
 
 use crate::design_tokens::{
-    CAPTION, SURFACE_HOVER, SURFACE_SELECTED, TEXT_PRIMARY, TEXT_SECONDARY, Typography,
+    CAPTION, FILL, SURFACE_SELECTED, TEXT_PRIMARY, TEXT_SECONDARY, Typography,
 };
 
 const FONT_UI: &str = "Segoe UI Variable Text";
@@ -238,14 +238,14 @@ pub(crate) fn caption_controls(window: &Window) -> impl IntoElement {
             "caption-minimize",
             WindowControlArea::Min,
             "\u{E921}",
-            SURFACE_HOVER,
+            FILL,
             SURFACE_SELECTED,
         ))
         .child(caption_button(
             "caption-maximize",
             WindowControlArea::Max,
             maximize_glyph,
-            SURFACE_HOVER,
+            FILL,
             SURFACE_SELECTED,
         ))
         .child(caption_button(

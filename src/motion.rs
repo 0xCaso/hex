@@ -714,8 +714,27 @@ pub fn maybe_start_self_window_recorder(preferred_wid: Option<u32>) {
     let Ok(dir) = std::env::var("HEX_RECORD_FRAMES_DIR") else {
         return;
     };
-    let wid = preferred_wid.or_else(find_own_main_window_id);
-    let Some(wid) = wid.filter(|&w| w > 0) else {
+    // `x,y,w,h` in global points: record the composited screen there instead
+    // of one window, so window alpha and entrance slides are captured. Without
+    // Screen Recording permission macOS still composites this process's own
+    // windows over the wallpaper, which is exactly what a capsule clip needs.
+    let rect = std::env::var("HEX_RECORD_SCREEN_RECT")
+        .ok()
+        .and_then(|value| {
+            let parts: Vec<f64> = value
+                .split(',')
+                .filter_map(|p| p.trim().parse().ok())
+                .collect();
+            (parts.len() == 4).then(|| [parts[0], parts[1], parts[2], parts[3]])
+        });
+    let wid = if rect.is_some() {
+        Some(0)
+    } else {
+        preferred_wid
+            .or_else(find_own_main_window_id)
+            .filter(|&w| w > 0)
+    };
+    let Some(wid) = wid else {
         return;
     };
     if STARTED.swap(true, Ordering::AcqRel) {
@@ -728,6 +747,7 @@ pub fn maybe_start_self_window_recorder(preferred_wid: Option<u32>) {
     std::thread::spawn(move || {
         record_window_frames(
             wid,
+            rect,
             std::path::PathBuf::from(dir),
             Duration::from_millis(duration_ms),
         );
@@ -751,7 +771,12 @@ fn find_own_main_window_id() -> Option<u32> {
 }
 
 #[cfg(target_os = "macos")]
-fn record_window_frames(wid: u32, dir: std::path::PathBuf, duration: Duration) {
+fn record_window_frames(
+    wid: u32,
+    rect: Option<[f64; 4]>,
+    dir: std::path::PathBuf,
+    duration: Duration,
+) {
     use std::ffi::c_void;
 
     #[repr(C)]
@@ -812,7 +837,20 @@ fn record_window_frames(wid: u32, dir: std::path::PathBuf, duration: Duration) {
     let mut images: Vec<usize> = Vec::with_capacity(total_frames);
     let start = Instant::now();
     for frame_idx in 0..total_frames {
-        let img = unsafe { CGWindowListCreateImage(null_rect, 8, wid, 1) };
+        let img = match rect {
+            Some([x, y, width, height]) => unsafe {
+                CGWindowListCreateImage(
+                    CgRect {
+                        origin: CgPoint { x, y },
+                        size: CgSize { width, height },
+                    },
+                    1,
+                    0,
+                    0,
+                )
+            },
+            None => unsafe { CGWindowListCreateImage(null_rect, 8, wid, 1) },
+        };
         if !img.is_null() {
             images.push(img as usize);
         } else if let Some(&prev) = images.last() {

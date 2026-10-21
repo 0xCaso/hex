@@ -488,11 +488,7 @@ impl AppWindow {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb(if ready {
-                SUCCESS_SURFACE
-            } else {
-                SURFACE_HOVER
-            }))
+            .bg(rgb(if ready { SUCCESS_SURFACE } else { FILL }))
             .child(icon(glyph, if ready { SUCCESS } else { TEXT_SECONDARY }));
         let trailing = self.render_setup_control(row, cx);
         div()
@@ -503,7 +499,7 @@ impl AppWindow {
             .flex()
             .items_center()
             .gap_3()
-            .when(!last, |row| row.border_b_1().border_color(rgb(LINE)))
+            .when(!last, |row| row.hairline_b())
             .child(badge)
             .child(
                 div()
@@ -595,9 +591,9 @@ impl AppWindow {
                 .items_center()
                 .gap_3()
                 .child(if crate::onboarding::reduce_motion() {
-                    status_dot(ACCENT).into_any_element()
+                    status_dot(accent()).into_any_element()
                 } else {
-                    status_dot(ACCENT)
+                    status_dot(accent())
                         .with_animation(
                             ("setup-waiting", setup_item_index(item)),
                             Animation::new(LISTENING_LOOP)
@@ -843,9 +839,7 @@ impl AppWindow {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .when(index + 1 < count, |row| {
-                        row.border_b_1().border_color(rgb(LINE))
-                    })
+                    .when(index + 1 < count, |row| row.hairline_b())
                     .child(
                         div()
                             .flex_1()
@@ -1004,7 +998,7 @@ fn how_row(art: impl IntoElement, text: String, last: bool) -> Div {
         .flex()
         .items_center()
         .gap_4()
-        .when(!last, |row| row.border_b_1().border_color(rgb(LINE)))
+        .when(!last, |row| row.hairline_b())
         .child(
             div()
                 .w(px(ONBOARDING_ART_COLUMN))
@@ -1090,7 +1084,7 @@ fn waveform_art(phase: f32) -> Div {
         .rounded_full()
         .border_1()
         .border_color(rgb(LINE_STRONG))
-        .bg(rgb(SURFACE_HOVER))
+        .bg(rgb(FILL))
         .children(LEVELS.iter().enumerate().map(move |(index, level)| {
             let wave = (std::f32::consts::TAU * (phase + index as f32 * 0.18)).sin() * 0.5 + 0.5;
             let height = 4.0 + 10.0 * level * (0.35 + 0.65 * wave);
@@ -1117,7 +1111,12 @@ fn pasted_art() -> Div {
         .text_footnote()
         .text_color(rgb(TEXT_PRIMARY))
         .child(tr("Hello"))
-        .child(div().w(px(1.0)).h(px(FOOTNOTE.line_height)).bg(rgb(ACCENT)))
+        .child(
+            div()
+                .w(px(1.0))
+                .h(px(FOOTNOTE.line_height))
+                .bg(rgb(accent())),
+        )
 }
 
 /// Dim, bright, dim over one loop.

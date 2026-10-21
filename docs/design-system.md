@@ -11,11 +11,18 @@ Panes compose components and name tokens. They never write a raw colour, type
 size, line height, font family, or radius. The test
 `design_tokens::tests::desktop_sources_use_tokens_instead_of_raw_styles` fails on
 `rgb(0x…)`, `rgba(0x…)`, `.text_size(`, `.line_height(px(`, `.font_family(`,
-`.rounded(px(`, `.rounded_sm/md/lg()`, `.text_xs/sm/base/lg/xl()`, and
-`.truncate()` in
+`.rounded(px(`, `.rounded_sm/md/lg()`, `.text_xs/sm/base/lg/xl()`,
+`.border_t/b/l/r_1()` (separators go through `Hairlines`), `.cursor_pointer()`
+(macOS controls keep the arrow), and `.truncate()` in
 `app_window` (with its macOS, Linux, and Windows modules), `desktop_ui`,
 `desktop_transcription_picker`, `linux_app`, `meeting_watcher`, and
 `text_input`. `windows_ui` owns the Windows UI face and Segoe glyph sizes.
+
+The direction is **quiet native**: the window should read as a Mac app first.
+Structure comes from the sidebar material and hairlines, not boxes; controls use
+macOS metrics; colour is spent only on the user's accent, state dots, and
+danger. Native-feel research and its sources are summarised in
+[Materials and native behaviour](#materials-and-native-behaviour).
 
 The dictation HUD ([`dictation_indicator.rs`](../src/dictation_indicator.rs)) is
 outside the system: its glossy capsule is hand-tuned in HUD Lab.
@@ -47,113 +54,106 @@ outside the system: its glossy capsule is hand-tuned in HUD Lab.
 
 ### Surfaces
 
-These are the OpenCode V2 dark hierarchy, from most recessed to most elevated.
+The palette is dark-only for now; windows and capsules force the DarkAqua
+appearance so AppKit materials match it. Values follow the macOS dark system
+colours, precomposited over the window base so panes keep painting opaque
+`rgb()` tokens.
 
 ```ts
-SIDEBAR           #111111  // navigation column, picker language list
-SIDEBAR_HOVER     #1b1b1b  // hover on SIDEBAR rows
-CANVAS            #161616  // window base, recessed controls inside cards
-SURFACE           #1d1d1d  // cards (panel), menus
-SURFACE_HOVER     #252525  // hover on SURFACE rows and secondary buttons
-SURFACE_SELECTED  #2e2e2e  // selected row, segment, nav item
-LINE              #2a2a2a  // card borders, dividers, control borders
-LINE_STRONG       #3d3d3d  // menu borders, keycaps, toggle track, capsule edge
-SCRIM             #000000cc // every modal backdrop
+CANVAS            #1e1e1e  // window base (windowBackgroundColor); panes sit directly on it
+SIDEBAR           #252525  // nav column where no material exists (Linux, Windows), picker language list
+SURFACE           #2a2a2a  // menus and popovers: the one floating surface in the window
+FILL_QUIET        #2e2e2e  // recessed fills: segmented tracks, search fields, keycap wells, group wells
+FILL              #353535  // control fill: buttons, pop-up buttons, keycaps
+FILL_STRONG       #454545  // pressed or open control, off switch track, slider track
+SURFACE_SELECTED  #464646  // selected list row, segmented thumb
+LINE              #343434  // separators, always one device pixel (HAIRLINE 0.5)
+LINE_STRONG       #4a4a4a  // floating-surface outlines
+SCRIM             #00000099 // modal backdrops
 ```
+
+Over a material (RGBA): `SIDEBAR_SELECTED` / `SIDEBAR_SELECTED_INACTIVE` for
+the sidebar selection in key and non-key windows, `GLASS_FILL`, `GLASS_RIM`,
+`GLASS_OVER_MATERIAL` (graphite laid over HUD glass so capsules stay legible
+over bright windows), and `GLASS_TINT` where no material exists.
 
 ### Text
 
 ```ts
-TEXT_PRIMARY    #f2f2f2  // titles, values, selected items
-TEXT_SECONDARY  #d0d0d0  // body copy, unselected list titles, button labels
-TEXT_TERTIARY   #969696  // descriptions, metadata, section labels, placeholders
-TEXT_DISABLED   #6e6e6e  // unavailable controls and idle status dots only
-ACCENT_TEXT     #8390ff  // accent text on ACCENT_SURFACE, links
-DANGER          #f17471  // errors, destructive labels
-SUCCESS         #69d89f  // ready and live states
+TEXT_PRIMARY    #dedede  // titles, values, selected items
+TEXT_SECONDARY  #b3b3b3  // descriptions, unselected list titles
+TEXT_TERTIARY   #919191  // metadata, section labels, placeholders
+TEXT_DISABLED   #5c5c5c  // unavailable controls only
+ACCENT_TEXT     #419cff  // links (linkColor)
+DANGER          #ff6961  // errors, destructive labels
+SUCCESS         #30d158  // ready and live states
 ```
 
 `TEXT_TERTIARY` is the weakest colour allowed for readable text. It measures at
-least 4.5:1 on every surface (`readable_text_meets_aa_contrast_on_every_surface`).
-
-### Roles
-
-Each role has a text or fill colour, a tinted surface, and, where needed, a
-border.
-
-```ts
-ACCENT   #3b5cf6  ACCENT_SURFACE  #1c2030  ACCENT_BORDER  #2c3560  SELECTION #3b5cf655
-SUCCESS  #69d89f  SUCCESS_SURFACE #17231a
-DANGER   #f17471  DANGER_SURFACE  #2b1718  DANGER_BORDER  #66292c
-```
-
-`ACCENT` is the only primary-action fill, the toggle "on" colour, and the
-focus ring.
+least 4.5:1 on every surface (`readable_text_meets_aa_contrast_on_every_surface`);
+the system's own tertiaryLabel (white at 25%) is decorative and too faint.
 
 ### Colour
 
 Saturated colour is spent on meaning, never decoration:
 
-- **Accent fill:** at most one Primary button per screen, for the main action
-  (Meetings "Start recording", the onboarding setup screen's next unfinished
-  row and then "Continue" once every row is ready, a dialog's confirm). A
-  meeting capsule is its own screen: "Record", "Stop & transcribe" after the
-  call ends, "Reveal" when ready. Never in persistent chrome like the sidebar.
+- **Primary** is a white fill (`PRIMARY_FILL`) with an ink label
+  (`PRIMARY_INK`): at most one per screen, for the main action. No hue marks an
+  action anywhere else.
+- **Accent** is the user's own `controlAccentColor`, read once through
+  `accent()`: the switch's on state, progress, and the menu item under the
+  pointer. Nothing else.
 - **States are not actions:** an ongoing state uses a Secondary button with a
-  `status_dot` in the state's colour, matching its `tag`. "Stop & transcribe"
-  while recording is Secondary with a red dot and the elapsed time; the
-  sidebar's "Update" is Secondary with an accent dot.
+  `status_dot`. Recording (`#ff453a`, systemRed) is only ever a dot.
 - **Danger** marks destructive choices and armed confirmations only; **success**
-  marks ready and live states only.
+  marks ready and live states only. Tags are coloured caption text with no
+  fill or border.
 
 ### Type scale
 
-The window frame sets `BODY`, so text with no step inherits 13 px.
+The window frame sets `BODY`, so text with no step inherits 13 pt. CoreText
+already applies SF Pro's optical tracking per size; never add manual tracking.
 
 | Step | Size / line | Weight | Use |
 |---|---|---|---|
-| `CAPTION` | 11 / 14 | inherited | metadata, timestamps, tags, section labels, small buttons |
-| `FOOTNOTE` | 12 / 16 | inherited | descriptions, control and button labels, menu items |
-| `BODY` | 13 / 18 | inherited | window default, values, inputs, list and row titles, reading text |
-| `HEADLINE` | 15 / 20 | semibold | detail, card, and dialog titles |
-| `TITLE` | 20 / 26 | semibold | pane titles (`pane_header`), onboarding page titles, hero keycaps |
+| `CAPTION` | 11 / 14 | inherited | metadata, timestamps, tags, section labels |
+| `FOOTNOTE` | 12 / 16 | inherited | descriptions, small control labels, menu items |
+| `BODY` | 13 / 18 | inherited | window default, values, inputs, row titles, buttons |
+| `READING` | 14 / 20 | inherited | long-form reading: meeting transcripts and summaries |
+| `HEADLINE` | 15 / 20 | semibold | toolbar (pane) titles, dialog titles |
+| `TITLE` | 20 / 24 | semibold | detail titles, onboarding page titles |
 
-Apply steps with the `Typography` trait: `.text_caption()`,
-`.text_footnote()`, `.text_body()`, `.text_headline()`, `.text_title()`, or
-`.text_step(STEP)`. Each step sets its own line height. Use `.text_monospace()`
-for code, logs, and configuration paths.
-
-Emphasis inside a step uses `FontWeight::MEDIUM` (row titles, labels, buttons)
-or `FontWeight::SEMIBOLD` (card titles at `BODY`). The only text below the scale
-is `KEYCAP_SIDE_BADGE` (7 / 8), the L/R badge on a sided modifier keycap.
+Apply steps with the `Typography` trait (`.text_caption()` … `.text_title()`,
+`.text_reading()`, `.text_step(STEP)`). `.text_tabular()` turns on tabular
+figures for anything that counts or sits in a column (durations, timestamps,
+counts, sizes); `.text_monospace()` is for code, logs, and paths.
 
 ### Spacing, radii, geometry
 
-Use GPUI spacing utilities on the 4 px grid: `_1` 4, `_2` 8, `_3` 12, `_4` 16,
-`_5` 20, `_6` 24, `_8` 32. `PANE_GUTTER` (32) is the one horizontal inset for
-pane headers and bodies, so cards line up with the header rule.
+Use GPUI spacing utilities on the 4 pt grid. `PANE_GUTTER` (28) is the one
+horizontal inset for pane headers and scrolling bodies. List+detail panes use
+`split_body()` edge to edge: the list column is divided from the detail by one
+hairline, with no outer inset.
 
-Smaller text beside a larger line (a timestamp beside a row title, a
-`detail_row` label beside its value) shares its baseline: inset it from the top
-by `baseline_offset(LARGER, SMALLER)`, never `items_center`.
+Smaller text beside a larger line shares its baseline: inset it from the top by
+`baseline_offset(LARGER, SMALLER)`, never `items_center`.
 
 ```ts
-RADIUS_KNOB 2 · RADIUS_SMALL 4 · RADIUS_CONTROL 6 · RADIUS_PANEL 10 · RADIUS_MODAL 12
-icon_radius(size)            // app icons and mode icons: 22% of the size
-rounded_full                 // dots, avatars, meeting capsules and their buttons
+RADIUS_KNOB 2 · RADIUS_SMALL 4 · RADIUS_CONTROL 6 · RADIUS_PANEL 8 · RADIUS_MODAL 12
+HAIRLINE 0.5                 // every separator: one device pixel on Retina
 
-CONTROL_HEIGHT 30            // buttons, inputs, disclosures, segmented controls
-CONTROL_HEIGHT_SMALL 24      // small buttons, keycaps
-TAG_HEIGHT 18 · MENU_ITEM_HEIGHT 28 · NAV_ITEM_HEIGHT 32
-MENU_WIDTH 180 · MENU_OFFSET 4  // menu width; gap below its trigger
-PANEL_HEADER_HEIGHT 38 · SETTINGS_ROW_MIN_HEIGHT 56 · PANE_HEADER_HEIGHT 70
-SIDEBAR_WIDTH 220 · PANE_CONTENT_WIDTH 940
-PANE_LIST_WIDTH 320 · PANE_LIST_WIDTH_COMPACT 220 (Modes)
-DISCLOSURE_WIDTH 220 · SEARCH_FIELD_WIDTH 220 · MODE_FIELD_WIDTH 300
-ICON_SIZE 14 · ICON_SIZE_SMALL 11 · TOGGLE 28×16 · DISABLED_OPACITY 0.4
-ONBOARDING_WIDTH 520 · ONBOARDING_BODY_WIDTH 440 · ONBOARDING_ART_HEIGHT 148
-HERO_KEYCAP_SIZE 56 · HERO_KEYCAP_DEPTH 3 · ONBOARDING_BADGE_SIZE 28
-ONBOARDING_PRIMARY_WIDTH 180 · STEP_DOT_SIZE 6 · STEP_DOT_ACTIVE_WIDTH 16
+CONTROL_HEIGHT 24            // macOS regular controls: buttons, inputs, pop-ups, segmented
+CONTROL_HEIGHT_SMALL 20      // small buttons, keycaps
+CONTROL_HEIGHT_LARGE 28      // toolbar main action and search field
+TOGGLE 36×20                 // capsule switch, accent when on
+TAG_HEIGHT 18 · MENU_ITEM_HEIGHT 22 · NAV_ITEM_HEIGHT 28
+MENU_WIDTH 200 · MENU_OFFSET 4
+PANE_HEADER_HEIGHT 52        // toolbar row, level with the traffic lights (= TITLEBAR_INSET)
+PANEL_HEADER_HEIGHT 36 · SETTINGS_ROW_MIN_HEIGHT 48
+SIDEBAR_WIDTH 216 · PANE_CONTENT_WIDTH 760
+PANE_LIST_WIDTH 272 · PANE_LIST_WIDTH_COMPACT 220 (Modes)
+TRANSCRIPT_SPEAKER_WIDTH 52 · TRANSCRIPT_TIME_WIDTH 44
+CAPSULE_HEIGHT 60 · CAPSULE_BUTTON_HEIGHT 36 · RECORDING_PILL_HEIGHT 44  // concentric
 ```
 
 ### Motion
@@ -163,75 +163,112 @@ Springs live in [`src/motion.rs`](../src/motion.rs) and are named through
 
 ```ts
 SPRING_INSTANT      0.10s · bounce 0.00  // pointer-tied meters, live waveform scrub
-SPRING_SNAP         0.25s · bounce 0.00  // toggles, sliding pills, menu/picker open
-SPRING_SNAP_EXIT    0.20s · bounce 0.00  // menu/picker close, quick exits
-SPRING_SETTLE       0.30s · bounce 0.00  // default state change, pane cross-fade + offset
-SPRING_SETTLE_EXIT  0.24s · bounce 0.00  // state exit
-SPRING_REFLOW       0.40s · bounce 0.00  // layout disclosures, row height/width reflow
-SPRING_GLIDE        0.32s · bounce 0.00  // modal sheets, onboarding page transitions
+SPRING_SNAP         0.25s · bounce 0.00  // switches, segmented thumbs, menu open, sliders
+SPRING_SNAP_EXIT    0.20s · bounce 0.00  // menu close
+SPRING_SETTLE       0.30s · bounce 0.00  // default state change
+SPRING_REFLOW       0.40s · bounce 0.00  // disclosures, row height/width reflow
+SPRING_GLIDE        0.32s · bounce 0.00  // modal sheets, onboarding pages
 SPRING_MORPH        0.30s · bounce 0.16  // chip-to-panel morphs
 SPRING_POP          0.25s · bounce 0.15  // press/release confirmation
-SPRING_REDUCED_FADE 0.16s · bounce 0.00  // opacity-only fallback when Reduce Motion is on
-PANE_ENTER_OFFSET   4 px · MENU_ENTER_OFFSET 4 px
+SPRING_REDUCED_FADE 0.16s · bounce 0.00  // opacity-only fallback under Reduce Motion
+MENU_ENTER_OFFSET   4 pt                  // menus drop from their trigger
 ```
 
-Drive desktop transitions with `window.spring(id, target, spec, cx)` or
-`window.spring_fade(id, target, spec, cx)`. Every spring retargets in-flight
-with velocity carry-over, requests animation frames only while unsettled, and
-honors `NSWorkspace.accessibilityDisplayShouldReduceMotion` (or
-`HEX_REDUCE_MOTION=1`).
+What moves, and what doesn't, follows AppKit:
+
+- **Instant:** sidebar selection and pane switches, list selection, hover
+  (there is none outside menus). Mac apps never cross-fade a selection.
+- **Sprung in GPUI:** switches, segmented thumbs, menus and popovers (fade plus
+  a 4 pt drop from the anchor), disclosures, the transcription sheet.
+- **Core Animation, off the main thread:** capsule entrance and exit
+  (`window_material::animate_panel_in/out`): a 0.2 s fade plus a
+  `CASpringAnimation` slide (SwiftUI `.spring(duration: 0.32, bounce: 0)`), and
+  a 0.18 s fade out. The render server drives these, so they stay smooth while
+  the app is busy; the window never moves.
+
+Every GPUI spring retargets with velocity carry-over, requests frames only
+while unsettled, and honours `accessibilityDisplayShouldReduceMotion` (or
+`HEX_REDUCE_MOTION=1`), which reduces movement to short fades.
+
+## Materials and native behaviour
+
+[`src/window_material.rs`](../src/window_material.rs) puts real AppKit
+materials behind GPUI's transparent Metal layer:
+
+- **Sidebar:** an `NSVisualEffectView` (`.sidebar`, follows the window's active
+  state) under the navigation column, which paints nothing itself. AppKit dims
+  it in a non-key window and makes it opaque under Reduce Transparency;
+  `navigation_item(…, window_active)` dims the selection to match.
+- **Toolbar:** an empty unified `NSToolbar` places the traffic lights in the
+  52 pt toolbar row, with their native hit areas and full-screen behaviour.
+- **Capsules:** HUD glass behind each meeting capsule, masked to the pill and
+  resized with it. The panel's window-server shadow is off (it would outline
+  the whole transparent panel); the pill draws `capsule_shadow()` inside its
+  8 pt margin.
+
+GPUI's `WindowBackgroundAppearance::Blurred` is not used: it strips the
+material's tint and saturation.
+
+Native behaviour the components keep: no hover highlight or pointer cursor on
+buttons and rows (menus are the one place that highlights under the pointer),
+keyboard focus rings (`focus_ring()`) on text fields, accent-coloured switches,
+and inactive-window dimming.
 
 ## Components
 
 | Job | Component |
 |---|---|
-| Window root (canvas + `BODY`) | `window_frame` |
-| Navigation column / item | `sidebar_frame`, `navigation_item(NavigationIcon, selected)` |
-| Pane title bar, optional action | `pane_header`, `pane_header_with_action` |
-| Fixed pane body / scrolling pane body | `pane_body` + `pane_content`, `pane_scroll_body(id, pane_content())` |
-| List + detail | `pane_list(id, empty, error_title, error, rows)` beside `pane_detail(content)` |
+| Window root (canvas + `BODY`) / content column | `window_frame`, `content_frame` |
+| Navigation column / item | `sidebar_frame`, `navigation_item(NavigationIcon, selected, window_active)` |
+| Toolbar row: pane title, optional controls | `pane_header`, `pane_header_with_action` |
+| Scrolling pane body | `pane_scroll_body(id, content)` |
+| List + detail | `split_body()` holding `pane_list(id, width, empty, error_title, error, rows)` and `pane_detail(content)` |
 | Row in a list | `list_row(selected)` with `list_row_title`, `list_row_meta` |
 | Group heading in a list | `list_section_label(label, first)` |
-| Top of a detail card | `detail_header(detail_title(…), meta, actions)` over `detail_body(id)` |
+| Top of a detail | `detail_header(detail_title(…), meta, actions)` over `detail_body(id)`; actions sit on the title line |
 | Any text that must fit one line | `truncated_line(STEP, text)` (ends in "…") |
-| Card | `panel()`; titled card: `panel_header(title, action)` |
+| Group of rows | `panel()` (no box: rows divided by hairlines); titled: `panel_header(title, action)` |
+| Separators | `Hairlines`: `.hairline_t()`, `.hairline_b()`, `.hairline_r()` |
 | Settings | `settings_section_label` → `panel` → `settings_row(title, description, control)` |
-| Label above a group | `section_label` (caption, semibold, tertiary); above a card, inset `px_4` to the card's row text |
-| Label / value in a detail card | `detail_row` |
+| Label above a group | `section_label` (caption, semibold, tertiary) |
+| Label / value in a detail | `detail_row` |
 | Main action of a view (at most one) | `button(ButtonKind::Primary, …)` |
 | Any other action | `button(ButtonKind::Secondary, …)` |
 | Destructive or armed confirmation | `button(ButtonKind::Danger, …)` |
-| Action inside a row or card | `small_button(kind, …)` |
-| Icon-only action | `icon_button(ButtonKind::Ghost, Icon)` in cards and rows; `Secondary` when it stands alone |
+| Action inside a row | `small_button(kind, …)` |
+| Icon-only action | `icon_button(ButtonKind::Ghost, Icon)`; `Secondary` when it stands alone |
 | Work in progress where a button was | `busy_label` |
-| Dropdown trigger | `disclosure_button(label)`; custom content: `disclosure_frame()` + `Icon::ChevronDown` |
-| Popover / menu and its choices | `menu()`, `menu_item(selected)`; under a control: `dropdown_menu()` at `MENU_WIDTH` |
+| Pop-up button | `disclosure_button(label)` (up/down chevron); custom content: `disclosure_frame()` |
+| Popover / menu and its choices | `menu()`, `menu_item(selected)`; under a control: `dropdown_menu()` / `dropdown_menu_with_progress` |
 | Destructive / unavailable menu choice | `danger_menu_item()` after `menu_separator()`; `disabled_menu_item()` |
 | Overflow of less common actions | `icon_button(ButtonKind::Secondary, Icon::Ellipsis)` opening a `dropdown_menu()` |
 | On/off | `toggle(position)`; never repeat "On"/"Off" beside it |
 | A few exclusive choices | `segmented_control` + `segmented_item`, or the sliding variants |
-| Status (never clickable) | `tag(Tone::{Neutral, Accent, Success, Danger}, label)` |
+| Status (never clickable) | `tag(Tone, label)`: coloured caption text |
+| Count | `count_badge(n)` |
 | Live / recorded state | `status_dot(colour)` |
-| Shortcut | `hotkey_keycaps`; drawn large in onboarding art: `hero_keycaps(parts, pressed)` |
+| Shortcut | `hotkey_keycaps`; onboarding art: `hero_keycaps(parts, pressed)` |
 | Progress | `progress_track(indicator)` with its label beside it |
 | Position in a multi-step flow | `step_dots(index, count)` |
-| Text entry | `TextInput` ([`text_input.rs`](../src/text_input.rs)): `BODY`, `CONTROL_HEIGHT`, `RADIUS_CONTROL` |
-| Nothing to show | `empty_state`; centred in a card: `detail_placeholder` (`pane_list` centres its own) |
-| Errors | `error_panel` (card), `error_message` (inside a card), `inline_error` (under a control) |
+| Text entry | `TextInput` ([`text_input.rs`](../src/text_input.rs)): `FILL_QUIET`, hairline, focus ring |
+| Nothing to show | `empty_state`; in a detail: `detail_placeholder` |
+| Errors | `error_panel`, `error_message`, `inline_error` |
 
 A destructive menu choice ends in "…" ("Delete…") and keeps its two-step
 confirmation: choosing it closes the menu and replaces the action row with the
 armed Danger button and Cancel until one is chosen.
 
-Buttons are always filled or bordered. Only icon buttons and menu items are
-borderless. Tags never have a border or hover state, so they can't be mistaken
+Buttons are always filled. Only icon buttons and menu items are borderless, and
+nothing changes under the pointer except menu items. Tags never have a border or hover state, so they can't be mistaken
 for buttons. A row carries at most two tags, beside its title; an ongoing
 state on its trailing edge ("Active") is a `status_dot` and a footnote label,
 never a third tag; progress carries its label beside the bar. Put errors at the top of their scroll area,
 never below the fold.
 
-Meeting capsules are pill-shaped. They use the shared buttons with
-`.rounded_full()` and the same colours, type, and dots as the window.
+Meeting capsules are concentric pills on HUD glass: a 60 pt capsule, 12 pt
+padding, 36 pt pill buttons, and a 32 pt lens well for the leading glyph. They
+use the shared buttons with `.rounded_full()` and the same type and dots as the
+window.
 
 ## Copy
 
@@ -263,8 +300,10 @@ Meeting capsules are pill-shaped. They use the shared buttons with
   weight, monochrome. On Linux they fall back to Heroicons (navigation) and
   matching glyphs (inline). Windows uses the Heroicons for navigation and the
   matching Segoe Fluent Icons glyphs inline.
-- Colour icons with a text token: tertiary at rest, primary when selected or
-  hovered.
+- Colour icons with a text token: secondary at rest, primary when selected.
+- macOS symbols are rasterised by AppKit into premultiplied bitmaps;
+  `desktop_ui::sf_symbol` un-premultiplies them before GPUI's straight-alpha
+  sprite pipeline, or thin strokes fade out over materials.
 - A web page or other item without an app icon shows `Icon::Globe` inside the
   same rounded tile, never a letter monogram.
 - To add an icon, add an `Icon` variant with both its SF Symbol and its Linux
@@ -281,9 +320,23 @@ HEX_PREVIEW_SKIP_BUILD=1 ./scripts/capture-preview.sh /tmp/hex-modes.png modes
 
 Capture every pane and state you touched. The preview targets and flags are
 listed in [AGENTS.md](../AGENTS.md#development). Check at least these:
-alignment with the header rule, section labels on their card's text edge,
-shared baselines, no clipped text without "…", at most one accent button per
-screen, and sentence case.
+alignment with the header rule, shared baselines, no clipped text without "…",
+at most one Primary button per screen, and sentence case.
+
+For motion, record real frames instead of judging by eye:
+
+```sh
+# 60 fps frames of the main window while a scripted choreography runs
+HEX_PREVIEW_CHOREOGRAPHY=controls HEX_PROFILE_FRAMES=1 \
+  HEX_RECORD_FRAMES_DIR=/tmp/frames HEX_RECORD_DURATION_MS=7600 \
+  target/release/voice-control preview settings
+# a capsule entrance and exit, composited over the desktop
+HEX_PREVIEW_PANEL_DELAY_MS=700 HEX_PREVIEW_PANEL_DISMISS_MS=1300 \
+  HEX_RECORD_FRAMES_DIR=/tmp/capsule HEX_RECORD_SCREEN_RECT=1200,20,564,130 \
+  HEX_RECORD_DURATION_MS=2600 target/release/voice-control preview meeting-offer --meeting-panel offer
+```
+
+`HEX_PROFILE_FRAMES` logs render and frame-interval p50/p95/max per pane.
 
 ## Audit: before → after
 

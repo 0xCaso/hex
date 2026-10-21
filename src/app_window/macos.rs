@@ -209,8 +209,21 @@ impl Platform {
     }
 }
 
+/// A transparent window, so the sidebar material installed by
+/// [`install_window_chrome`] shows through where GPUI paints nothing.
 pub(super) fn window_options(options: WindowOptions) -> WindowOptions {
-    options
+    WindowOptions {
+        window_background: gpui::WindowBackgroundAppearance::Transparent,
+        ..options
+    }
+}
+
+/// The sidebar material and the unified toolbar row.
+pub(super) fn install_window_chrome(window: &Window) {
+    if cfg!(test) {
+        return;
+    }
+    crate::window_material::install_sidebar_material(window, SIDEBAR_WIDTH);
 }
 
 /// macOS draws the traffic lights over the transparent titlebar itself.
@@ -748,8 +761,7 @@ pub(super) fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .border_b_1()
-        .border_color(rgb(LINE))
+        .hairline_b()
         .child(section_label(tr("Summary")))
         .child(
             div()
@@ -825,8 +837,9 @@ pub(super) fn transcript_lines(turns: &[TranscriptEntry]) -> Vec<TranscriptLine>
         .collect()
 }
 
-/// One conversational turn: the other side on the left, the user on the
-/// right in the accent color.
+/// One turn of a transcript read as a document: the speaker in a right-aligned
+/// margin, the words at reading size, and the timestamp in its own column.
+/// Only "You" is emphasised; there are no bubbles.
 pub(super) fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement {
     let mine = line.source == MeetingSource::Microphone;
     div()
@@ -836,62 +849,58 @@ pub(super) fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement
         .when_some(line.pause_before_ms, |row, pause| {
             row.child(
                 div()
-                    .py_2()
+                    .pb_3()
                     .flex()
                     .items_center()
                     .gap_3()
                     .text_caption()
                     .text_color(rgb(TEXT_TERTIARY))
-                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE)))
+                    .child(div().h(HAIRLINE).flex_1().bg(rgb(LINE)))
                     .child(tr_fill("{} pause", &meeting_length(pause)))
-                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE))),
+                    .child(div().h(HAIRLINE).flex_1().bg(rgb(LINE))),
             )
         })
         .child(
             div()
+                .debug_selector(move || format!("meeting-turn-{index}"))
                 .flex()
-                .flex_col()
-                .gap_1()
-                .when(mine, |turn| turn.items_end())
-                .when(!mine, |turn| turn.items_start())
+                .items_start()
+                .gap_3p5()
                 .child(
-                    // Inset to the bubble's text, not its rounded edge.
                     div()
-                        .px_3()
+                        .w(px(TRANSCRIPT_SPEAKER_WIDTH))
+                        .flex_none()
                         .flex()
-                        .gap_2()
-                        .text_caption()
-                        .text_color(rgb(TEXT_TERTIARY))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(if mine { ACCENT_TEXT } else { TEXT_TERTIARY }))
-                                .child(line.source.label()),
-                        )
-                        .child(line.clock.clone()),
+                        .justify_end()
+                        .pt(px(baseline_offset(READING, FOOTNOTE)))
+                        .text_footnote()
+                        .when(mine, |who| {
+                            who.font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(TEXT_PRIMARY))
+                        })
+                        .when(!mine, |who| who.text_color(rgb(TEXT_TERTIARY)))
+                        .child(line.source.label()),
                 )
                 .child(
                     div()
                         .debug_selector(move || format!("meeting-bubble-{index}"))
-                        .max_w(relative(0.82))
-                        .px_3()
-                        .py_2()
-                        .rounded(RADIUS_PANEL)
-                        .border_1()
-                        .when(mine, |bubble| {
-                            bubble
-                                .border_color(rgb(ACCENT_BORDER))
-                                .bg(rgb(ACCENT_SURFACE))
-                                .text_color(rgb(TEXT_PRIMARY))
-                        })
-                        .when(!mine, |bubble| {
-                            bubble
-                                .border_color(rgb(LINE))
-                                .bg(rgb(CANVAS))
-                                .text_color(rgb(TEXT_SECONDARY))
-                        })
-                        .text_body()
+                        .flex_1()
+                        .min_w_0()
+                        .text_reading()
+                        .text_color(rgb(if mine { TEXT_PRIMARY } else { TEXT_SECONDARY }))
                         .child(line.text.clone()),
+                )
+                .child(
+                    div()
+                        .w(px(TRANSCRIPT_TIME_WIDTH))
+                        .flex_none()
+                        .flex()
+                        .justify_end()
+                        .pt(px(baseline_offset(READING, CAPTION)))
+                        .text_caption()
+                        .text_tabular()
+                        .text_color(rgb(TEXT_TERTIARY))
+                        .child(line.clock.clone()),
                 ),
         )
         .into_any_element()
@@ -2041,16 +2050,20 @@ impl AppWindow {
             .flex_col()
             .child(pane_header_with_action(tr("Meetings"), Some(header_action)))
             .child(
-                pane_body().child(
-                    pane_content()
+                split_body().child(
+                    div()
                         .id("meetings-workspace")
-                        .gap_3()
+                        .size_full()
+                        .flex()
+                        .flex_col()
                         .when_some(
                             self.platform.meeting_runtime_error.clone(),
                             |column, error| {
                                 column.child(
-                                    error_panel(tr("Meeting could not be recorded."), error)
-                                        .flex_none(),
+                                    div().px(px(PANE_GUTTER)).pt_3().child(
+                                        error_panel(tr("Meeting could not be recorded."), error)
+                                            .flex_none(),
+                                    ),
                                 )
                             },
                         )
@@ -2059,7 +2072,6 @@ impl AppWindow {
                                 .flex_1()
                                 .min_h(px(0.0))
                                 .flex()
-                                .gap_5()
                                 .child(list)
                                 .child(pane_detail(self.render_meeting_detail(window, cx))),
                         ),
@@ -2138,14 +2150,15 @@ impl AppWindow {
             let id = id.clone();
             let turns = self.platform.meeting_turns.clone();
             actions.push(
-                action(
-                    "copy-transcript",
+                icon_button(
+                    ButtonKind::Secondary,
                     if copied("transcript") {
-                        tr("Copied")
+                        Icon::Check
                     } else {
-                        tr("Copy transcript")
+                        Icon::Copy
                     },
                 )
+                .id("meeting-action-copy-transcript")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.copy_meeting_text(
                         id.clone(),
@@ -2254,20 +2267,24 @@ impl AppWindow {
                 div()
                     .relative()
                     .child(trigger)
-                    .when(self.platform.meeting_actions_open, |more| {
-                        more.child(deferred(
-                            dropdown_menu_with_progress(menu_progress)
-                                .id("meeting-actions-menu")
-                                .debug_selector(|| "meeting-actions-menu".into())
-                                .left_0()
-                                .w(px(MENU_WIDTH))
-                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                    this.platform.meeting_actions_open = false;
-                                    cx.notify();
-                                }))
-                                .children(menu_items),
-                        ))
-                    })
+                    // Stays mounted while it fades out, so it never just vanishes.
+                    .when(
+                        self.platform.meeting_actions_open || (!cfg!(test) && menu_progress > 0.01),
+                        |more| {
+                            more.child(deferred(
+                                dropdown_menu_with_progress(menu_progress)
+                                    .id("meeting-actions-menu")
+                                    .debug_selector(|| "meeting-actions-menu".into())
+                                    .right_0()
+                                    .w(px(MENU_WIDTH))
+                                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                        this.platform.meeting_actions_open = false;
+                                        cx.notify();
+                                    }))
+                                    .children(menu_items),
+                            ))
+                        },
+                    )
                     .into_any_element(),
             );
         }
@@ -2578,9 +2595,14 @@ impl AppWindow {
             .flex()
             .items_center()
             .gap_2()
+            .child(
+                div()
+                    .w(px(SEARCH_FIELD_WIDTH))
+                    .child(self.platform.command_search.entity.clone()),
+            )
             .child(config_control)
             .when_some(copy_prompt, |controls, prompt| controls.child(prompt))
-            .child(div().mx_1().w(px(1.0)).h_5().bg(rgb(LINE)))
+            .child(div().mx_1().w(HAIRLINE).h_5().bg(rgb(LINE_STRONG)))
             .child(
                 div()
                     .id("commands-enabled")
@@ -2674,13 +2696,17 @@ impl AppWindow {
                 Some(commands_control),
             ))
             .child(
-                pane_body().child(
-                    pane_content()
-                        .gap_3()
+                split_body().child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
                         .when_some(last_error, |column, error| {
                             column.child(
-                                error_panel(tr("Personal commands are not loading."), error)
-                                    .flex_none(),
+                                div().px(px(PANE_GUTTER)).pt_3().child(
+                                    error_panel(tr("Personal commands are not loading."), error)
+                                        .flex_none(),
+                                ),
                             )
                         })
                         .child(
@@ -2688,37 +2714,18 @@ impl AppWindow {
                                 .flex_1()
                                 .min_h(px(0.0))
                                 .flex()
-                                .gap_5()
-                                .child(
-                                    div()
-                                        .w(px(PANE_LIST_WIDTH))
-                                        .h_full()
-                                        .flex_none()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .child(self.platform.command_search.entity.clone()),
-                                        )
-                                        .child(
-                                            pane_list(
-                                                "commands-list",
-                                                PANE_LIST_WIDTH,
-                                                no_commands.then_some(if query.is_empty() {
-                                                    tr("No commands yet.")
-                                                } else {
-                                                    tr("No matching commands.")
-                                                }),
-                                                "",
-                                                None,
-                                                groups,
-                                            )
-                                            .flex_1()
-                                            .min_h(px(0.0)),
-                                        ),
-                                )
+                                .child(pane_list(
+                                    "commands-list",
+                                    PANE_LIST_WIDTH,
+                                    no_commands.then_some(if query.is_empty() {
+                                        tr("No commands yet.")
+                                    } else {
+                                        tr("No matching commands.")
+                                    }),
+                                    "",
+                                    None,
+                                    groups,
+                                ))
                                 .child(
                                     pane_detail(self.render_command_detail(
                                         effective_selected.as_deref(),
@@ -3011,7 +3018,7 @@ impl AppWindow {
                             .w(relative(value))
                             .h(px(4.0))
                             .rounded_full()
-                            .bg(rgb(ACCENT)),
+                            .bg(rgb(accent())),
                     )
                     .child(
                         div()
@@ -3090,9 +3097,9 @@ impl AppWindow {
                         .gap_1()
                         .rounded(RADIUS_PANEL)
                         .border_1()
-                        .border_color(rgb(if selected { ACCENT } else { LINE }))
+                        .border_color(rgb(if selected { accent() } else { LINE }))
                         .bg(rgb(if selected { ACCENT_SURFACE } else { SURFACE }))
-                        .hover(|card| card.bg(rgb(SURFACE_HOVER)))
+                        .hover(|card| card.bg(rgb(FILL)))
                         .child(div().text_caption().text_color(rgb(ACCENT_TEXT)).child(key))
                         .child(
                             div()

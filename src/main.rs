@@ -151,6 +151,8 @@ mod transcription_preparation;
 mod transcription_service;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod voice_filter;
+#[cfg(target_os = "macos")]
+mod window_material;
 
 // The Windows shell and the shared desktop layer it was built on. These
 // modules come from the `windows-shell` branch and stay Windows-only until
@@ -664,6 +666,7 @@ fn main() -> Result<()> {
             step,
         } => {
             if matches!(target, AppPreviewTarget::MeetingOffer) {
+                motion::maybe_start_self_window_recorder(None);
                 return meeting_watcher::run(
                     &SHUTDOWN,
                     meeting_watcher::Launch::MeetingPanelPreview(match meeting_panel {

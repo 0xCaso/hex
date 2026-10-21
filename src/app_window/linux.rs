@@ -116,6 +116,8 @@ pub fn open(event_path: PathBuf, cx: &mut App) -> gpui::Result<WindowHandle<AppW
     open_new(event_path, history, None, Args, cx)
 }
 
+pub(super) fn install_window_chrome(_: &Window) {}
+
 pub(super) fn window_options(options: WindowOptions) -> WindowOptions {
     WindowOptions {
         app_id: Some("hex".into()),

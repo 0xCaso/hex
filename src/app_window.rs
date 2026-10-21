@@ -27,15 +27,15 @@ use crate::desktop_transcription_picker::{
     transcription_selection_is_active,
 };
 use crate::desktop_ui::{
-    ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, danger_menu_item, detail_body,
-    detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
+    ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, content_frame, danger_menu_item,
+    detail_body, detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
     disclosure_frame, dropdown_menu_with_progress, error_message, error_panel, hotkey_keycaps,
     icon, icon_button, inline_error, list_row, list_row_meta, list_row_title, listener_status,
-    menu_item, menu_with_progress, mix_color, navigation_item, pane_body, pane_content,
-    pane_detail, pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel,
-    panel_header, progress_track, section_label, settings_copy, settings_row,
-    settings_section_label, sidebar_frame, sliding_segmented_control, sliding_segmented_for,
-    sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, window_frame,
+    menu_item, menu_with_progress, mix_color, navigation_item, pane_content, pane_detail,
+    pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header,
+    progress_track, section_label, settings_copy, settings_row, settings_section_label,
+    sidebar_frame, sliding_segmented_control, sliding_segmented_for, sliding_segmented_item,
+    small_button, split_body, status_dot, tag, toggle, truncated_line, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
@@ -863,6 +863,7 @@ struct NavigationSidebar {
     fun_available: bool,
     update_available: bool,
     preview: bool,
+    window_active: bool,
 }
 
 impl Render for NavigationSidebar {
@@ -878,7 +879,7 @@ impl Render for NavigationSidebar {
         .map(|(index, pane)| {
             let selected = self.pane == pane;
             let window_entity = self.window_entity.clone();
-            navigation_item(pane.icon(), selected)
+            navigation_item(pane.icon(), selected, self.window_active)
                 .id(("app-nav", index))
                 .child(pane.label())
                 .on_click(move |_, _, cx| {
@@ -1050,10 +1051,8 @@ impl Render for FunWaveformView {
             .flex()
             .flex_col()
             .gap_2p5()
-            .rounded(RADIUS_CONTROL)
-            .border_1()
-            .border_color(rgb(LINE))
-            .bg(rgb(CANVAS))
+            .rounded(RADIUS_PANEL)
+            .bg(rgb(FILL_QUIET))
             .child(
                 div()
                     .h(px(TAG_HEIGHT))
@@ -1421,6 +1420,7 @@ impl AppWindow {
         };
         let application_search = Self::application_search_input(cx);
         let window_focus = cx.focus_handle();
+        platform::install_window_chrome(native_window);
         window_focus.focus(native_window);
         let hotkey_focus = cx.focus_handle();
         let hotkey_blur_subscription = cx.on_blur(&hotkey_focus, native_window, |this, _, cx| {
@@ -1430,10 +1430,10 @@ impl AppWindow {
             cx.observe_window_activation(native_window, |this, window, cx| {
                 if window.is_window_active() {
                     this.permission_refresh_at = Instant::now();
-                    if this.poll_setup(true) {
-                        cx.notify();
-                    }
+                    this.poll_setup(true);
                 }
+                // The sidebar selection dims while the window is inactive.
+                cx.notify();
             });
         let personal_workspace = if preview_mode {
             PathBuf::from("~/.config/hex")
@@ -1589,6 +1589,7 @@ impl AppWindow {
                 || initial_pane == Pane::Fun,
             update_available: false,
             preview: preview_mode,
+            window_active: true,
         });
         let navigation_view = AnyView::from(navigation_sidebar.clone()).cached(
             StyleRefinement::default()
@@ -1845,6 +1846,44 @@ impl AppWindow {
                     Timer::after(Duration::from_millis(750)).await;
                     crate::motion::log_pane_summary("Fun", "choreography_done");
                     crate::motion::log_pane_summary("FunWaveform", "choreography_done");
+                }
+                "controls" => {
+                    use crate::dictation::ShortcutMode;
+                    type Step = fn(&mut AppWindow, &mut Context<AppWindow>);
+                    let steps: [(u64, Step); 8] = [
+                        (600, |this, cx| this.set_double_tap_lock(false, cx)),
+                        (700, |this, cx| this.set_double_tap_lock(true, cx)),
+                        (700, |this, cx| {
+                            this.set_shortcut_mode(ShortcutMode::Toggle, cx)
+                        }),
+                        (700, |this, cx| {
+                            this.set_shortcut_mode(ShortcutMode::Hold, cx)
+                        }),
+                        (700, |this, cx| {
+                            this.microphone_picker_open = true;
+                            cx.notify();
+                        }),
+                        (900, |this, cx| {
+                            this.microphone_picker_open = false;
+                            cx.notify();
+                        }),
+                        (700, |this, cx| {
+                            this.select_pane(Pane::History, cx);
+                            this.history_retention_open = true;
+                            cx.notify();
+                        }),
+                        (900, |this, cx| {
+                            this.history_retention_open = false;
+                            cx.notify();
+                        }),
+                    ];
+                    for (delay, step) in steps {
+                        Timer::after(Duration::from_millis(delay)).await;
+                        let _ = window.update(cx, step);
+                    }
+                    Timer::after(Duration::from_millis(600)).await;
+                    crate::motion::log_pane_summary("Settings", "choreography_done");
+                    crate::motion::log_pane_summary("History", "choreography_done");
                 }
                 "panes" => {
                     Timer::after(Duration::from_millis(600)).await;
@@ -2621,10 +2660,10 @@ impl AppWindow {
             .flex_col()
             .child(pane_header_with_action(tr("History"), Some(header_action)))
             .child(
-                pane_body().child(
-                    pane_content()
-                        .flex_row()
-                        .gap_5()
+                split_body().child(
+                    div()
+                        .size_full()
+                        .flex()
                         .child(pane_list(
                             "history-list",
                             PANE_LIST_WIDTH,
@@ -2677,9 +2716,7 @@ impl AppWindow {
         let section = |label: &'static str, first: bool| {
             div()
                 .w_full()
-                .when(!first, |section| {
-                    section.mt_5().pt_5().border_t_1().border_color(rgb(LINE))
-                })
+                .when(!first, |section| section.mt_5().pt_5().hairline_t())
                 .child(section_label(label))
         };
         div()
@@ -2732,8 +2769,7 @@ impl AppWindow {
                             .mt_5()
                             .flex()
                             .flex_col()
-                            .border_t_1()
-                            .border_color(rgb(LINE))
+                            .hairline_t()
                             .when_some(entry.application.clone(), |rows, application| {
                                 rows.child(detail_row(tr("Application"), application))
                             })
@@ -2756,7 +2792,8 @@ impl AppWindow {
             .into_any_element()
     }
 
-    fn render_navigation(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_navigation(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let window_active = window.is_window_active();
         let meetings_available = self.settings.meetings.available();
         let fun_available =
             self.settings.experimental.hex_microphone_available() || self.pane == Pane::Fun;
@@ -2769,7 +2806,9 @@ impl AppWindow {
                 || sidebar.fun_available != fun_available
                 || sidebar.update_available != update_available
                 || sidebar.preview != preview
+                || sidebar.window_active != window_active
             {
+                sidebar.window_active = window_active;
                 sidebar.pane = pane;
                 sidebar.meetings_available = meetings_available;
                 sidebar.fun_available = fun_available;
@@ -2811,7 +2850,6 @@ impl AppWindow {
                 if active == kind
         );
         let control_width = hotkey_control_width(this_capture, idle_width, animated_control_width);
-        let capture_active = !matches!(self.hotkey_capture, HotkeyCaptureState::Idle);
         let control_intensity = hotkey_control_intensity(this_capture, intensity);
         let capture_color = if matches!(
             self.hotkey_capture,
@@ -2941,9 +2979,6 @@ impl AppWindow {
                 capture_color,
                 control_intensity * (0.55 + pulse * 0.15),
             ))
-            .when(!capture_active, |control| {
-                control.hover(|control| control.bg(rgb(SURFACE_HOVER)))
-            })
             .child(content)
             .on_click(cx.listener(move |this, _, window, cx| {
                 if this.hotkey_capture.is_listening() && this_capture {
@@ -3218,9 +3253,7 @@ impl AppWindow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when(index + 1 < replacement_count, |row| {
-                        row.border_b_1().border_color(rgb(LINE))
-                    })
+                    .when(index + 1 < replacement_count, |row| row.hairline_b())
                     .child(
                         div()
                             .flex_1()
@@ -3266,7 +3299,7 @@ impl AppWindow {
             .into_any_element();
 
         panel()
-            .child(panel_header(tr("Corrections"), Some(add)))
+            .child(panel_header(tr("Corrections"), Some(add)).px_4())
             .when(replacement_count == 0, |panel| {
                 panel.child(
                     div()
@@ -3881,8 +3914,7 @@ impl AppWindow {
                 .items_center()
                 .justify_between()
                 .gap_4()
-                .border_b_1()
-                .border_color(rgb(LINE))
+                .hairline_b()
                 .bg(rgb(CANVAS))
                 .child(
                     div().flex_1().min_w_0().child(settings_copy(
@@ -4243,7 +4275,6 @@ impl AppWindow {
                             .id("settings-hex-mic-comfort-noise")
                             .flex()
                             .items_center()
-                            .cursor_pointer()
                             .child(toggle(comfort_position))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let next =
@@ -4491,45 +4522,40 @@ impl AppWindow {
                     .id(id)
                     .w(px(TRACK_WIDTH))
                     .h(px(22.0))
-                    .px(px(6.0))
+                    .px(px(8.0))
                     .relative()
                     .flex()
                     .items_center()
-                    .rounded(RADIUS_CONTROL)
-                    .bg(rgb(CANVAS))
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .cursor_pointer()
                     .child(
                         div()
                             .w_full()
                             .h(px(4.0))
                             .relative()
                             .rounded(RADIUS_KNOB)
-                            .bg(rgb(LINE_STRONG))
+                            .bg(rgb(FILL_STRONG))
                             .child(
                                 div()
                                     .w(gpui::relative(value))
                                     .h_full()
                                     .rounded(RADIUS_KNOB)
-                                    .bg(rgb(ACCENT)),
+                                    .bg(rgb(accent())),
                             )
                             .child(
                                 div()
                                     .absolute()
-                                    .top(px(-4.0))
-                                    .left(px(((TRACK_WIDTH - 12.0) * value - 6.0)
-                                        .clamp(0.0, TRACK_WIDTH - 24.0)))
-                                    .size(px(12.0))
+                                    .top(px(-6.0))
+                                    .left(px((TRACK_WIDTH - 16.0) * value - 8.0))
+                                    .size(px(16.0))
                                     .rounded_full()
-                                    .bg(rgb(TEXT_PRIMARY)),
+                                    .bg(rgb(KNOB))
+                                    .knob_shadow(),
                             ),
                     )
                     .child(
                         div()
                             .absolute()
                             .inset_0()
-                            .px(px(6.0))
+                            .px(px(8.0))
                             .flex()
                             .children((0..=40).map(|step| {
                                 let norm = (step as f32) / 40.0;
@@ -4959,7 +4985,6 @@ impl AppWindow {
                 .id("fun-comfort-noise-toggle")
                 .flex()
                 .items_center()
-                .cursor_pointer()
                 .child(toggle(comfort_position))
                 .on_click(cx.listener(|this, _, _, cx| {
                     let next = !this.settings.experimental.hex_microphone_comfort_noise;
@@ -5103,8 +5128,7 @@ impl AppWindow {
                                 .py_3()
                                 .flex()
                                 .flex_col()
-                                .border_b_1()
-                                .border_color(rgb(LINE))
+                                .hairline_b()
                                 .child(
                                     div()
                                         .flex()
@@ -5737,10 +5761,10 @@ impl AppWindow {
                 Some(add.into_any_element()),
             ))
             .child(
-                pane_body().child(
-                    pane_content()
-                        .flex_row()
-                        .gap_5()
+                split_body().child(
+                    div()
+                        .size_full()
+                        .flex()
                         .child(pane_list(
                             "modes-list",
                             PANE_LIST_WIDTH_COMPACT,
@@ -5763,7 +5787,7 @@ impl AppWindow {
         let menu_progress = window.spring_when(
             "mode-context-menu",
             self.mode_context_menu.is_some(),
-            SPRING_SETTLE,
+            SPRING_SNAP,
         );
         let position = self.mode_context_menu?;
         Some(
@@ -5839,8 +5863,7 @@ impl AppWindow {
                         .items_center()
                         .justify_between()
                         .gap_4()
-                        .border_b_1()
-                        .border_color(rgb(LINE))
+                        .hairline_b()
                         .child(
                             div()
                                 .text_body()
@@ -5853,7 +5876,7 @@ impl AppWindow {
                     panel.child(
                         div()
                             .when(platform::WEB_PAGES_DESCRIPTION.is_some(), |row| {
-                                row.border_b_1().border_color(rgb(LINE))
+                                row.hairline_b()
                             })
                             .child(picker),
                     )
@@ -5929,8 +5952,7 @@ impl AppWindow {
                 .items_start()
                 .justify_between()
                 .gap_4()
-                .border_t_1()
-                .border_color(rgb(LINE))
+                .hairline_t()
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -5959,10 +5981,12 @@ impl AppWindow {
         });
         let processing = panel()
             .child(
-                panel_header(tr("OpenCode transformation"), Some(processing_toggle)).when(
-                    !processing_enabled && processing_unavailable.is_none(),
-                    |header| header.border_b_0(),
-                ),
+                panel_header(tr("OpenCode transformation"), Some(processing_toggle))
+                    .px_4()
+                    .when(
+                        !processing_enabled && processing_unavailable.is_none(),
+                        |header| header.border_b_0(),
+                    ),
             )
             .when_some(processing_settings, |panel, settings| {
                 panel.child(div().px_4().pb_4().child(settings))
@@ -6076,9 +6100,7 @@ impl AppWindow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when(target_index + 1 < selected.len(), |row| {
-                        row.border_b_1().border_color(rgb(LINE))
-                    })
+                    .when(target_index + 1 < selected.len(), |row| row.hairline_b())
                     .can_drop(move |value, _, _| {
                         value
                             .downcast_ref::<TransformationDrag>()
@@ -6148,9 +6170,7 @@ impl AppWindow {
                         .items_center()
                         .justify_between()
                         .gap_3()
-                        .border_t_1()
-                        .border_color(rgb(LINE))
-                        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
+                        .hairline_t()
                         .child(
                             div()
                                 .flex_1()
@@ -6205,7 +6225,7 @@ impl AppWindow {
             .then(|| self.render_transformation_workspace(cx))
             .flatten();
         panel()
-            .child(panel_header(tr("Transformations"), add).when(
+            .child(panel_header(tr("Transformations"), add).px_4().when(
                 selected.is_empty() && !self.transformation_picker_open && workspace.is_none(),
                 |header| header.border_b_0(),
             ))
@@ -6220,8 +6240,7 @@ impl AppWindow {
                         .when(available_empty, |list| {
                             list.child(
                                 div()
-                                    .border_t_1()
-                                    .border_color(rgb(LINE))
+                                    .hairline_t()
                                     .px_4()
                                     .py_3()
                                     .text_footnote()
@@ -6288,8 +6307,7 @@ impl AppWindow {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .border_t_1()
-                .border_color(rgb(LINE))
+                .hairline_t()
                 .child(
                     div()
                         .flex_1()
@@ -6428,10 +6446,8 @@ impl AppWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .rounded(RADIUS_CONTROL)
-                .border_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(CANVAS))
+                .rounded(RADIUS_PANEL)
+                .bg(rgb(FILL_QUIET))
                 .child(self.application_search.entity.clone())
                 .when_some(picker_status, |tray, status| {
                     tray.child(
@@ -7262,10 +7278,10 @@ impl AppWindow {
             .flex_col()
             .child(pane_header_with_action(tr("Activity"), Some(header_action)))
             .child(
-                pane_body().child(
-                    pane_content()
-                        .flex_row()
-                        .gap_5()
+                split_body().child(
+                    div()
+                        .size_full()
+                        .flex()
                         .child(pane_list(
                             "activity-list",
                             PANE_LIST_WIDTH,
@@ -7308,8 +7324,7 @@ impl AppWindow {
                 div()
                     .mt_6()
                     .pt_5()
-                    .border_t_1()
-                    .border_color(rgb(LINE))
+                    .hairline_t()
                     .child(section_label("Raw event"))
                     .child(
                         div()
@@ -7460,15 +7475,9 @@ impl Render for AppWindow {
                 this.select_pane(Pane::History, cx);
                 window.activate_window();
             }))
-            .child(self.render_navigation(cx))
+            .child(self.render_navigation(window, cx))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
+                content_frame()
                     .children(platform::caption(window))
                     .children(model_notice)
                     .when_some(self.settings_load_error.clone(), |column, error| {
@@ -7480,7 +7489,7 @@ impl Render for AppWindow {
                                 .child(error_message(tr("Settings error:"), error)),
                         )
                     })
-                    .child(div().flex_1().min_h_0().child(content)),
+                    .child(div().flex_1().w_full().min_h_0().flex().child(content)),
             )
             .children(setup)
             .children(transcription_picker)
@@ -8424,7 +8433,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn meeting_turns_alternate_sides_inside_the_detail(cx: &mut gpui::TestAppContext) {
+    fn history_toolbar_spans_the_pane(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(history_fixture);
+        cx.simulate_resize(size(px(WINDOW_WIDTH), px(MINIMUM_HEIGHT)));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let header = cx.debug_bounds("pane-header").expect("header");
+        let value = cx.debug_bounds("detail-row-value").expect("detail row");
+        assert!(header.right() >= value.right(), "{header:?} vs {value:?}");
+    }
+
+    #[gpui::test]
+    fn meeting_turns_share_one_text_column_inside_the_detail(cx: &mut gpui::TestAppContext) {
         let (_, cx) = cx.add_window_view(meetings_fixture);
         for width in [MINIMUM_WIDTH, WINDOW_WIDTH, 1400.0] {
             cx.simulate_resize(size(px(width), px(MINIMUM_HEIGHT)));
@@ -8440,12 +8460,9 @@ mod tests {
                     "{width}: {bounds:?} outside {detail:?}"
                 );
             }
-            assert!(them.left() < you.left(), "{width}: Them sits left of You");
-            assert!(you.right() > them.right(), "{width}: You sits right");
-            assert!(
-                detail.right() - you.right() <= px(25.0),
-                "{width}: You is right-aligned"
-            );
+            // Speakers sit in a margin; every turn's words share one edge.
+            assert_eq!(them.left(), you.left(), "{width}: one text column");
+            assert!(them.left() - detail.left() > px(TRANSCRIPT_SPEAKER_WIDTH));
         }
     }
 
@@ -8910,13 +8927,11 @@ mod tests {
             let column = cx
                 .debug_bounds("settings-content")
                 .expect("content was rendered");
-            let available = width - SIDEBAR_WIDTH - 64.0;
+            let available = width - SIDEBAR_WIDTH - PANE_GUTTER * 2.0;
             let expected_width = available.min(PANE_CONTENT_WIDTH);
             assert_eq!(column.size.width, px(expected_width));
-            assert_eq!(
-                column.origin.x,
-                px(SIDEBAR_WIDTH + 32.0 + (available - expected_width) / 2.0)
-            );
+            // Content keeps the gutter's leading edge, under the toolbar title.
+            assert_eq!(column.origin.x, px(SIDEBAR_WIDTH + PANE_GUTTER));
         }
     }
 
@@ -9075,19 +9090,23 @@ mod tests {
                     .flex_col()
                     .child(
                         div()
-                            .relative()
                             .w(px(220.0))
-                            .child(disclosure_button("Automatic").id("anchor"))
-                            .child(deferred(microphone_picker_menu(
-                                vec![None, Some("Studio Microphone".into())],
-                                None,
-                                None,
-                                1.0,
-                                move |device, _, _| {
-                                    chosen.borrow_mut().chosen = Some(device.clone());
-                                },
-                                move |_, _, _| dismissed.borrow_mut().dismissed += 1,
-                            )))
+                            .child(
+                                // The menu drops from its trigger, as in Settings.
+                                div()
+                                    .relative()
+                                    .child(disclosure_button("Automatic").id("anchor"))
+                                    .child(deferred(microphone_picker_menu(
+                                        vec![None, Some("Studio Microphone".into())],
+                                        None,
+                                        None,
+                                        1.0,
+                                        move |device, _, _| {
+                                            chosen.borrow_mut().chosen = Some(device.clone());
+                                        },
+                                        move |_, _, _| dismissed.borrow_mut().dismissed += 1,
+                                    ))),
+                            )
                             .child(
                                 div()
                                     .id("beneath")

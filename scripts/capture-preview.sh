@@ -72,6 +72,8 @@ SWIFT
 )
 
 mkdir -p "$(dirname -- "$output")"
+# Let entrance animations (capsules slide in over 0.32 s) settle first.
+sleep "${HEX_PREVIEW_SETTLE_SECONDS:-0.6}"
 if ! screencapture -x -l "$window_id" "$output" 2>/dev/null; then
   cua_bin=$(command -v cua-driver 2>/dev/null || printf '%s/.local/bin/cua-driver' "$HOME")
   if [ -x "$cua_bin" ]; then

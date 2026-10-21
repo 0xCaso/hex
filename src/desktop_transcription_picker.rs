@@ -211,10 +211,6 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
             .border_1()
             .border_color(rgb(if active { ACCENT_BORDER } else { LINE }))
             .bg(rgb(if active { ACCENT_SURFACE } else { SURFACE }))
-            .when(!active, |card| {
-                card.cursor_pointer()
-                    .hover(|card| card.bg(rgb(SURFACE_HOVER)))
-            })
             .child(
                 div()
                     .flex()
@@ -342,8 +338,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                         .flex()
                         .items_center()
                         .justify_between()
-                        .border_b_1()
-                        .border_color(rgb(LINE))
+                        .hairline_b()
                         .child(div().text_headline().child(tr("Local transcription")))
                         .child(
                             icon_button(ButtonKind::Ghost, Icon::Close)
@@ -369,8 +364,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                                 .gap_0p5()
                                 .overflow_y_scroll()
                                 .bg(rgb(SIDEBAR))
-                                .border_r_1()
-                                .border_color(rgb(LINE))
+                                .hairline_r()
                                 .children(language_rows),
                         )
                         .child(
@@ -417,7 +411,7 @@ fn model_state(label: impl IntoElement) -> gpui::Div {
         .flex_none()
         .items_center()
         .gap_2()
-        .child(status_dot(ACCENT))
+        .child(status_dot(accent()))
         .child(
             div()
                 .text_footnote()

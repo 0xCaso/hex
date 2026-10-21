@@ -129,6 +129,8 @@ pub fn open(
     )
 }
 
+pub(super) fn install_window_chrome(_: &Window) {}
+
 pub(super) fn window_options(options: WindowOptions) -> WindowOptions {
     WindowOptions {
         app_id: Some("com.kitlangton.Hex".into()),

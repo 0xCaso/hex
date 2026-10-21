@@ -13,6 +13,7 @@ use gpui::{Image, ImageFormat, img};
 use std::sync::Arc;
 
 use crate::design_tokens::*;
+use gpui::rgba;
 
 #[derive(Clone, Copy)]
 pub(crate) enum NavigationIcon {
@@ -36,7 +37,7 @@ impl NavigationIcon {
             Self::Modes => "square.grid.2x2",
             Self::VoiceAction => "sparkle",
             Self::Commands => "command",
-            Self::History => "clock",
+            Self::History => "clock.arrow.circlepath",
             Self::Meetings => "calendar",
             Self::Fun => "wand.and.stars",
             Self::Activity => "chart.bar",
@@ -62,15 +63,73 @@ impl NavigationIcon {
 
 #[cfg(target_os = "macos")]
 fn navigation_icon(icon: NavigationIcon, selected: bool) -> AnyElement {
-    gpui_symbols::Icon::new(icon.sf_symbol())
-        .size(px(ICON_SIZE))
-        .color(rgb(if selected {
+    sf_symbol(
+        icon.sf_symbol(),
+        ICON_SIZE,
+        if selected {
             TEXT_PRIMARY
         } else {
-            TEXT_TERTIARY
-        }))
-        .weight(gpui_symbols::SymbolWeight::Medium)
-        .rendering_mode(gpui_symbols::RenderingMode::Monochrome)
+            TEXT_SECONDARY
+        },
+    )
+}
+
+/// An SF Symbol rasterized by AppKit at medium weight.
+///
+/// AppKit draws into a premultiplied bitmap while GPUI's sprite pipeline
+/// expects straight alpha, so the coverage is divided back out here; without
+/// it antialiased strokes are multiplied by their alpha twice and thin glyphs
+/// all but vanish over translucent materials.
+#[cfg(target_os = "macos")]
+fn sf_symbol(name: &'static str, size: f32, color: u32) -> AnyElement {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    type Rendered = Option<(Arc<gpui::RenderImage>, u32, u32)>;
+    type Cache = Mutex<HashMap<(&'static str, u32, u32), Rendered>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+
+    let key = (name, size.to_bits(), color);
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let rendered = cache
+        .entry(key)
+        .or_insert_with(|| {
+            let (width, height, mut data) = gpui_symbols::SfSymbol::new(name)
+                .size(size)
+                .color(color)
+                .weight(gpui_symbols::SymbolWeight::Medium)
+                .rendering_mode(gpui_symbols::RenderingMode::Monochrome)
+                .render_rgba()?;
+            for pixel in data.as_chunks_mut::<4>().0 {
+                let alpha = pixel[3] as u32;
+                if alpha > 0 && alpha < 255 {
+                    for channel in &mut pixel[..3] {
+                        *channel = ((*channel as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
+                    }
+                }
+                pixel.swap(0, 2);
+            }
+            let frame = image::Frame::new(image::RgbaImage::from_raw(width, height, data)?);
+            Some((Arc::new(gpui::RenderImage::new(vec![frame])), width, height))
+        })
+        .clone();
+    drop(cache);
+
+    let Some((image, width, height)) = rendered else {
+        return gpui::Empty.into_any_element();
+    };
+    let aspect = width as f32 / height as f32;
+    let (display_width, display_height) = if aspect >= 1.0 {
+        (size, size / aspect)
+    } else {
+        (size * aspect, size)
+    };
+    gpui::img(gpui::ImageSource::Render(image))
+        .w(px(display_width))
+        .h(px(display_height))
         .into_any_element()
 }
 
@@ -81,7 +140,7 @@ fn navigation_icon(icon: NavigationIcon, selected: bool) -> AnyElement {
         if selected {
             TEXT_PRIMARY
         } else {
-            TEXT_TERTIARY
+            TEXT_SECONDARY
         }
     );
     let image = Image::from_bytes(
@@ -110,6 +169,10 @@ pub(crate) enum Icon {
     Accessibility,
     Waveform,
     Check,
+    UpDown,
+    Copy,
+    Stop,
+    Open,
 }
 
 impl Icon {
@@ -118,6 +181,8 @@ impl Icon {
     fn optical_size(self) -> f32 {
         match self {
             Self::Ellipsis
+            | Self::Copy
+            | Self::Open
             | Self::Microphone
             | Self::Keyboard
             | Self::Accessibility
@@ -141,6 +206,10 @@ impl Icon {
             Self::Accessibility => "accessibility",
             Self::Waveform => "waveform",
             Self::Check => "checkmark",
+            Self::UpDown => "chevron.up.chevron.down",
+            Self::Copy => "doc.on.doc",
+            Self::Stop => "stop.fill",
+            Self::Open => "arrow.up.forward.app",
         }
     }
 
@@ -159,6 +228,10 @@ impl Icon {
             Self::Accessibility => "◉",
             Self::Waveform => "≋",
             Self::Check => "✓",
+            Self::UpDown => "↕",
+            Self::Copy => "⧉",
+            Self::Stop => "■",
+            Self::Open => "↗",
         }
     }
 
@@ -177,6 +250,10 @@ impl Icon {
             Self::Accessibility => "\u{E776}",
             Self::Waveform => "\u{E8D6}",
             Self::Check => "\u{E73E}",
+            Self::UpDown => "\u{E8CB}",
+            Self::Copy => "\u{E8C8}",
+            Self::Stop => "\u{E71A}",
+            Self::Open => "\u{E8A7}",
         }
     }
 }
@@ -195,13 +272,7 @@ pub(crate) fn icon_at(icon: Icon, size: f32, color: u32) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            gpui_symbols::Icon::new(icon.sf_symbol())
-                .size(px(size))
-                .color(rgb(color))
-                .weight(gpui_symbols::SymbolWeight::Medium)
-                .rendering_mode(gpui_symbols::RenderingMode::Monochrome),
-        )
+        .child(sf_symbol(icon.sf_symbol(), size, color))
         .into_any_element()
 }
 
@@ -241,58 +312,75 @@ pub(crate) fn icon_at(icon: Icon, size: f32, color: u32) -> AnyElement {
         .into_any_element()
 }
 
-/// The window root: canvas background and the body type step every unsized
-/// descendant inherits.
+/// The window root and the body type step every unsized descendant inherits.
+/// On macOS it paints nothing: the sidebar's material shows through on the
+/// left and [`content_frame`] paints the window base on the right.
 pub(crate) fn window_frame() -> Div {
     div()
         .size_full()
         .relative()
         .overflow_hidden()
         .flex()
-        .bg(rgb(CANVAS))
+        .when(!cfg!(target_os = "macos"), |frame| frame.bg(rgb(CANVAS)))
         .text_body()
         .text_color(rgb(TEXT_PRIMARY))
 }
 
-/// The navigation column: [`SIDEBAR_WIDTH`] wide, clear of the title bar.
+/// The column right of the sidebar: the one opaque window surface.
+pub(crate) fn content_frame() -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .bg(rgb(CANVAS))
+}
+
+/// The navigation column: [`SIDEBAR_WIDTH`] wide, clear of the title bar. On
+/// macOS it is transparent over an `NSVisualEffectView` sidebar material.
 pub(crate) fn sidebar_frame() -> Div {
     div()
         .w(px(SIDEBAR_WIDTH))
         .h_full()
-        .px_3()
+        .px_2p5()
         .pt(px(TITLEBAR_INSET))
-        .pb_4()
+        .pb_3()
         .flex()
         .flex_col()
         .flex_none()
-        .bg(rgb(SIDEBAR))
-        .border_r_1()
-        .border_color(rgb(LINE))
+        .border_r(HAIRLINE)
+        .when(cfg!(target_os = "macos"), |sidebar| {
+            sidebar.border_color(rgba(SIDEBAR_EDGE))
+        })
+        .when(!cfg!(target_os = "macos"), |sidebar| {
+            sidebar.bg(rgb(SIDEBAR)).border_color(rgb(LINE))
+        })
 }
 
-pub(crate) fn navigation_item(icon: NavigationIcon, selected: bool) -> Div {
+/// A sidebar row. Selection is instant and rows never highlight on hover;
+/// the selected row dims while the window is inactive, as AppKit's does.
+pub(crate) fn navigation_item(icon: NavigationIcon, selected: bool, window_active: bool) -> Div {
+    let selection = if cfg!(target_os = "macos") {
+        rgba(if window_active {
+            SIDEBAR_SELECTED
+        } else {
+            SIDEBAR_SELECTED_INACTIVE
+        })
+    } else {
+        rgb(SURFACE_SELECTED)
+    };
     div()
         .h(px(NAV_ITEM_HEIGHT))
-        .px_3()
+        .px_2()
         .flex()
         .items_center()
         .gap_2()
         .rounded(RADIUS_CONTROL)
         .text_body()
-        .font_weight(if selected {
-            FontWeight::MEDIUM
-        } else {
-            FontWeight::NORMAL
-        })
-        .text_color(rgb(if selected {
-            TEXT_PRIMARY
-        } else {
-            TEXT_TERTIARY
-        }))
-        .when(selected, |item| item.bg(rgb(SURFACE_SELECTED)))
-        .when(!selected, |item| {
-            item.hover(|item| item.bg(rgb(SIDEBAR_HOVER)).text_color(rgb(TEXT_SECONDARY)))
-        })
+        .text_color(rgb(TEXT_PRIMARY))
+        .when(selected, |item| item.bg(selection))
         .child(
             div()
                 .size(px(ICON_SIZE + 4.0))
@@ -308,52 +396,38 @@ pub(crate) fn pane_header(title: &'static str) -> AnyElement {
     pane_header_with_action(title, None)
 }
 
-/// The one pane header: title left, optional action right, inset by
-/// [`PANE_GUTTER`] and bounded to [`PANE_CONTENT_WIDTH`] like the body below.
+/// The toolbar row: title left, optional controls right, level with the
+/// traffic lights and ruled off across the full content width.
 pub(crate) fn pane_header_with_action(
     title: &'static str,
     action: Option<AnyElement>,
 ) -> AnyElement {
     div()
         .h(px(PANE_HEADER_HEIGHT))
-        .px(px(PANE_GUTTER))
+        .w_full()
+        .pl(px(PANE_GUTTER))
+        .pr_4()
         .flex_none()
         .flex()
-        .justify_center()
-        .child(
-            div()
-                .h_full()
-                .w_full()
-                .max_w(px(PANE_CONTENT_WIDTH))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_4()
-                .border_b_1()
-                .border_color(rgb(LINE))
-                .child(div().flex_none().text_title().child(title))
-                .when_some(action, |header, action| {
-                    header.child(div().flex().items_center().gap_2().child(action))
-                }),
-        )
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .hairline_b()
+        .debug_selector(|| "pane-header".into())
+        .child(div().flex_none().text_headline().child(title))
+        .when_some(action, |header, action| {
+            header.child(div().flex().items_center().gap_2().child(action))
+        })
         .into_any_element()
 }
 
-/// The one fixed pane body under the header, inset by [`PANE_GUTTER`] so
-/// its cards align with the header rule. Put the column in [`pane_content`].
-pub(crate) fn pane_body() -> Div {
-    div()
-        .flex_1()
-        .min_h(px(0.0))
-        .overflow_hidden()
-        .flex()
-        .justify_center()
-        .px(px(PANE_GUTTER))
-        .pt_5()
-        .pb_6()
+/// A list+detail body: the [`pane_list`] and [`pane_detail`] fill the pane
+/// edge to edge, divided by one hairline.
+pub(crate) fn split_body() -> Div {
+    div().flex_1().min_h(px(0.0)).overflow_hidden().flex()
 }
 
-/// The scrolling pane body: the scrollbar sits at the window edge while the
+/// The scrolling pane body: the scroller sits at the window edge while the
 /// content keeps the [`PANE_GUTTER`] inset and [`PANE_CONTENT_WIDTH`].
 pub(crate) fn pane_scroll_body(id: impl Into<ElementId>, content: Div) -> Stateful<Div> {
     div()
@@ -362,14 +436,9 @@ pub(crate) fn pane_scroll_body(id: impl Into<ElementId>, content: Div) -> Statef
         .min_h(px(0.0))
         .overflow_y_scroll()
         .px(px(PANE_GUTTER))
+        .pt_2()
         .pb_6()
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .justify_center()
-                .child(content.w_full().max_w(px(PANE_CONTENT_WIDTH)).min_w_0()),
-        )
+        .child(content.w_full().max_w(px(PANE_CONTENT_WIDTH)).min_w_0())
 }
 
 /// The one pane content column, bounded to [`PANE_CONTENT_WIDTH`].
@@ -382,10 +451,10 @@ pub(crate) fn pane_content() -> Div {
         .flex_col()
 }
 
-/// The list column of a list+detail pane: a scrolling card `width` wide
-/// ([`PANE_LIST_WIDTH`], or [`PANE_LIST_WIDTH_COMPACT`] beside an editor) with
-/// its empty notice and load error ahead of its rows. Callers decide when
-/// `empty` applies.
+/// The list column of a list+detail pane: a scrolling column `width` wide
+/// ([`PANE_LIST_WIDTH`], or [`PANE_LIST_WIDTH_COMPACT`] beside an editor),
+/// ruled off from the detail by one hairline, with its empty notice and load
+/// error ahead of its rows. Callers decide when `empty` applies.
 pub(crate) fn pane_list(
     id: impl Into<ElementId>,
     width: f32,
@@ -394,11 +463,13 @@ pub(crate) fn pane_list(
     error: Option<String>,
     rows: Vec<AnyElement>,
 ) -> Stateful<Div> {
-    panel()
+    div()
         .id(id)
         .w(px(width))
         .h_full()
         .flex_none()
+        .relative()
+        .hairline_r()
         .overflow_y_scroll()
         .when_some(empty, |list, message| {
             list.flex().flex_col().child(detail_placeholder(message))
@@ -407,64 +478,59 @@ pub(crate) fn pane_list(
             list.child(error_message(error_title, error))
         })
         .when(!rows.is_empty(), |list| {
-            // A scrolling card gives its content no definite width, which
+            // A scrolling column gives its content no definite width, which
             // truncated rows need, so the column states its own.
             list.child(
                 div()
-                    .w(px(width - 2.0))
-                    .p_2()
+                    .w(px(width - 1.0))
+                    .px_2p5()
+                    .py_2()
                     .flex()
                     .flex_col()
-                    .gap_1()
                     .children(rows),
             )
         })
 }
 
-/// The detail card beside a [`pane_list`], filling the remaining width.
+/// The detail column beside a [`pane_list`], filling the remaining width.
 pub(crate) fn pane_detail(content: impl IntoElement) -> Div {
-    panel()
+    div()
         .flex_1()
         .min_w(px(0.0))
         .h_full()
+        .relative()
         .flex()
         .flex_col()
         .child(content)
 }
 
 /// A [`section_label`] heading a group of rows in a [`pane_list`], inset to
-/// the row text. The first group sits closer to the top of the card.
+/// the row text.
 pub(crate) fn list_section_label(label: impl IntoElement, first: bool) -> Div {
     section_label(label)
-        .px_3()
-        .when(first, |label| label.pt_1())
+        .px_2p5()
+        .when(first, |label| label.pt_2())
         .when(!first, |label| label.pt_3())
         .pb_1()
 }
 
-/// A rounded, selectable row inside a list column.
+/// A rounded, selectable row inside a list column. Selection is instant and
+/// rows never highlight on hover.
 pub(crate) fn list_row(selected: bool) -> Div {
     div()
         .w_full()
-        .px_3()
+        .px_2p5()
         .py_2()
         .flex()
         .flex_col()
-        .gap_1()
+        .gap_0p5()
         .rounded(RADIUS_CONTROL)
         .when(selected, |row| row.bg(rgb(SURFACE_SELECTED)))
-        .when(!selected, |row| row.hover(|row| row.bg(rgb(SURFACE_HOVER))))
 }
 
 /// The title line of a [`list_row`].
-pub(crate) fn list_row_title(text: impl Into<SharedString>, selected: bool) -> Div {
-    truncated_line(BODY, text)
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(if selected {
-            TEXT_PRIMARY
-        } else {
-            TEXT_SECONDARY
-        }))
+pub(crate) fn list_row_title(text: impl Into<SharedString>, _selected: bool) -> Div {
+    truncated_line(BODY, text).text_color(rgb(TEXT_PRIMARY))
 }
 
 /// The metadata line of a [`list_row`].
@@ -515,29 +581,21 @@ fn fit_line(text: SharedString, width: Pixels, window: &mut Window, cx: &mut App
         .shape_line(text, font_size, &runs, None)
 }
 
-/// A card: the elevated surface every grouped control and list sits on.
+/// A group of rows. Quiet native draws no box around it: rows carry their
+/// own hairlines and the group sits on the window surface.
 pub(crate) fn panel() -> Div {
-    div()
-        .w_full()
-        .relative()
-        .rounded(RADIUS_PANEL)
-        .border_1()
-        .border_color(rgb(LINE))
-        .bg(rgb(SURFACE))
-        .overflow_hidden()
+    div().w_full().relative()
 }
 
 /// A card's title bar, with an optional trailing control.
 pub(crate) fn panel_header(title: impl IntoElement, action: Option<AnyElement>) -> Div {
     div()
         .h(px(PANEL_HEADER_HEIGHT))
-        .px_4()
         .flex_none()
         .flex()
         .items_center()
         .justify_between()
-        .border_b_1()
-        .border_color(rgb(LINE))
+        .hairline_b()
         .child(
             div()
                 .text_body()
@@ -556,15 +614,20 @@ pub(crate) fn section_label(label: impl IntoElement) -> Div {
         .child(label)
 }
 
-/// A [`section_label`] spaced to head a settings card, inset to the card's
-/// row text so both share one left edge.
+/// The title above a group of settings rows: body, semibold, primary.
 pub(crate) fn settings_section_label(label: &'static str) -> AnyElement {
-    section_label(label).pt_6().pb_2().px_4().into_any_element()
+    div()
+        .pt_6()
+        .pb_1()
+        .text_body()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(label)
+        .into_any_element()
 }
 
-/// The fixed top of a detail card: a [`detail_title`], an optional metadata
-/// line, and an optional action row, ruled off edge to edge from the
-/// [`detail_body`] below.
+/// The fixed top of a detail column: a [`detail_title`] with its actions on
+/// the same line, then an optional metadata line. No rule below it; content
+/// fades in under it.
 pub(crate) fn detail_header(
     title: impl IntoElement,
     meta: Vec<AnyElement>,
@@ -572,33 +635,40 @@ pub(crate) fn detail_header(
 ) -> Div {
     div()
         .flex_none()
-        .px_6()
+        .px(px(PANE_GUTTER))
         .pt_5()
         .pb_4()
         .flex()
-        .flex_col()
-        .gap_2()
-        .border_b_1()
-        .border_color(rgb(LINE))
-        .child(title)
-        .when(!meta.is_empty(), |header| {
-            header.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_footnote()
-                    .text_color(rgb(TEXT_TERTIARY))
-                    .children(meta),
-            )
-        })
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(title)
+                .when(!meta.is_empty(), |header| {
+                    header.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_body()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .children(meta),
+                    )
+                }),
+        )
         .when(!actions.is_empty(), |header| {
             header.child(
                 div()
                     .debug_selector(|| "detail-actions".into())
-                    .pt_2()
+                    .flex_none()
                     .flex()
                     .flex_wrap()
+                    .justify_end()
                     .items_center()
                     .gap_2()
                     .children(actions),
@@ -608,7 +678,7 @@ pub(crate) fn detail_header(
 
 /// The title of a [`detail_header`].
 pub(crate) fn detail_title(text: impl Into<SharedString>) -> Div {
-    div().text_headline().child(text.into())
+    div().text_title().child(text.into())
 }
 
 /// The scrolling content under a [`detail_header`]. It stays a block: a flex
@@ -619,8 +689,8 @@ pub(crate) fn detail_body(id: impl Into<ElementId>) -> Stateful<Div> {
         .flex_1()
         .min_h(px(0.0))
         .overflow_y_scroll()
-        .px_6()
-        .pt_5()
+        .px(px(PANE_GUTTER))
+        .pt_1()
         .pb_6()
 }
 
@@ -630,12 +700,7 @@ pub(crate) fn settings_copy(title: &'static str, description: impl IntoElement) 
         .flex()
         .flex_col()
         .gap_0p5()
-        .child(
-            div()
-                .text_body()
-                .font_weight(FontWeight::MEDIUM)
-                .child(title),
-        )
+        .child(div().text_body().child(title))
         .child(
             div()
                 .text_footnote()
@@ -653,15 +718,13 @@ pub(crate) fn settings_row(
     div()
         .w_full()
         .min_h(px(SETTINGS_ROW_MIN_HEIGHT))
-        .px_4()
         .py_2()
         .flex()
         .flex_wrap()
         .items_center()
         .justify_between()
         .gap_4()
-        .border_b_1()
-        .border_color(rgb(LINE))
+        .hairline_b()
         .child(
             div()
                 .flex_1()
@@ -680,8 +743,7 @@ pub(crate) fn detail_row(label: &'static str, value: impl Into<String>) -> AnyEl
         .flex()
         .items_start()
         .gap_4()
-        .border_b_1()
-        .border_color(rgb(LINE))
+        .hairline_b()
         .child(
             div()
                 .w(px(92.0))
@@ -736,7 +798,7 @@ pub(crate) fn listener_status(
 /// A small filled circle that marks live or recorded state.
 pub(crate) fn status_dot(color: u32) -> Div {
     div()
-        .size(px(6.0))
+        .size(px(7.0))
         .flex_none()
         .rounded_full()
         .bg(rgb(color))
@@ -752,16 +814,16 @@ pub(crate) fn hotkey_keycaps(parts: Vec<String>, opacity: f32) -> AnyElement {
             let (side, label) = split_sided_keycap(&part);
             div()
                 .min_w(px(KEYCAP_WIDTH))
-                .h(px(CONTROL_HEIGHT_SMALL))
-                .px_2()
+                .h(px(CONTROL_HEIGHT))
+                .px(px(7.0))
                 .relative()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(RADIUS_SMALL)
-                .border_1()
-                .border_color(rgb(LINE_STRONG))
-                .bg(rgb(SURFACE_HOVER))
+                .rounded(RADIUS_CONTROL)
+                .border_b(px(1.0))
+                .border_color(rgba(KEYCAP_EDGE))
+                .bg(rgb(FILL))
                 .text_footnote()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(TEXT_PRIMARY))
@@ -802,8 +864,8 @@ pub(crate) fn hero_keycaps(parts: Vec<String>, pressed: f32) -> Div {
                 .rounded(RADIUS_PANEL)
                 .border_1()
                 .border_b(px(1.0 + HERO_KEYCAP_DEPTH * (1.0 - pressed)))
-                .border_color(mix_color(rgb(LINE_STRONG), rgb(ACCENT), pressed))
-                .bg(mix_color(rgb(SURFACE_HOVER), rgb(ACCENT_SURFACE), pressed))
+                .border_color(mix_color(rgb(LINE_STRONG), rgb(accent()), pressed))
+                .bg(mix_color(rgb(FILL), rgb(ACCENT_SURFACE), pressed))
                 .text_title()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(TEXT_PRIMARY))
@@ -816,9 +878,9 @@ pub(crate) fn progress_track(indicator: Div) -> Div {
     div()
         .flex_1()
         .h(px(PROGRESS_HEIGHT))
-        .rounded(RADIUS_KNOB)
-        .bg(rgb(CANVAS))
-        .child(indicator.h_full().rounded(RADIUS_KNOB).bg(rgb(ACCENT)))
+        .rounded_full()
+        .bg(rgb(FILL))
+        .child(indicator.h_full().rounded_full().bg(rgb(accent())))
 }
 
 /// Where a multi-step flow is: one dot per step, the current one stretched.
@@ -858,41 +920,41 @@ fn split_sided_keycap(part: &str) -> (Option<&'static str>, String) {
     }
 }
 
+/// The switch: a capsule track that fills with the accent colour and a round
+/// white thumb. `position` (0…1, springing) drives both.
 pub(crate) fn toggle(position: f32) -> AnyElement {
     let color_position = position.clamp(0.0, 1.0);
-    let knob = TOGGLE_HEIGHT - 4.0;
+    let inset = 1.0;
+    let knob = TOGGLE_HEIGHT - inset * 2.0;
+    let travel = TOGGLE_WIDTH - knob - inset * 2.0;
+    let offset = ((travel * position.clamp(-0.04, 1.04)) * 64.0).round() / 64.0;
     div()
         .w(px(TOGGLE_WIDTH))
         .h(px(TOGGLE_HEIGHT))
-        .p(px(2.0))
+        .p(px(inset))
         .flex_none()
         .flex()
         .items_center()
-        .rounded(RADIUS_SMALL)
-        .bg(mix_color(rgb(LINE_STRONG), rgb(ACCENT), color_position))
+        .rounded_full()
+        .bg(mix_color(rgb(FILL_STRONG), rgb(accent()), color_position))
         .child(
             div()
-                .ml(px(
-                    (TOGGLE_WIDTH - TOGGLE_HEIGHT) * position.clamp(-0.04, 1.04)
-                ))
+                .ml(px(offset))
                 .size(px(knob))
-                .rounded(RADIUS_KNOB)
-                .bg(mix_color(
-                    rgb(TEXT_SECONDARY),
-                    rgb(TEXT_PRIMARY),
-                    color_position,
-                )),
+                .rounded_full()
+                .bg(rgb(KNOB))
+                .knob_shadow(),
         )
         .into_any_element()
 }
 
-/// The four button roles. Text buttons are always bordered or filled; only
-/// icon buttons and menu items are borderless.
+/// The four button roles. Text buttons are always filled; only icon buttons
+/// and menu items are borderless. Nothing highlights on hover.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ButtonKind {
-    /// The one main action in a view: accent fill.
+    /// The one main action in a view: white fill, ink label.
     Primary,
-    /// Every other action: recessed canvas fill with a line border.
+    /// Every other action: the quiet control fill.
     Secondary,
     /// Borderless; for [`icon_button`]s inside cards and rows only.
     Ghost,
@@ -905,7 +967,7 @@ pub(crate) fn button(kind: ButtonKind, label: impl IntoElement) -> Div {
     button_frame(kind)
         .h(px(CONTROL_HEIGHT))
         .px_3()
-        .text_footnote()
+        .text_body()
         .child(label)
 }
 
@@ -914,13 +976,13 @@ pub(crate) fn small_button(kind: ButtonKind, label: impl IntoElement) -> Div {
     button_frame(kind)
         .h(px(CONTROL_HEIGHT_SMALL))
         .px_2()
-        .text_caption()
+        .text_footnote()
         .child(label)
 }
 
-/// A square [`CONTROL_HEIGHT`] button holding one [`Icon`]. Use
-/// [`ButtonKind::Ghost`] inside cards and rows, [`ButtonKind::Secondary`]
-/// where the icon stands alone, such as a pane header.
+/// A square, borderless button holding one [`Icon`], like a toolbar item.
+/// [`ButtonKind::Ghost`] is the quieter glyph inside rows;
+/// [`ButtonKind::Secondary`] stands alone, such as in a detail header.
 pub(crate) fn icon_button(kind: ButtonKind, glyph: Icon) -> Div {
     let color = match kind {
         ButtonKind::Ghost => TEXT_TERTIARY,
@@ -928,8 +990,8 @@ pub(crate) fn icon_button(kind: ButtonKind, glyph: Icon) -> Div {
         ButtonKind::Primary => TEXT_PRIMARY,
         ButtonKind::Danger => DANGER,
     };
-    button_frame(kind)
-        .size(px(CONTROL_HEIGHT))
+    button_frame(ButtonKind::Ghost)
+        .size(px(CONTROL_HEIGHT_LARGE))
         .justify_center()
         .child(icon(glyph, color))
 }
@@ -939,30 +1001,14 @@ fn button_frame(kind: ButtonKind) -> Div {
         .flex()
         .flex_none()
         .items_center()
-        .gap_2()
+        .gap_1p5()
         .rounded(RADIUS_CONTROL)
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer();
+        .font_weight(FontWeight::MEDIUM);
     match kind {
-        ButtonKind::Primary => frame
-            .bg(rgb(ACCENT))
-            .text_color(rgb(TEXT_PRIMARY))
-            .hover(|button| button.bg(mix_color(rgb(ACCENT), rgb(TEXT_PRIMARY), 0.12))),
-        ButtonKind::Secondary => frame
-            .border_1()
-            .border_color(rgb(LINE))
-            .bg(rgb(CANVAS))
-            .text_color(rgb(TEXT_SECONDARY))
-            .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_PRIMARY))),
-        ButtonKind::Ghost => frame
-            .text_color(rgb(TEXT_SECONDARY))
-            .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_PRIMARY))),
-        ButtonKind::Danger => frame
-            .border_1()
-            .border_color(rgb(DANGER_BORDER))
-            .bg(rgb(DANGER_SURFACE))
-            .text_color(rgb(DANGER))
-            .hover(|button| button.border_color(rgb(DANGER))),
+        ButtonKind::Primary => frame.bg(rgb(PRIMARY_FILL)).text_color(rgb(PRIMARY_INK)),
+        ButtonKind::Secondary => frame.bg(rgb(FILL)).text_color(rgb(TEXT_PRIMARY)),
+        ButtonKind::Ghost => frame.text_color(rgb(TEXT_SECONDARY)),
+        ButtonKind::Danger => frame.bg(rgb(DANGER_SURFACE)).text_color(rgb(DANGER)),
     }
 }
 
@@ -974,37 +1020,35 @@ pub(crate) fn busy_label(label: impl IntoElement) -> Div {
         .flex()
         .flex_none()
         .items_center()
-        .text_footnote()
+        .text_body()
         .text_color(rgb(TEXT_TERTIARY))
         .child(label)
 }
 
-/// A dropdown trigger: a secondary control with its value and a chevron.
+/// A pop-up button: the current value and an up-down chevron on the control
+/// fill.
 pub(crate) fn disclosure_button(label: impl Into<SharedString>) -> Div {
     disclosure_frame()
         .w(px(DISCLOSURE_WIDTH))
-        .child(truncated_line(FOOTNOTE, label).flex_1())
-        .child(icon(Icon::ChevronDown, TEXT_TERTIARY))
+        .child(truncated_line(BODY, label).flex_1())
+        .child(icon(Icon::UpDown, TEXT_SECONDARY))
 }
 
-/// The frame of a dropdown trigger for custom content; end it with an
-/// [`Icon::ChevronDown`].
+/// The frame of a pop-up button for custom content; end it with an
+/// [`Icon::UpDown`].
 pub(crate) fn disclosure_frame() -> Div {
     div()
         .h(px(CONTROL_HEIGHT))
-        .px_3()
+        .pl_2p5()
+        .pr_1p5()
         .flex()
         .flex_none()
         .items_center()
-        .gap_2()
+        .gap_1()
         .rounded(RADIUS_CONTROL)
-        .border_1()
-        .border_color(rgb(LINE))
-        .bg(rgb(CANVAS))
-        .text_footnote()
-        .text_color(rgb(TEXT_SECONDARY))
-        .cursor_pointer()
-        .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_PRIMARY)))
+        .bg(rgb(FILL))
+        .text_body()
+        .text_color(rgb(TEXT_PRIMARY))
 }
 
 /// The tone of a [`tag`].
@@ -1016,40 +1060,57 @@ pub(crate) enum Tone {
     Danger,
 }
 
-/// A non-interactive status label: tinted fill, no border, never clickable.
+/// A non-interactive status label: coloured caption text with no fill or
+/// border, so it never reads as a sticker or a button.
 pub(crate) fn tag(tone: Tone, label: impl IntoElement) -> Div {
-    let (text, fill) = match tone {
-        Tone::Neutral => (TEXT_SECONDARY, SURFACE_SELECTED),
-        Tone::Accent => (ACCENT_TEXT, ACCENT_SURFACE),
-        Tone::Success => (SUCCESS, SUCCESS_SURFACE),
-        Tone::Danger => (DANGER, DANGER_SURFACE),
+    let text = match tone {
+        Tone::Neutral => TEXT_SECONDARY,
+        Tone::Accent => ACCENT_TEXT,
+        Tone::Success => SUCCESS,
+        Tone::Danger => DANGER,
     };
     div()
         .h(px(TAG_HEIGHT))
-        .px(px(6.0))
         .flex()
         .flex_none()
         .items_center()
-        .gap_1()
-        .rounded(RADIUS_SMALL)
-        .bg(rgb(fill))
+        .gap_1p5()
         .text_caption()
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(text))
         .child(label)
 }
 
+/// A small count on a control, such as unread transcript turns.
+pub(crate) fn count_badge(count: usize) -> Div {
+    div()
+        .min_w(px(18.0))
+        .h(px(18.0))
+        .px(px(5.0))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgba(GLASS_FILL))
+        .text_caption()
+        .text_tabular()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(TEXT_PRIMARY))
+        .child(count.to_string())
+}
+
 /// A floating menu or popover surface. Callers position it.
 pub(crate) fn menu() -> Div {
     div()
-        .p_1()
+        .p(px(5.0))
         .flex()
         .flex_col()
         .rounded(RADIUS_PANEL)
-        .border_1()
+        .border(HAIRLINE)
         .border_color(rgb(LINE_STRONG))
         .bg(rgb(SURFACE))
-        .shadow_lg()
+        .floating_shadow()
         .occlude()
 }
 
@@ -1058,15 +1119,15 @@ pub(crate) fn menu_with_progress(progress: f32) -> Div {
     menu().opacity(progress.clamp(0.0, 1.0))
 }
 
-/// A [`menu`] that drops [`MENU_OFFSET`] below the [`CONTROL_HEIGHT`] control
-/// that opens it, with entrance progress (`0.0..=1.0`) fading and sliding
+/// A [`menu`] that drops [`MENU_OFFSET`] below the control that opens it, with entrance progress (`0.0..=1.0`) fading and sliding
 /// [`MENU_ENTER_OFFSET`] down from its trigger.
 pub(crate) fn dropdown_menu_with_progress(progress: f32) -> Div {
     let progress = progress.clamp(0.0, 1.0);
     let offset = ((1.0 - progress) * MENU_ENTER_OFFSET * 64.0).round() / 64.0;
     menu_with_progress(progress)
         .absolute()
-        .top(px(CONTROL_HEIGHT + MENU_OFFSET - offset))
+        .top(gpui::relative(1.0))
+        .mt(px(MENU_OFFSET - offset))
 }
 
 /// One choice inside a [`menu`].
@@ -1078,14 +1139,15 @@ pub(crate) fn menu_item(selected: bool) -> Div {
             TEXT_SECONDARY
         }))
         .when(selected, |item| item.bg(rgb(SURFACE_SELECTED)))
-        .hover(|item| item.bg(rgb(SURFACE_HOVER)))
+        // Menus are the one place macOS highlights under the pointer.
+        .hover(|item| item.bg(rgb(accent())).text_color(rgb(KNOB)))
 }
 
 /// A destructive choice: last in its [`menu`], after a [`menu_separator`].
 pub(crate) fn danger_menu_item() -> Div {
     menu_item_frame()
         .text_color(rgb(DANGER))
-        .hover(|item| item.bg(rgb(DANGER_SURFACE)))
+        .hover(|item| item.bg(rgb(accent())).text_color(rgb(KNOB)))
 }
 
 /// A choice that is temporarily unavailable, such as work in progress.
@@ -1095,7 +1157,12 @@ pub(crate) fn disabled_menu_item() -> Div {
 
 /// A rule between groups of [`menu`] choices.
 pub(crate) fn menu_separator() -> Div {
-    div().mx_2().my_1().h(px(1.0)).flex_none().bg(rgb(LINE))
+    div()
+        .mx_2()
+        .my_1()
+        .h(HAIRLINE)
+        .flex_none()
+        .bg(rgb(LINE_STRONG))
 }
 
 fn menu_item_frame() -> Div {
@@ -1108,8 +1175,8 @@ fn menu_item_frame() -> Div {
         .items_center()
         .justify_between()
         .gap_2()
-        .rounded(RADIUS_CONTROL)
-        .text_footnote()
+        .rounded(RADIUS_SMALL)
+        .text_body()
 }
 
 pub(crate) const SOUND_VOLUME_STEPS: [(&str, f32); 5] = [
@@ -1128,12 +1195,10 @@ pub(crate) fn segmented_control() -> Div {
         .flex()
         .items_center()
         .rounded(RADIUS_CONTROL)
-        .border_1()
-        .border_color(rgb(LINE))
-        .bg(rgb(CANVAS))
+        .bg(rgb(FILL_QUIET))
 }
 
-const SEGMENT_HEIGHT: f32 = CONTROL_HEIGHT - 6.0;
+const SEGMENT_HEIGHT: f32 = CONTROL_HEIGHT - 4.0;
 
 pub(crate) fn segmented_item(selected: bool) -> Div {
     div()
@@ -1142,21 +1207,13 @@ pub(crate) fn segmented_item(selected: bool) -> Div {
         .flex()
         .items_center()
         .rounded(RADIUS_SMALL)
-        .text_caption()
-        .font_weight(if selected {
-            FontWeight::MEDIUM
-        } else {
-            FontWeight::NORMAL
-        })
+        .text_footnote()
         .text_color(rgb(if selected {
             TEXT_PRIMARY
         } else {
-            TEXT_TERTIARY
+            TEXT_SECONDARY
         }))
         .when(selected, |item| item.bg(rgb(SURFACE_SELECTED)))
-        .when(!selected, |item| {
-            item.hover(|item| item.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_SECONDARY)))
-        })
 }
 
 /// A [`segmented_control`] whose selection indicator slides between items.
@@ -1196,9 +1253,8 @@ fn sliding_segmented_rect(left: f32, width: f32) -> Div {
             .w(px(width))
             .h(px(SEGMENT_HEIGHT))
             .rounded(RADIUS_SMALL)
-            .border_1()
-            .border_color(rgb(LINE_STRONG))
-            .bg(rgb(SURFACE_SELECTED)),
+            .bg(rgb(SURFACE_SELECTED))
+            .knob_shadow(),
     )
 }
 
@@ -1285,8 +1341,6 @@ pub(crate) fn error_panel(message: &'static str, error: String) -> Div {
     div()
         .w_full()
         .rounded(RADIUS_CONTROL)
-        .border_1()
-        .border_color(rgb(DANGER_BORDER))
         .bg(rgb(DANGER_SURFACE))
         .child(error_message(message, error))
 }
@@ -1294,7 +1348,6 @@ pub(crate) fn error_panel(message: &'static str, error: String) -> Div {
 /// A one-line inline error under a control or row.
 pub(crate) fn inline_error(error: impl IntoElement) -> Div {
     div()
-        .px_4()
         .py_2()
         .text_footnote()
         .text_color(rgb(DANGER))
@@ -1468,7 +1521,10 @@ mod layout_tests {
             )
             .into_any_element()
         });
-        assert!(width > 180.0 && width < PANE_LIST_WIDTH, "{width}");
+        assert!(
+            width > PANE_LIST_WIDTH / 2.0 && width < PANE_LIST_WIDTH,
+            "{width}"
+        );
     }
 
     #[gpui::test]

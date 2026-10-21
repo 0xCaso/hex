@@ -11,14 +11,16 @@ use color_eyre::eyre::{Result, eyre};
 use gpui::{
     App, Application, Bounds, ClipboardItem, Context, IntoElement, KeyBinding, Menu, MenuItem,
     Render, SystemMenuType, Timer, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
+    WindowKind, WindowOptions, div, point, prelude::*, px, rgb, rgba, size,
 };
 
 use crate::app_settings::{AppSettings, MeetingIndicatorCorner};
 use crate::app_window::AppWindow;
 use crate::context::ContextSnapshot;
 use crate::design_tokens::*;
-use crate::desktop_ui::{ButtonKind, Tone, button, small_button, status_dot, tag, truncated_line};
+use crate::desktop_ui::{
+    ButtonKind, Icon, button, count_badge, icon, icon_at, status_dot, truncated_line,
+};
 use crate::dictation_indicator::DictationIndicatorEvent;
 use crate::dictation_indicator::{self, DictationIndicatorUi};
 use crate::meeting::{self, MeetingRequest};
@@ -32,6 +34,10 @@ use crate::{config, recognition};
 
 const PANEL_WIDTH: f32 = MEETING_PANEL_WIDTH;
 const PANEL_HEIGHT: f32 = MEETING_PANEL_HEIGHT;
+/// Transparent room around a capsule inside its panel window.
+const CAPSULE_MARGIN: f32 = (MEETING_PANEL_HEIGHT - CAPSULE_HEIGHT) / 2.0;
+/// How far a capsule slides into place as it appears.
+const CAPSULE_ENTER_TRAVEL: f64 = 8.0;
 const WINDOW_MARGIN: f32 = 12.0;
 const OFFER_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -249,10 +255,32 @@ fn run_panel_preview(preview: PanelPreview) -> Result<()> {
         )]);
         cx.on_action(|_: &crate::app_window::QuitApplication, cx| cx.quit());
         let deadline = matches!(preview, PanelPreview::Offer).then_some(OFFER_TIMEOUT * 30);
-        if let Err(error) = open_panel(kind, commands, deadline, cx) {
-            tracing::error!(%error, "could not open meeting panel preview");
-            cx.quit();
-        }
+        // Motion captures open the capsule once the app has settled, and can
+        // dismiss it, so both transitions are recorded in full.
+        let millis = |name| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+        };
+        let delay = millis("HEX_PREVIEW_PANEL_DELAY_MS").unwrap_or(0);
+        let dismiss = millis("HEX_PREVIEW_PANEL_DISMISS_MS");
+        cx.spawn(async move |cx| {
+            Timer::after(Duration::from_millis(delay)).await;
+            let opened = cx.update(|cx| open_panel(kind, commands, deadline, cx));
+            let handle = match opened {
+                Ok(Ok(handle)) => handle,
+                _ => {
+                    tracing::error!("could not open meeting panel preview");
+                    let _ = cx.update(|cx| cx.quit());
+                    return;
+                }
+            };
+            if let Some(dismiss) = dismiss {
+                Timer::after(Duration::from_millis(dismiss)).await;
+                let _ = handle.update(cx, |_, window, cx| dismiss_panel(window, cx));
+            }
+        })
+        .detach();
     });
     Ok(())
 }
@@ -1470,7 +1498,7 @@ fn appkit_corner_origin(
 /// Opens a focus-free capsule. A timed panel closes itself; an expired offer
 /// is simply dismissed, and nothing starts or stops on a timeout.
 fn open_panel(
-    mut kind: PanelKind,
+    kind: PanelKind,
     commands: SyncSender<ControllerCommand>,
     timeout: Option<Duration>,
     cx: &mut App,
@@ -1496,11 +1524,10 @@ fn open_panel(
         }),
         _ => None,
     };
-    if let PanelKind::Recording(state) = &mut kind
-        && state.hovered
-    {
-        // Pre-seed the spring in expanded previews so the first frame is settled.
-    }
+    let kind_corner = match &kind {
+        PanelKind::Recording(state) => Some(state.corner),
+        _ => None,
+    };
     let handle = cx.open_window(options, |window, cx| {
         if let PanelKind::Recording(state) = &kind {
             let target = if state.hovered || state.force_expanded {
@@ -1510,12 +1537,31 @@ fn open_panel(
             };
             let _ = window.spring("recording-capsule-width", target, SPRING_INSTANT);
         }
+        let glass = match &kind {
+            // The recording pill's glass follows its sprung width each frame.
+            PanelKind::Recording(_) => {
+                crate::window_material::install_capsule_glass(window, (0.0, 0.0), (0.0, 0.0))
+            }
+            _ => crate::window_material::install_capsule_glass(
+                window,
+                (CAPSULE_MARGIN, CAPSULE_MARGIN),
+                (PANEL_WIDTH - CAPSULE_MARGIN * 2.0, CAPSULE_HEIGHT),
+            ),
+        };
         cx.new(|_| MeetingPanel {
             kind,
             commands,
             copied: false,
+            glass,
         })
     })?;
+    let travel = match &kind_corner {
+        Some(corner) if !corner.is_top() => -CAPSULE_ENTER_TRAVEL,
+        _ => CAPSULE_ENTER_TRAVEL,
+    };
+    let _ = handle.update(cx, |_, window, _| {
+        crate::window_material::animate_panel_in(window, travel);
+    });
     if let Some(width) = recording_width {
         let ns_window = bind_recording_ns_window(width);
         let _ = handle.update(cx, |panel, _, _| {
@@ -1527,7 +1573,7 @@ fn open_panel(
     if let Some(timeout) = timeout {
         cx.spawn(async move |cx| {
             Timer::after(timeout).await;
-            let _ = handle.update(cx, |panel, window, _| {
+            let _ = handle.update(cx, |panel, window, cx| {
                 if let PanelKind::Offer(candidate) = &panel.kind {
                     tracing::info!(
                         source = candidate.source.label(),
@@ -1535,7 +1581,7 @@ fn open_panel(
                         "meeting recording offer timed out"
                     );
                 }
-                window.remove_window();
+                dismiss_panel(window, cx);
             });
         })
         .detach();
@@ -1666,6 +1712,25 @@ struct MeetingPanel {
     kind: PanelKind,
     commands: SyncSender<ControllerCommand>,
     copied: bool,
+    /// The HUD material behind the capsule.
+    glass: Option<objc2::rc::Retained<objc2_app_kit::NSVisualEffectView>>,
+}
+
+/// Fades a capsule out, then closes its window.
+fn dismiss_panel(window: &mut Window, cx: &mut App) {
+    if !crate::window_material::animate_panel_out(window) {
+        window.remove_window();
+        return;
+    }
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        Timer::after(Duration::from_secs_f64(
+            crate::window_material::PANEL_EXIT_SECONDS,
+        ))
+        .await;
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    })
+    .detach();
 }
 
 impl MeetingPanel {
@@ -1868,15 +1933,34 @@ impl MeetingPanel {
             RECORDING_COMPACT_WIDTH
         };
         let animated_width = window.spring("recording-capsule-width", target_width, SPRING_SNAP);
+        let margin = (RECORDING_PANEL_HEIGHT - RECORDING_PILL_HEIGHT) / 2.0;
         let pill_width = if state.preview && !state.force_expanded {
-            RECORDING_COMPACT_WIDTH - 8.0
+            RECORDING_COMPACT_WIDTH - margin * 2.0
         } else {
-            (animated_width - 8.0).max(RECORDING_COMPACT_WIDTH - 8.0)
+            (animated_width - margin * 2.0).max(RECORDING_COMPACT_WIDTH - margin * 2.0)
         };
-        let pulse = if state.preview || crate::motion::reduced_motion() {
+        let align_right = state.corner.is_right();
+        let window_width = f32::from(window.viewport_size().width);
+        let pill_left = if align_right {
+            window_width - margin - pill_width
+        } else {
+            margin
+        };
+        let (pill_left, pill_right) =
+            crate::motion::snap_edge_pair(pill_left, pill_left + pill_width);
+        if let Some(glass) = &self.glass {
+            crate::window_material::set_capsule_glass_frame(
+                glass,
+                (pill_left, margin),
+                (pill_right - pill_left, RECORDING_PILL_HEIGHT),
+            );
+        }
+        // The recording dot breathes on a 1.6 s opacity cycle, never scale.
+        let breathe = if state.preview || crate::motion::reduced_motion() {
             1.0
         } else {
-            0.725 + 0.275 * (state.started.elapsed().as_secs_f32() * std::f32::consts::PI).cos()
+            let phase = state.started.elapsed().as_secs_f32() * std::f32::consts::TAU / 1.6;
+            0.7 + 0.3 * phase.cos()
         };
         let elapsed = meeting::format_duration(state.started.elapsed().as_millis() as u64);
         let title = state.title.clone();
@@ -1886,136 +1970,150 @@ impl MeetingPanel {
         let copied_all = matches!(state.copied, Some((RecordingCopyKind::All, _)));
         let copy_new_enabled = pending_turns > 0 || copied_new;
         let copy_all_enabled = has_transcript || copied_all;
-        let copy_new_label = if copied_new {
-            "Copied".to_string()
-        } else if pending_turns > 0 {
-            format!("Copy new ({pending_turns})")
-        } else {
-            "Copy new".to_string()
-        };
-        let copy_all_label = if copied_all { "Copied" } else { "Copy all" };
         let open_id = state.id.clone();
         let open_commands = self.commands.clone();
         let stop_commands = self.commands.clone();
-        let align_right = state.corner.is_right();
 
-        div()
-            .size_full()
-            .p_1()
-            .flex()
-            .when(align_right, |row| row.justify_end())
-            .when(!align_right, |row| row.justify_start())
-            .child(
-                div()
-                    .id("recording-capsule")
-                    .h_full()
-                    .w(px(pill_width))
-                    .flex()
-                    .items_center()
-                    .gap_2p5()
-                    .pl_3p5()
-                    .pr_2()
-                    .bg(rgb(CANVAS))
-                    .border_1()
-                    .border_color(rgb(LINE_STRONG))
-                    .rounded_full()
-                    .shadow_lg()
-                    .overflow_hidden()
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|panel, _, _, cx| panel.begin_drag(cx)),
-                    )
-                    .child(status_dot(DANGER).size_2().opacity(pulse))
-                    .child(
+        div().size_full().relative().child(
+            div()
+                .id("recording-capsule")
+                .absolute()
+                .top(px(margin))
+                .left(px(pill_left))
+                .w(px(pill_right - pill_left))
+                .h(px(RECORDING_PILL_HEIGHT))
+                .flex()
+                .items_center()
+                .gap_1()
+                .pl_4()
+                .pr_1p5()
+                .rounded_full()
+                .capsule_shadow()
+                .border(HAIRLINE)
+                .border_color(rgba(GLASS_RIM))
+                .bg(rgba(if self.glass.is_some() {
+                    GLASS_OVER_MATERIAL
+                } else {
+                    GLASS_TINT
+                }))
+                .overflow_hidden()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|panel, _, _, cx| panel.begin_drag(cx)),
+                )
+                .child(status_dot(RECORDING).opacity(breathe))
+                .child(
+                    div()
+                        .flex_none()
+                        .ml_1()
+                        .text_body()
+                        .text_tabular()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT_PRIMARY))
+                        .child(elapsed),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .ml_1p5()
+                        .mr_2()
+                        .child(truncated_line(BODY, title).text_color(rgb(TEXT_SECONDARY))),
+                )
+                .when(!expanded && pending_turns > 0, |pill| {
+                    pill.child(div().mr_1().child(count_badge(pending_turns)))
+                })
+                .when(expanded, |pill| {
+                    pill.child(
                         div()
                             .flex_none()
-                            .text_caption()
-                            .text_monospace()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(TEXT_SECONDARY))
-                            .child(elapsed),
+                            .flex()
+                            .items_center()
+                            .gap_0p5()
+                            .child(
+                                recording_button(
+                                    "recording-copy-new",
+                                    Some(if copied_new { Icon::Check } else { Icon::Copy }),
+                                    if copied_new { "Copied" } else { "Copy new" },
+                                )
+                                .w(px(RECORDING_COPY_NEW_WIDTH))
+                                .when(pending_turns > 0 && !copied_new, |button| {
+                                    button.child(count_badge(pending_turns))
+                                })
+                                .when(!copy_new_enabled, |button| button.opacity(DISABLED_OPACITY))
+                                .on_click(cx.listener(
+                                    |panel, _, _, cx| {
+                                        panel.copy_new_turns(cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                recording_button(
+                                    "recording-copy-all",
+                                    None,
+                                    if copied_all { "Copied" } else { "Copy all" },
+                                )
+                                .w(px(RECORDING_COPY_ALL_WIDTH))
+                                .when(!copy_all_enabled, |button| button.opacity(DISABLED_OPACITY))
+                                .on_click(cx.listener(
+                                    |panel, _, _, cx| {
+                                        panel.copy_all_turns(cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                recording_button("recording-open", Some(Icon::Open), "Open")
+                                    .on_click(move |_, _, _| {
+                                        let _ = open_commands
+                                            .try_send(ControllerCommand::Open(open_id.clone()));
+                                    }),
+                            )
+                            .child(div().mx_1().w(HAIRLINE).h(px(20.0)).bg(rgba(GLASS_RIM)))
+                            .child(
+                                recording_button("recording-stop", Some(Icon::Stop), "Stop")
+                                    .bg(rgba(RECORDING_STOP_FILL))
+                                    .text_color(rgb(DANGER))
+                                    .on_click(move |_, window, cx| {
+                                        if stop_commands.try_send(ControllerCommand::Stop).is_ok() {
+                                            dismiss_panel(window, cx);
+                                        }
+                                    }),
+                            ),
                     )
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            truncated_line(FOOTNOTE, title)
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(rgb(TEXT_PRIMARY)),
-                        ),
-                    )
-                    .when(!expanded && pending_turns > 0, |pill| {
-                        pill.child(tag(Tone::Accent, format!("+{pending_turns}")))
-                    })
-                    .when(expanded, |pill| {
-                        pill.child(
-                            div()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    small_button(ButtonKind::Secondary, copy_new_label)
-                                        .id("recording-copy-new")
-                                        .w(px(RECORDING_COPY_NEW_WIDTH))
-                                        .justify_center()
-                                        .rounded_full()
-                                        .when(!copy_new_enabled, |btn| {
-                                            btn.opacity(DISABLED_OPACITY).cursor_default()
-                                        })
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(cx.listener(|panel, _, _, cx| {
-                                            panel.copy_new_turns(cx);
-                                        })),
-                                )
-                                .child(
-                                    small_button(ButtonKind::Secondary, copy_all_label)
-                                        .id("recording-copy-all")
-                                        .w(px(RECORDING_COPY_ALL_WIDTH))
-                                        .justify_center()
-                                        .rounded_full()
-                                        .when(!copy_all_enabled, |btn| {
-                                            btn.opacity(DISABLED_OPACITY).cursor_default()
-                                        })
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(cx.listener(|panel, _, _, cx| {
-                                            panel.copy_all_turns(cx);
-                                        })),
-                                )
-                                .child(
-                                    small_button(ButtonKind::Secondary, "Open")
-                                        .id("recording-open")
-                                        .rounded_full()
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(move |_, _, _| {
-                                            let _ = open_commands
-                                                .try_send(ControllerCommand::Open(open_id.clone()));
-                                        }),
-                                )
-                                .child(
-                                    small_button(ButtonKind::Secondary, "Stop")
-                                        .id("recording-stop")
-                                        .rounded_full()
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(move |_, window, _| {
-                                            if stop_commands
-                                                .try_send(ControllerCommand::Stop)
-                                                .is_ok()
-                                            {
-                                                window.remove_window();
-                                            }
-                                        }),
-                                ),
-                        )
-                    }),
-            )
+                }),
+        )
     }
+}
+
+/// A borderless pill button inside the recording capsule.
+fn recording_button(
+    id: &'static str,
+    glyph: Option<Icon>,
+    label: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(RECORDING_BUTTON_HEIGHT))
+        .px_2p5()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .gap_1p5()
+        .rounded_full()
+        .text_body()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(rgb(TEXT_PRIMARY))
+        .when_some(glyph, |button, glyph| {
+            let color = if glyph == Icon::Stop {
+                DANGER
+            } else {
+                TEXT_PRIMARY
+            };
+            button.child(icon(glyph, color))
+        })
+        .child(label)
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 impl Render for MeetingPanel {
@@ -2023,7 +2121,7 @@ impl Render for MeetingPanel {
         if matches!(self.kind, PanelKind::Recording(_)) {
             return self.render_recording(window, cx).into_any_element();
         }
-        let (dot, title, subtitle, actions) = match &self.kind {
+        let (lens, title, subtitle, actions) = match &self.kind {
             PanelKind::Recording(_) => unreachable!("handled above"),
             PanelKind::Offer(candidate) => {
                 let dismiss = self.commands.clone();
@@ -2037,7 +2135,7 @@ impl Render for MeetingPanel {
                     format!("{} call detected", candidate.source.label())
                 };
                 (
-                    TEXT_SECONDARY,
+                    CapsuleLens::Waveform,
                     title,
                     "Record locally? Tell participants.".to_string(),
                     div()
@@ -2047,28 +2145,28 @@ impl Render for MeetingPanel {
                             ButtonKind::Secondary,
                             "not-now",
                             "Not now",
-                            move |window, _| {
+                            move |window, cx| {
                                 tracing::info!(
                                     source = dismissed_candidate.source.label(),
                                     title = %dismissed_candidate.title,
                                     "meeting recording offer dismissed"
                                 );
                                 let _ = dismiss.try_send(ControllerCommand::Dismiss);
-                                window.remove_window();
+                                dismiss_panel(window, cx);
                             },
                         ))
                         .child(capsule_button(
                             ButtonKind::Primary,
                             "record",
                             "Record",
-                            move |window, _| {
+                            move |window, cx| {
                                 let command = if is_preview {
                                     ControllerCommand::Dismiss
                                 } else {
                                     ControllerCommand::Record(candidate.clone())
                                 };
                                 if record.try_send(command).is_ok() {
-                                    window.remove_window();
+                                    dismiss_panel(window, cx);
                                 }
                             },
                         )),
@@ -2077,7 +2175,7 @@ impl Render for MeetingPanel {
             PanelKind::CallEnded { app } => {
                 let stop = self.commands.clone();
                 (
-                    DANGER,
+                    CapsuleLens::Recording,
                     format!("{app} left the call"),
                     "Hex is still recording.".into(),
                     div()
@@ -2087,17 +2185,17 @@ impl Render for MeetingPanel {
                             ButtonKind::Secondary,
                             "keep-recording",
                             "Keep recording",
-                            |window, _| {
-                                window.remove_window();
+                            |window, cx| {
+                                dismiss_panel(window, cx);
                             },
                         ))
                         .child(capsule_button(
                             ButtonKind::Primary,
                             "stop-meeting",
                             "Stop & transcribe",
-                            move |window, _| {
+                            move |window, cx| {
                                 if stop.try_send(ControllerCommand::Stop).is_ok() {
-                                    window.remove_window();
+                                    dismiss_panel(window, cx);
                                 }
                             },
                         )),
@@ -2133,18 +2231,17 @@ impl Render for MeetingPanel {
                 };
                 let label = if self.copied { "Copied" } else { "Copy" };
                 (
-                    SUCCESS,
+                    CapsuleLens::Ready,
                     title,
                     subtitle,
                     div()
                         .flex()
                         .gap_2()
                         .child(
-                            button(ButtonKind::Secondary, label)
+                            capsule_frame(button(ButtonKind::Secondary, label))
+                                .bg(rgba(GLASS_FILL))
                                 .id("copy-transcript")
                                 .w(px(READY_COPY_WIDTH))
-                                .justify_center()
-                                .rounded_full()
                                 .on_click(move |_, _, cx| {
                                     let markdown = if copy_manifest.id == "preview" {
                                         Ok("Them: The team set the Q4 launch for November 12.\n\nYou: I'll follow up on docs owners today.".into())
@@ -2172,9 +2269,9 @@ impl Render for MeetingPanel {
                                 ButtonKind::Primary,
                                 "reveal-transcript",
                                 "Reveal",
-                                move |window, _| {
+                                move |window, cx| {
                                     meeting::reveal(&path);
-                                    window.remove_window();
+                                    dismiss_panel(window, cx);
                                 },
                             ))
                         }),
@@ -2183,22 +2280,27 @@ impl Render for MeetingPanel {
         };
         div()
             .size_full()
-            .p_1()
+            .p(px(CAPSULE_MARGIN))
             .child(
                 div()
-                    .size_full()
+                    .h(px(CAPSULE_HEIGHT))
+                    .w_full()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .pl_4()
-                    .pr_2()
-                    .bg(rgb(CANVAS))
-                    .border_1()
-                    .border_color(rgb(LINE_STRONG))
+                    .pl(px((CAPSULE_HEIGHT - CAPSULE_LENS_SIZE) / 2.0))
+                    .pr(px((CAPSULE_HEIGHT - CAPSULE_BUTTON_HEIGHT) / 2.0))
                     .rounded_full()
-                    .shadow_lg()
+                    .capsule_shadow()
+                    .border(HAIRLINE)
+                    .border_color(rgba(GLASS_RIM))
+                    .bg(rgba(if self.glass.is_some() {
+                        GLASS_OVER_MATERIAL
+                    } else {
+                        GLASS_TINT
+                    }))
                     .overflow_hidden()
-                    .child(status_dot(dot).size_2())
+                    .child(lens.render())
                     .child(
                         div()
                             .flex_1()
@@ -2211,13 +2313,53 @@ impl Render for MeetingPanel {
                                     .text_color(rgb(TEXT_PRIMARY)),
                             )
                             .child(
-                                truncated_line(CAPTION, subtitle).text_color(rgb(TEXT_TERTIARY)),
+                                truncated_line(FOOTNOTE, subtitle).text_color(rgb(TEXT_SECONDARY)),
                             ),
                     )
                     .child(actions.flex_none()),
             )
             .into_any_element()
     }
+}
+
+/// The glyph in a capsule's round leading well.
+#[derive(Clone, Copy)]
+enum CapsuleLens {
+    Waveform,
+    Recording,
+    Ready,
+}
+
+impl CapsuleLens {
+    fn render(self) -> gpui::Div {
+        let well = div()
+            .size(px(CAPSULE_LENS_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(rgba(GLASS_FILL));
+        match self {
+            Self::Waveform => well.child(icon_at(Icon::Waveform, 16.0, TEXT_PRIMARY)),
+            Self::Recording => well.child(status_dot(RECORDING).shadow(vec![gpui::BoxShadow {
+                color: rgba(RECORDING_STOP_FILL).into(),
+                offset: point(px(0.0), px(0.0)),
+                blur_radius: px(0.0),
+                spread_radius: px(3.0),
+            }])),
+            Self::Ready => well.child(icon_at(Icon::Check, 14.0, SUCCESS)),
+        }
+    }
+}
+
+/// A shared button in the capsule's concentric pill shape.
+fn capsule_frame(button: gpui::Div) -> gpui::Div {
+    button
+        .h(px(CAPSULE_BUTTON_HEIGHT))
+        .px_4()
+        .justify_center()
+        .rounded_full()
 }
 
 /// Capsule buttons are the shared buttons in the capsule's pill shape.
@@ -2227,9 +2369,11 @@ fn capsule_button(
     label: &'static str,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    button(kind, label)
+    capsule_frame(button(kind, label))
+        .when(kind == ButtonKind::Secondary, |button| {
+            button.bg(rgba(GLASS_FILL))
+        })
         .id(id)
-        .rounded_full()
         .on_click(move |_, window, cx| on_click(window, cx))
 }
 
