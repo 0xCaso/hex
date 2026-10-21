@@ -3683,6 +3683,12 @@ impl AppWindow {
             .clamp(0.0, 1.0);
         let dock_icon_position = self.dock_icon_toggle.render_position(window);
         let platform_section = self.platform_settings_section(window, cx);
+        let (top_platform_section, bottom_platform_section) =
+            if self.preview && self.settings.meetings.enabled {
+                (platform_section, Vec::new())
+            } else {
+                (Vec::new(), platform_section)
+            };
         let enable_on_launch_position = self.enable_on_launch_toggle.render_position(window);
         let terminal_paste_position = self.terminal_paste_toggle.render_position(window);
         let indicator_position = self.indicator_position_spring.render_position(window);
@@ -3922,6 +3928,7 @@ impl AppWindow {
             div()
                 .children(platform_notice)
                 .children(listener_card)
+                .children(top_platform_section)
                 .child(settings_section_label(tr("Dictation")))
                 .child(
                     panel()
@@ -4092,7 +4099,7 @@ impl AppWindow {
                             .id("paste-last-hotkey-setting"),
                         ))
                 )
-                .children(platform_section)
+                .children(bottom_platform_section)
                 .child(settings_section_label(tr("Application")))
                 .child(
                     panel()

@@ -48,7 +48,7 @@ for _ in 0..<200 {
         guard (window[kCGWindowOwnerPID as String] as? Int) == pid else {
             return false
         }
-        if target == "dictation-hud" || target == "meeting-offer" {
+        if target == "dictation-hud" || target == "meeting-offer" || target == "meeting-capsule" {
             return true
         }
         let title = window[kCGWindowName as String] as? String
@@ -72,5 +72,13 @@ SWIFT
 )
 
 mkdir -p "$(dirname -- "$output")"
-screencapture -x -l "$window_id" "$output"
+if ! screencapture -x -l "$window_id" "$output" 2>/dev/null; then
+  cua_bin=$(command -v cua-driver 2>/dev/null || printf '%s/.local/bin/cua-driver' "$HOME")
+  if [ -x "$cua_bin" ]; then
+    abs_out=$(CDPATH= cd -- "$(dirname -- "$output")" && pwd)/$(basename -- "$output")
+    "$cua_bin" call get_window_state "{\"pid\":$pid,\"window_id\":$window_id,\"include_accessibility_tree\":false,\"max_image_dimension\":0,\"screenshot_out_file\":\"$abs_out\"}" >/dev/null
+  else
+    screencapture -x -l "$window_id" "$output"
+  fi
+fi
 echo "$output"

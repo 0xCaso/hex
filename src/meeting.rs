@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -45,8 +46,8 @@ pub struct MeetingStart {
 /// What the recorder reports to its owner while it runs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordingUpdate {
-    /// Capture started; the title is the one the meeting shows.
-    Started { title: String },
+    /// Capture started; `id` identifies the meeting folder and `title` is the one it shows.
+    Started { id: String, title: String },
     /// A provisional title from the transcript so far.
     Retitled { title: String },
 }
@@ -460,6 +461,7 @@ pub fn record(
         }
         if let Some(updates) = &updates {
             let _ = updates.send(RecordingUpdate::Started {
+                id: manifest.id.clone(),
                 title: display_title(&manifest),
             });
         }
@@ -1251,6 +1253,194 @@ pub fn completed_transcript(
         publication,
         entries,
     })
+}
+
+static MEETING_PASTE_CURSOR: OnceLock<Mutex<MeetingPasteCursor>> = OnceLock::new();
+
+pub fn shared_paste_cursor() -> &'static Mutex<MeetingPasteCursor> {
+    MEETING_PASTE_CURSOR.get_or_init(Default::default)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MeetingPasteCursor {
+    meeting_id: Option<String>,
+    publication: Option<TranscriptPublication>,
+    seen: HashSet<TranscriptEntry>,
+}
+
+impl MeetingPasteCursor {
+    pub fn publication_for(&self, id: &str) -> Option<TranscriptPublication> {
+        (self.meeting_id.as_deref() == Some(id))
+            .then_some(self.publication)
+            .flatten()
+    }
+
+    /// Number of coalesced speaker turns available since the last committed
+    /// copy or paste for `id`.
+    pub fn pending_turn_count(&self, id: &str, entries: &[TranscriptEntry]) -> usize {
+        let empty = HashSet::new();
+        let seen = if self.meeting_id.as_deref() == Some(id) {
+            &self.seen
+        } else {
+            &empty
+        };
+        let new_entries = entries
+            .iter()
+            .filter(|entry| !seen.contains(*entry))
+            .cloned();
+        coalesce_transcript(new_entries).len()
+    }
+
+    /// Formats unseen entries for `id`, runs `commit_output`, and advances the
+    /// cursor only if `commit_output` succeeds.
+    pub fn consume_entries(
+        &mut self,
+        id: &str,
+        publication: TranscriptPublication,
+        entries: &[TranscriptEntry],
+        commit_output: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<String> {
+        let same_meeting = self.meeting_id.as_deref() == Some(id);
+        let empty = HashSet::new();
+        let seen = if same_meeting { &self.seen } else { &empty };
+        let (text, pasted_entries) = prepare_meeting_delta(entries, seen)?;
+        commit_output(&text)?;
+        if !same_meeting {
+            self.seen.clear();
+        }
+        self.meeting_id = Some(id.to_string());
+        self.publication = Some(publication);
+        self.seen.extend(pasted_entries);
+        Ok(text)
+    }
+}
+
+pub fn prepare_meeting_delta(
+    entries: &[TranscriptEntry],
+    seen: &HashSet<TranscriptEntry>,
+) -> Result<(String, Vec<TranscriptEntry>)> {
+    let new_entries = entries
+        .iter()
+        .filter(|entry| !seen.contains(*entry))
+        .cloned()
+        .collect::<Vec<_>>();
+    if new_entries.is_empty() {
+        return Err(eyre!("no new completed meeting transcript is available"));
+    }
+    let text = coalesce_transcript(new_entries.iter().cloned())
+        .into_iter()
+        .map(|entry| format!("{}: {}", entry.source.label(), entry.text))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok((text, new_entries))
+}
+
+/// Consumes new completed turns for `id` using the shared cursor, advancing
+/// only if `commit_output` succeeds.
+pub fn consume_delta_for_id(
+    id: &str,
+    commit_output: impl FnOnce(&str) -> Result<()>,
+) -> Result<String> {
+    let publication = shared_paste_cursor()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .publication_for(id);
+    let transcript = completed_transcript(id, publication)?;
+    let mut cursor = shared_paste_cursor()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    cursor.consume_entries(
+        id,
+        transcript.publication,
+        &transcript.entries,
+        commit_output,
+    )
+}
+
+/// Consumes new completed turns for the active or most recent meeting using
+/// the shared cursor, advancing only if `commit_output` succeeds.
+pub fn consume_active_or_latest_delta(
+    commit_output: impl FnOnce(&str) -> Result<()>,
+) -> Result<String> {
+    let meetings = list()?;
+    let selected =
+        active_or_latest(&meetings).ok_or_else(|| eyre!("no meeting transcript is available"))?;
+    consume_delta_for_id(&selected.id, commit_output)
+}
+
+/// Returns how many coalesced turns are ready for `"Copy new"` / `Option-Control-V`
+/// on `id` without advancing the shared cursor.
+pub fn pending_delta_turns_for_id(id: &str) -> Result<usize> {
+    let publication = shared_paste_cursor()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .publication_for(id);
+    let transcript = completed_transcript(id, publication)?;
+    let cursor = shared_paste_cursor()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    Ok(cursor.pending_turn_count(id, &transcript.entries))
+}
+
+/// Returns coalesced live `You` / `Them` turns with echo suppression for `id`.
+pub fn live_transcript_turns(
+    id: &str,
+    reader: &mut TranscriptReader,
+) -> Result<Vec<TranscriptEntry>> {
+    let mut entries = reader.read(id)?;
+    if entries.is_empty()
+        && let Ok(completed) = completed_transcript(id, None)
+    {
+        entries = completed.entries;
+    }
+    Ok(coalesce_transcript(entries))
+}
+
+/// Returns the Markdown transcript for `manifest`, preferring its exported
+/// Markdown when present and falling back to internal or live speaker turns.
+pub fn transcript_markdown_for_manifest(manifest: &MeetingManifest) -> Result<String> {
+    if let Some(path) = manifest.export_path.as_ref().filter(|path| path.exists()) {
+        return fs::read_to_string(path)
+            .wrap_err_with(|| format!("could not read {}", path.display()));
+    }
+    let internal_md = root()?.join(&manifest.id).join("transcript.md");
+    if internal_md.exists() {
+        return fs::read_to_string(&internal_md)
+            .wrap_err_with(|| format!("could not read {}", internal_md.display()));
+    }
+    let entries = TranscriptReader::default().read(&manifest.id)?;
+    if !entries.is_empty() {
+        return Ok(transcript_markdown(&entries));
+    }
+    Err(eyre!("no meeting transcript is available"))
+}
+
+/// Returns the speaker-turn Markdown for `manifest` (without file headers),
+/// falling back to exported Markdown if raw entries are unavailable.
+pub fn speaker_turns_markdown_for_manifest(manifest: &MeetingManifest) -> Result<String> {
+    if let Ok(entries) = TranscriptReader::default().read(&manifest.id)
+        && !entries.is_empty()
+    {
+        return Ok(transcript_markdown(&entries));
+    }
+    transcript_markdown_for_manifest(manifest)
+}
+
+/// Returns the Markdown transcript for the active or most recent meeting.
+pub fn latest_transcript_markdown() -> Result<String> {
+    let meetings = list()?;
+    for meeting in meetings
+        .iter()
+        .filter(|m| m.status.is_active())
+        .chain(meetings.iter().filter(|m| !m.status.is_active()))
+    {
+        if let Ok(markdown) = speaker_turns_markdown_for_manifest(meeting)
+            && !markdown.trim().is_empty()
+        {
+            return Ok(markdown);
+        }
+    }
+    Err(eyre!("no meeting transcript is available"))
 }
 
 fn supplement_live_transcript(

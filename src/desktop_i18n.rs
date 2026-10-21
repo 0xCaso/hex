@@ -541,6 +541,8 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Reveal", ["Pokaż", "显示", "表示", "Anzeigen", "Mostrar"]),
     ("Use Folder", ["Użyj folderu", "使用此文件夹", "このフォルダーを使用", "Ordner verwenden", "Usar carpeta"]),
     ("Summarize with Apple Intelligence", ["Podsumuj za pomocą Apple Intelligence", "使用 Apple 智能进行总结", "Apple Intelligence で要約", "Mit Apple Intelligence zusammenfassen", "Resumir con Apple Intelligence"]),
+    ("Show recording indicator", ["Pokaż wskaźnik nagrywania", "显示录音指示器", "録音インジケーターを表示", "Aufnahmeanzeige einblenden", "Mostrar indicador de grabación"]),
+    ("Floating pill to copy live transcript turns or stop recording", ["Pływająca kapsułka do kopiowania bieżącej transkrypcji lub zatrzymania nagrywania", "用于复制实时转写内容或停止录音的悬浮胶囊", "ライブ文字起こしのコピーや録音停止ができるフローティングピル", "Schwebende Kapsel zum Kopieren von Live-Transkripten oder Stoppen der Aufnahme", "Píldora flotante para copiar turnos de transcripción en vivo o detener la grabación"]),
     ("Start recording", ["Rozpocznij nagrywanie", "开始录音", "録音を開始", "Aufnahme starten", "Empezar a grabar"]),
     ("Starting…", ["Uruchamianie…", "正在启动…", "開始中…", "Wird gestartet…", "Iniciando…"]),
     ("Stop & transcribe", ["Zatrzymaj i transkrybuj", "停止并转写", "停止して文字起こし", "Stoppen und transkribieren", "Detener y transcribir"]),

@@ -14,11 +14,11 @@ use gpui::{
     WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 
-use crate::app_settings::AppSettings;
+use crate::app_settings::{AppSettings, MeetingIndicatorCorner};
 use crate::app_window::AppWindow;
 use crate::context::ContextSnapshot;
 use crate::design_tokens::*;
-use crate::desktop_ui::{ButtonKind, button, status_dot, truncated_line};
+use crate::desktop_ui::{ButtonKind, Tone, button, small_button, status_dot, tag, truncated_line};
 use crate::dictation_indicator::DictationIndicatorEvent;
 use crate::dictation_indicator::{self, DictationIndicatorUi};
 use crate::meeting::{self, MeetingRequest};
@@ -26,27 +26,32 @@ use crate::meeting_detection::{
     CallPresence, MeetingCandidate, MeetingDetector, MeetingSource, candidate_from_microphone,
 };
 use crate::microphone_activity::active_microphone_applications;
+use crate::motion::WindowMotion;
 use crate::transcription_preparation::TranscriptionPreparation;
 use crate::{config, recognition};
 
-const PANEL_WIDTH: f32 = 420.0;
-const PANEL_HEIGHT: f32 = 64.0;
+const PANEL_WIDTH: f32 = MEETING_PANEL_WIDTH;
+const PANEL_HEIGHT: f32 = MEETING_PANEL_HEIGHT;
 const WINDOW_MARGIN: f32 = 12.0;
 const OFFER_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
+const COPIED_FEEDBACK_DURATION: Duration = Duration::from_millis(1_500);
+const RECORDING_TRANSCRIPT_POLL: Duration = Duration::from_millis(400);
 
 enum ControllerCommand {
     Record(MeetingCandidate),
     Dismiss,
     Stop,
+    Open(String),
     Summarize(String),
 }
 
 enum ControllerEvent {
     Offer(MeetingCandidate),
     Starting,
-    RecordingStarted { title: String },
+    RecordingStarted { id: String, title: String },
     Retitled { title: String },
+    OpenMeeting(String),
     Transcribing,
     CallEnded { app: String },
     Finished(Box<meeting::MeetingManifest>),
@@ -176,6 +181,9 @@ pub enum Launch {
 #[derive(Clone, Copy, Debug)]
 pub enum PanelPreview {
     Offer,
+    Recording,
+    RecordingExpanded,
+    RecordingCopied,
     CallEnded,
     Ready,
 }
@@ -189,6 +197,21 @@ fn run_panel_preview(preview: PanelPreview) -> Result<()> {
             application: None,
             named: false,
         }),
+        PanelPreview::Recording
+        | PanelPreview::RecordingExpanded
+        | PanelPreview::RecordingCopied => {
+            let mut state = RecordingPanelState::preview(
+                matches!(
+                    preview,
+                    PanelPreview::RecordingExpanded | PanelPreview::RecordingCopied
+                ),
+                matches!(preview, PanelPreview::RecordingCopied),
+            );
+            if matches!(preview, PanelPreview::RecordingCopied) {
+                state.pending_turns = 0;
+            }
+            PanelKind::Recording(Box::new(state))
+        }
         PanelPreview::CallEnded => PanelKind::CallEnded { app: "Zoom".into() },
         PanelPreview::Ready => {
             let mut manifest: meeting::MeetingManifest =
@@ -678,6 +701,8 @@ async fn drive_ui(
     cx: &mut gpui::AsyncApp,
 ) {
     let mut offer_window: Option<WindowHandle<MeetingPanel>> = None;
+    let mut recording_window: Option<WindowHandle<MeetingPanel>> = None;
+    let mut active_recording: Option<(String, Instant, String)> = None;
     let mut dictation_indicator = indicator_enabled.then(DictationIndicatorUi::new);
     let mut model_menu_refresh_at = Instant::now();
     let mut meeting_state = MeetingMenuState::Idle;
@@ -766,6 +791,14 @@ async fn drive_ui(
                         tracing::warn!(%error, "could not stop meeting from status item");
                     }
                 }
+                crate::status_item::StatusItemAction::CopyLastMeetingTranscript => {
+                    match meeting::latest_transcript_markdown() {
+                        Ok(markdown) => cx.write_to_clipboard(ClipboardItem::new_string(markdown)),
+                        Err(error) => {
+                            tracing::warn!(%error, "could not copy last meeting transcript")
+                        }
+                    }
+                }
                 crate::status_item::StatusItemAction::OpenMeetings => match ui.open_or_focus(cx) {
                     Ok(handle) => {
                         let _ = handle.update(cx, |window, _, cx| window.show_meetings(cx));
@@ -840,43 +873,81 @@ async fn drive_ui(
                 }
                 ControllerEvent::Starting => {
                     close_window(offer_window.take(), cx);
+                    close_window(recording_window.take(), cx);
+                    active_recording = None;
                     meeting_state = MeetingMenuState::Starting;
                     update_app_window(&ui.app_window, cx, |window, cx| window.meeting_starting(cx));
                 }
-                ControllerEvent::RecordingStarted { title } => {
+                ControllerEvent::RecordingStarted { id, title } => {
+                    let started = Instant::now();
+                    active_recording = Some((id.clone(), started, title.clone()));
                     meeting_state = MeetingMenuState::Recording {
-                        started: Instant::now(),
-                        title,
+                        started,
+                        title: title.clone(),
                     };
+                    close_window(recording_window.take(), cx);
+                    if crate::app_settings::meeting_indicator_enabled() {
+                        recording_window = open_panel(
+                            PanelKind::Recording(Box::new(RecordingPanelState::new(
+                                id, title, started,
+                            ))),
+                            ui.commands.clone(),
+                            None,
+                            cx,
+                        )
+                        .ok();
+                    }
                     update_app_window(&ui.app_window, cx, |window, cx| window.meeting_started(cx));
                 }
                 ControllerEvent::Retitled { title } => {
                     if let MeetingMenuState::Recording { title: shown, .. } = &mut meeting_state {
-                        *shown = title;
+                        *shown = title.clone();
+                    }
+                    if let Some((_, _, active_title)) = &mut active_recording {
+                        *active_title = title.clone();
+                    }
+                    if let Some(panel) = recording_window {
+                        let _ = panel.update(cx, |panel, _, cx| {
+                            if let PanelKind::Recording(state) = &mut panel.kind {
+                                state.title = title.clone();
+                                cx.notify();
+                            }
+                        });
                     }
                     update_app_window(&ui.app_window, cx, |window, cx| {
                         window.meeting_updated_notes(cx);
                     });
                 }
+                ControllerEvent::OpenMeeting(id) => match ui.open_or_focus(cx) {
+                    Ok(handle) => {
+                        let _ = handle.update(cx, |window, _, cx| window.open_meeting(id, cx));
+                    }
+                    Err(error) => tracing::error!(%error, "could not open Meetings from capsule"),
+                },
                 ControllerEvent::CallEnded { app } => {
                     close_window(offer_window.take(), cx);
+                    close_window(recording_window.take(), cx);
                     offer_window =
                         open_panel(PanelKind::CallEnded { app }, ui.commands.clone(), None, cx)
                             .ok();
                 }
                 ControllerEvent::Transcribing => {
+                    active_recording = None;
                     close_window(offer_window.take(), cx);
+                    close_window(recording_window.take(), cx);
                     meeting_state = MeetingMenuState::Transcribing;
                     update_app_window(&ui.app_window, cx, |window, cx| {
                         window.meeting_updated(cx);
                     });
                 }
                 ControllerEvent::Finished(manifest) => {
+                    active_recording = None;
                     meeting_state = MeetingMenuState::Idle;
                     update_app_window(&ui.app_window, cx, |window, cx| {
                         window.meeting_finished(cx);
                     });
                     close_window(offer_window.take(), cx);
+                    close_window(recording_window.take(), cx);
                     offer_window = open_panel(
                         PanelKind::Ready(manifest),
                         ui.commands.clone(),
@@ -906,6 +977,8 @@ async fn drive_ui(
                     });
                 }
                 ControllerEvent::Failed { title, error } => {
+                    active_recording = None;
+                    close_window(recording_window.take(), cx);
                     meeting_state = MeetingMenuState::Idle;
                     ui.show_meeting_window(
                         offer_window.take(),
@@ -920,6 +993,42 @@ async fn drive_ui(
                 return;
             }
             meeting_menu_refresh_at = Instant::now();
+        }
+        if active_recording.is_some() {
+            let _ = cx.update(|cx| {
+                if offer_window
+                    .as_ref()
+                    .is_some_and(|handle| handle.update(cx, |_, _, _| ()).is_err())
+                {
+                    offer_window = None;
+                }
+                let indicator_wanted =
+                    crate::app_settings::meeting_indicator_enabled() && offer_window.is_none();
+                if !indicator_wanted {
+                    close_window(recording_window.take(), cx);
+                } else if recording_window.is_none()
+                    && let Some((id, started, title)) = &active_recording
+                {
+                    recording_window = open_panel(
+                        PanelKind::Recording(Box::new(RecordingPanelState::new(
+                            id.clone(),
+                            title.clone(),
+                            *started,
+                        ))),
+                        ui.commands.clone(),
+                        None,
+                        cx,
+                    )
+                    .ok();
+                }
+                if let Some(handle) = recording_window
+                    && handle
+                        .update(cx, |panel, window, cx| panel.tick_recording(window, cx))
+                        .is_err()
+                {
+                    recording_window = None;
+                }
+            });
         }
         if ui.status_actions.is_some() && Instant::now() >= meeting_menu_refresh_at {
             let enabled = crate::app_settings::meetings_enabled();
@@ -1077,6 +1186,9 @@ fn controller_loop(
                         let _ = events.send(ControllerEvent::Transcribing);
                     }
                 }
+                ControllerCommand::Open(id) => {
+                    let _ = events.send(ControllerEvent::OpenMeeting(id));
+                }
                 ControllerCommand::Summarize(id) => start_notes(id, &events),
                 ControllerCommand::Dismiss | ControllerCommand::Record(_) => {}
             }
@@ -1085,11 +1197,11 @@ fn controller_loop(
         if let Some(active) = &mut recording {
             for update in active.updates.try_iter() {
                 match update {
-                    meeting::RecordingUpdate::Started { title } => {
+                    meeting::RecordingUpdate::Started { id, title } => {
                         active.reported_started = true;
                         active.title = title.clone();
                         if !active.stop.load(Ordering::Relaxed) {
-                            let _ = events.send(ControllerEvent::RecordingStarted { title });
+                            let _ = events.send(ControllerEvent::RecordingStarted { id, title });
                         }
                     }
                     meeting::RecordingUpdate::Retitled { title } => {
@@ -1269,21 +1381,144 @@ fn panel_options(cx: &App) -> WindowOptions {
     }
 }
 
+fn recording_panel_options(corner: MeetingIndicatorCorner, width: f32, cx: &App) -> WindowOptions {
+    let window_size = size(px(width), px(RECORDING_PANEL_HEIGHT));
+    let (display_id, bounds) = cx.primary_display().map_or_else(
+        || (None, Bounds::centered(None, window_size, cx)),
+        |display| {
+            let bounds = display.bounds();
+            let x = if corner.is_right() {
+                bounds.right() - px(width + WINDOW_MARGIN)
+            } else {
+                bounds.left() + px(WINDOW_MARGIN)
+            };
+            let y = if corner.is_top() {
+                bounds.top() + px(WINDOW_MARGIN + 28.0)
+            } else {
+                bounds.bottom() - px(RECORDING_PANEL_HEIGHT + WINDOW_MARGIN + 24.0)
+            };
+            (
+                Some(display.id()),
+                Bounds {
+                    origin: point(x, y),
+                    size: window_size,
+                },
+            )
+        },
+    );
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        display_id,
+        titlebar: None,
+        window_background: WindowBackgroundAppearance::Transparent,
+        focus: false,
+        show: true,
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        ..Default::default()
+    }
+}
+
+fn bind_recording_ns_window(width: f32) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    let windows = app.windows();
+    let mut matched = None;
+    for window in windows.iter() {
+        let frame = window.frame();
+        if (frame.size.width - f64::from(width)).abs() < 1.5
+            && (frame.size.height - f64::from(RECORDING_PANEL_HEIGHT)).abs() < 1.5
+        {
+            window.setHidesOnDeactivate(false);
+            window.setCollectionBehavior(
+                objc2_app_kit::NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | objc2_app_kit::NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
+            matched = Some(window);
+        }
+    }
+    matched
+}
+
+fn appkit_corner_origin(
+    corner: MeetingIndicatorCorner,
+    screen_frame: objc2_foundation::NSRect,
+    width: f64,
+    height: f64,
+) -> objc2_foundation::NSPoint {
+    let margin = f64::from(WINDOW_MARGIN);
+    let x = if corner.is_right() {
+        screen_frame.origin.x + screen_frame.size.width - width - margin
+    } else {
+        screen_frame.origin.x + margin
+    };
+    let y = if corner.is_top() {
+        screen_frame.origin.y + screen_frame.size.height - height - margin - 28.0
+    } else {
+        screen_frame.origin.y + margin + 24.0
+    };
+    objc2_foundation::NSPoint::new(x, y)
+}
+
 /// Opens a focus-free capsule. A timed panel closes itself; an expired offer
 /// is simply dismissed, and nothing starts or stops on a timeout.
 fn open_panel(
-    kind: PanelKind,
+    mut kind: PanelKind,
     commands: SyncSender<ControllerCommand>,
     timeout: Option<Duration>,
     cx: &mut App,
 ) -> gpui::Result<WindowHandle<MeetingPanel>> {
-    let handle = cx.open_window(panel_options(cx), |_, cx| {
+    let options = match &kind {
+        PanelKind::Recording(state) => {
+            let width = if state.preview && !state.force_expanded {
+                RECORDING_COMPACT_WIDTH
+            } else {
+                RECORDING_PANEL_WIDTH
+            };
+            recording_panel_options(state.corner, width, cx)
+        }
+        PanelKind::Offer(_) | PanelKind::CallEnded { .. } | PanelKind::Ready(_) => {
+            panel_options(cx)
+        }
+    };
+    let recording_width = match &kind {
+        PanelKind::Recording(state) => Some(if state.preview && !state.force_expanded {
+            RECORDING_COMPACT_WIDTH
+        } else {
+            RECORDING_PANEL_WIDTH
+        }),
+        _ => None,
+    };
+    if let PanelKind::Recording(state) = &mut kind
+        && state.hovered
+    {
+        // Pre-seed the spring in expanded previews so the first frame is settled.
+    }
+    let handle = cx.open_window(options, |window, cx| {
+        if let PanelKind::Recording(state) = &kind {
+            let target = if state.hovered || state.force_expanded {
+                RECORDING_PANEL_WIDTH
+            } else {
+                RECORDING_COMPACT_WIDTH
+            };
+            let _ = window.spring("recording-capsule-width", target, SPRING_INSTANT);
+        }
         cx.new(|_| MeetingPanel {
             kind,
             commands,
             copied: false,
         })
     })?;
+    if let Some(width) = recording_width {
+        let ns_window = bind_recording_ns_window(width);
+        let _ = handle.update(cx, |panel, _, _| {
+            if let PanelKind::Recording(state) = &mut panel.kind {
+                state.ns_window = ns_window;
+            }
+        });
+    }
     if let Some(timeout) = timeout {
         cx.spawn(async move |cx| {
             Timer::after(timeout).await;
@@ -1321,8 +1556,103 @@ fn update_app_window(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecordingCopyKind {
+    New,
+    All,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RecordingDrag {
+    start_mouse: objc2_foundation::NSPoint,
+    start_origin: objc2_foundation::NSPoint,
+}
+
+struct RecordingPanelState {
+    id: String,
+    title: String,
+    started: Instant,
+    corner: MeetingIndicatorCorner,
+    hovered: bool,
+    force_expanded: bool,
+    preview: bool,
+    pending_turns: usize,
+    has_transcript: bool,
+    copied: Option<(RecordingCopyKind, Instant)>,
+    last_refresh_at: Instant,
+    last_second: u64,
+    transcript_reader: meeting::TranscriptReader,
+    drag: Option<RecordingDrag>,
+    ns_window: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
+}
+
+impl RecordingPanelState {
+    fn new(id: String, title: String, started: Instant) -> Self {
+        let mut transcript_reader = meeting::TranscriptReader::default();
+        let pending_turns = meeting::pending_delta_turns_for_id(&id).unwrap_or(0);
+        let has_transcript = pending_turns > 0
+            || meeting::live_transcript_turns(&id, &mut transcript_reader)
+                .is_ok_and(|turns| !turns.is_empty());
+        Self {
+            id,
+            title,
+            started,
+            corner: crate::app_settings::meeting_indicator_corner(),
+            hovered: false,
+            force_expanded: false,
+            preview: false,
+            pending_turns,
+            has_transcript,
+            copied: None,
+            last_refresh_at: Instant::now(),
+            last_second: started.elapsed().as_secs(),
+            transcript_reader,
+            drag: None,
+            ns_window: None,
+        }
+    }
+
+    fn preview(expanded: bool, copied: bool) -> Self {
+        let started = Instant::now() - Duration::from_secs(258);
+        Self {
+            id: "preview-live".into(),
+            title: "Q4 launch sync".into(),
+            started,
+            corner: MeetingIndicatorCorner::TopRight,
+            hovered: expanded,
+            force_expanded: expanded,
+            preview: true,
+            pending_turns: if copied { 0 } else { 3 },
+            has_transcript: true,
+            copied: copied.then(|| (RecordingCopyKind::New, Instant::now())),
+            last_refresh_at: Instant::now(),
+            last_second: started.elapsed().as_secs(),
+            transcript_reader: meeting::TranscriptReader::default(),
+            drag: None,
+            ns_window: None,
+        }
+    }
+
+    fn refresh_counts(&mut self) -> bool {
+        if self.preview {
+            return false;
+        }
+        let next_pending = meeting::pending_delta_turns_for_id(&self.id).unwrap_or(0);
+        let next_has_transcript = next_pending > 0
+            || meeting::live_transcript_turns(&self.id, &mut self.transcript_reader)
+                .is_ok_and(|turns| !turns.is_empty());
+        let changed =
+            self.pending_turns != next_pending || self.has_transcript != next_has_transcript;
+        self.pending_turns = next_pending;
+        self.has_transcript = next_has_transcript;
+        self.last_refresh_at = Instant::now();
+        changed
+    }
+}
+
 enum PanelKind {
     Offer(MeetingCandidate),
+    Recording(Box<RecordingPanelState>),
     CallEnded { app: String },
     Ready(Box<meeting::MeetingManifest>),
 }
@@ -1333,9 +1663,363 @@ struct MeetingPanel {
     copied: bool,
 }
 
+impl MeetingPanel {
+    fn begin_drag(&mut self, cx: &mut Context<Self>) {
+        let PanelKind::Recording(state) = &mut self.kind else {
+            return;
+        };
+        if state.preview {
+            return;
+        }
+        if let Some(ns_window) = &state.ns_window {
+            let mouse = objc2_app_kit::NSEvent::mouseLocation();
+            state.drag = Some(RecordingDrag {
+                start_mouse: mouse,
+                start_origin: ns_window.frame().origin,
+            });
+            state.hovered = true;
+            cx.notify();
+        }
+    }
+
+    fn copy_new_turns(&mut self, cx: &mut Context<Self>) {
+        let PanelKind::Recording(state) = &mut self.kind else {
+            return;
+        };
+        if state.pending_turns == 0 {
+            return;
+        }
+        if state.preview {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                "You: Let's ship the floating recording indicator today.\n\nThem: Sounds good."
+                    .into(),
+            ));
+            state.pending_turns = 0;
+            state.copied = Some((RecordingCopyKind::New, Instant::now()));
+            cx.notify();
+            return;
+        }
+        let id = state.id.clone();
+        match meeting::consume_delta_for_id(&id, |text| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+            Ok(())
+        }) {
+            Ok(_) => {
+                state.copied = Some((RecordingCopyKind::New, Instant::now()));
+                let _ = state.refresh_counts();
+                cx.notify();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not copy new meeting transcript turns");
+            }
+        }
+    }
+
+    fn copy_all_turns(&mut self, cx: &mut Context<Self>) {
+        let PanelKind::Recording(state) = &mut self.kind else {
+            return;
+        };
+        if !state.has_transcript {
+            return;
+        }
+        if state.preview {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                "Them: Kickoff is at 2:30.\n\nYou: Let's ship the floating recording indicator today."
+                    .into(),
+            ));
+            state.copied = Some((RecordingCopyKind::All, Instant::now()));
+            cx.notify();
+            return;
+        }
+        match meeting::live_transcript_turns(&state.id, &mut state.transcript_reader) {
+            Ok(turns) if !turns.is_empty() => {
+                let markdown = meeting::transcript_markdown(&turns);
+                cx.write_to_clipboard(ClipboardItem::new_string(markdown));
+                state.copied = Some((RecordingCopyKind::All, Instant::now()));
+                cx.notify();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "could not copy full live meeting transcript");
+            }
+        }
+    }
+
+    fn tick_recording(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let PanelKind::Recording(state) = &mut self.kind else {
+            return;
+        };
+        let mut dirty = false;
+        if let Some((_, copied_at)) = state.copied
+            && copied_at.elapsed() >= COPIED_FEEDBACK_DURATION
+        {
+            state.copied = None;
+            dirty = true;
+        }
+        if state.last_refresh_at.elapsed() >= RECORDING_TRANSCRIPT_POLL && state.refresh_counts() {
+            dirty = true;
+        }
+        let elapsed_secs = state.started.elapsed().as_secs();
+        if elapsed_secs != state.last_second {
+            state.last_second = elapsed_secs;
+            dirty = true;
+        }
+        if !state.preview && !crate::motion::reduced_motion() {
+            dirty = true;
+        }
+        if !state.preview
+            && let Some(ns_window) = state.ns_window.clone()
+        {
+            let frame = ns_window.frame();
+            let mouse = objc2_app_kit::NSEvent::mouseLocation();
+            let pressed = objc2_app_kit::NSEvent::pressedMouseButtons();
+            let left_down = (pressed & 1) != 0;
+            if let Some(drag) = state.drag {
+                if left_down {
+                    let next = objc2_foundation::NSPoint::new(
+                        drag.start_origin.x + (mouse.x - drag.start_mouse.x),
+                        drag.start_origin.y + (mouse.y - drag.start_mouse.y),
+                    );
+                    ns_window.setFrameOrigin(next);
+                    ns_window.setIgnoresMouseEvents(false);
+                } else {
+                    state.drag = None;
+                    if let Some(mtm) = objc2::MainThreadMarker::new()
+                        && let Some(screen) = ns_window
+                            .screen()
+                            .or_else(|| objc2_app_kit::NSScreen::mainScreen(mtm))
+                    {
+                        let screen_frame = screen.frame();
+                        let center_x = frame.origin.x + frame.size.width * 0.5;
+                        let center_y = frame.origin.y + frame.size.height * 0.5;
+                        let right =
+                            center_x >= screen_frame.origin.x + screen_frame.size.width * 0.5;
+                        let top =
+                            center_y >= screen_frame.origin.y + screen_frame.size.height * 0.5;
+                        let corner = match (top, right) {
+                            (true, true) => MeetingIndicatorCorner::TopRight,
+                            (true, false) => MeetingIndicatorCorner::TopLeft,
+                            (false, true) => MeetingIndicatorCorner::BottomRight,
+                            (false, false) => MeetingIndicatorCorner::BottomLeft,
+                        };
+                        let snapped = appkit_corner_origin(
+                            corner,
+                            screen_frame,
+                            frame.size.width,
+                            frame.size.height,
+                        );
+                        ns_window.setFrameOrigin(snapped);
+                        if state.corner != corner {
+                            state.corner = corner;
+                            crate::app_settings::save_meeting_indicator_corner(corner);
+                        }
+                    }
+                    dirty = true;
+                }
+            }
+            if state.drag.is_none() {
+                let expanded = state.hovered || state.force_expanded;
+                let (min_x, max_x) = if expanded {
+                    (frame.origin.x, frame.origin.x + frame.size.width)
+                } else if state.corner.is_right() {
+                    (
+                        frame.origin.x + (frame.size.width - f64::from(RECORDING_COMPACT_WIDTH)),
+                        frame.origin.x + frame.size.width,
+                    )
+                } else {
+                    (
+                        frame.origin.x,
+                        frame.origin.x + f64::from(RECORDING_COMPACT_WIDTH),
+                    )
+                };
+                let inside = mouse.x >= min_x
+                    && mouse.x <= max_x
+                    && mouse.y >= frame.origin.y
+                    && mouse.y <= frame.origin.y + frame.size.height;
+                ns_window.setIgnoresMouseEvents(!inside);
+                if !state.force_expanded && state.hovered != inside {
+                    state.hovered = inside;
+                    dirty = true;
+                }
+            }
+        }
+        if dirty {
+            cx.notify();
+        }
+    }
+
+    fn render_recording(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let PanelKind::Recording(state) = &self.kind else {
+            unreachable!("render_recording requires PanelKind::Recording");
+        };
+        let expanded = state.hovered || state.force_expanded || state.drag.is_some();
+        let target_width = if expanded {
+            RECORDING_PANEL_WIDTH
+        } else {
+            RECORDING_COMPACT_WIDTH
+        };
+        let animated_width = window.spring("recording-capsule-width", target_width, SPRING_SNAP);
+        let pill_width = if state.preview && !state.force_expanded {
+            RECORDING_COMPACT_WIDTH - 8.0
+        } else {
+            (animated_width - 8.0).max(RECORDING_COMPACT_WIDTH - 8.0)
+        };
+        let pulse = if state.preview || crate::motion::reduced_motion() {
+            1.0
+        } else {
+            0.725 + 0.275 * (state.started.elapsed().as_secs_f32() * std::f32::consts::PI).cos()
+        };
+        let elapsed = meeting::format_duration(state.started.elapsed().as_millis() as u64);
+        let title = state.title.clone();
+        let pending_turns = state.pending_turns;
+        let has_transcript = state.has_transcript;
+        let copied_new = matches!(state.copied, Some((RecordingCopyKind::New, _)));
+        let copied_all = matches!(state.copied, Some((RecordingCopyKind::All, _)));
+        let copy_new_enabled = pending_turns > 0 || copied_new;
+        let copy_all_enabled = has_transcript || copied_all;
+        let copy_new_label = if copied_new {
+            "Copied".to_string()
+        } else if pending_turns > 0 {
+            format!("Copy new ({pending_turns})")
+        } else {
+            "Copy new".to_string()
+        };
+        let copy_all_label = if copied_all { "Copied" } else { "Copy all" };
+        let open_id = state.id.clone();
+        let open_commands = self.commands.clone();
+        let stop_commands = self.commands.clone();
+        let align_right = state.corner.is_right();
+
+        div()
+            .size_full()
+            .p_1()
+            .flex()
+            .when(align_right, |row| row.justify_end())
+            .when(!align_right, |row| row.justify_start())
+            .child(
+                div()
+                    .id("recording-capsule")
+                    .h_full()
+                    .w(px(pill_width))
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .pl_3p5()
+                    .pr_2()
+                    .bg(rgb(CANVAS))
+                    .border_1()
+                    .border_color(rgb(LINE_STRONG))
+                    .rounded_full()
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|panel, _, _, cx| panel.begin_drag(cx)),
+                    )
+                    .child(status_dot(DANGER).size_2().opacity(pulse))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_caption()
+                            .text_monospace()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgb(TEXT_SECONDARY))
+                            .child(elapsed),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            truncated_line(FOOTNOTE, title)
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(rgb(TEXT_PRIMARY)),
+                        ),
+                    )
+                    .when(!expanded && pending_turns > 0, |pill| {
+                        pill.child(tag(Tone::Accent, format!("+{pending_turns}")))
+                    })
+                    .when(expanded, |pill| {
+                        pill.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    small_button(ButtonKind::Secondary, copy_new_label)
+                                        .id("recording-copy-new")
+                                        .w(px(RECORDING_COPY_NEW_WIDTH))
+                                        .justify_center()
+                                        .rounded_full()
+                                        .when(!copy_new_enabled, |btn| {
+                                            btn.opacity(DISABLED_OPACITY).cursor_default()
+                                        })
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(|panel, _, _, cx| {
+                                            panel.copy_new_turns(cx);
+                                        })),
+                                )
+                                .child(
+                                    small_button(ButtonKind::Secondary, copy_all_label)
+                                        .id("recording-copy-all")
+                                        .w(px(RECORDING_COPY_ALL_WIDTH))
+                                        .justify_center()
+                                        .rounded_full()
+                                        .when(!copy_all_enabled, |btn| {
+                                            btn.opacity(DISABLED_OPACITY).cursor_default()
+                                        })
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(|panel, _, _, cx| {
+                                            panel.copy_all_turns(cx);
+                                        })),
+                                )
+                                .child(
+                                    small_button(ButtonKind::Secondary, "Open")
+                                        .id("recording-open")
+                                        .rounded_full()
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(move |_, _, _| {
+                                            let _ = open_commands
+                                                .try_send(ControllerCommand::Open(open_id.clone()));
+                                        }),
+                                )
+                                .child(
+                                    small_button(ButtonKind::Secondary, "Stop")
+                                        .id("recording-stop")
+                                        .rounded_full()
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(move |_, window, _| {
+                                            if stop_commands
+                                                .try_send(ControllerCommand::Stop)
+                                                .is_ok()
+                                            {
+                                                window.remove_window();
+                                            }
+                                        }),
+                                ),
+                        )
+                    }),
+            )
+    }
+}
+
 impl Render for MeetingPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if matches!(self.kind, PanelKind::Recording(_)) {
+            return self.render_recording(window, cx).into_any_element();
+        }
         let (dot, title, subtitle, actions) = match &self.kind {
+            PanelKind::Recording(_) => unreachable!("handled above"),
             PanelKind::Offer(candidate) => {
                 let dismiss = self.commands.clone();
                 let record = self.commands.clone();
@@ -1417,7 +2101,7 @@ impl Render for MeetingPanel {
             PanelKind::Ready(manifest) => {
                 let path = manifest.export_path.clone();
                 let reveal_path = path.clone();
-                let copy_path = path.clone();
+                let copy_manifest = (**manifest).clone();
                 let entity = cx.entity();
                 let summary = manifest
                     .notes
@@ -1442,6 +2126,7 @@ impl Render for MeetingPanel {
                 } else {
                     format!("Ready · {title}")
                 };
+                let label = if self.copied { "Copied" } else { "Copy" };
                 (
                     SUCCESS,
                     title,
@@ -1449,26 +2134,34 @@ impl Render for MeetingPanel {
                     div()
                         .flex()
                         .gap_2()
-                        .when_some(copy_path, |actions, path| {
-                            let label = if self.copied { "Copied" } else { "Copy" };
-                            actions.child(capsule_button(
-                                ButtonKind::Secondary,
-                                "copy-transcript",
-                                label,
-                                move |_, cx| match std::fs::read_to_string(&path) {
-                                    Ok(markdown) => {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(markdown));
-                                        entity.update(cx, |panel, cx| {
-                                            panel.copied = true;
-                                            cx.notify();
-                                        });
+                        .child(
+                            button(ButtonKind::Secondary, label)
+                                .id("copy-transcript")
+                                .w(px(READY_COPY_WIDTH))
+                                .justify_center()
+                                .rounded_full()
+                                .on_click(move |_, _, cx| {
+                                    let markdown = if copy_manifest.id == "preview" {
+                                        Ok("Them: The team set the Q4 launch for November 12.\n\nYou: I'll follow up on docs owners today.".into())
+                                    } else {
+                                        meeting::transcript_markdown_for_manifest(&copy_manifest)
+                                    };
+                                    match markdown {
+                                        Ok(markdown) => {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                markdown,
+                                            ));
+                                            entity.update(cx, |panel, cx| {
+                                                panel.copied = true;
+                                                cx.notify();
+                                            });
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(%error, "could not copy meeting transcript")
+                                        }
                                     }
-                                    Err(error) => {
-                                        tracing::warn!(%error, "could not copy meeting transcript")
-                                    }
-                                },
-                            ))
-                        })
+                                }),
+                        )
                         .when_some(reveal_path, |actions, path| {
                             actions.child(capsule_button(
                                 ButtonKind::Primary,
@@ -1483,36 +2176,42 @@ impl Render for MeetingPanel {
                 )
             }
         };
-        div().size_full().p_1().child(
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .gap_3()
-                .pl_4()
-                .pr_2()
-                .bg(rgb(CANVAS))
-                .border_1()
-                .border_color(rgb(LINE_STRONG))
-                .rounded_full()
-                .shadow_lg()
-                .overflow_hidden()
-                .child(status_dot(dot).size_2())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            truncated_line(BODY, title)
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT_PRIMARY)),
-                        )
-                        .child(truncated_line(CAPTION, subtitle).text_color(rgb(TEXT_TERTIARY))),
-                )
-                .child(actions.flex_none()),
-        )
+        div()
+            .size_full()
+            .p_1()
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .pl_4()
+                    .pr_2()
+                    .bg(rgb(CANVAS))
+                    .border_1()
+                    .border_color(rgb(LINE_STRONG))
+                    .rounded_full()
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .child(status_dot(dot).size_2())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                truncated_line(BODY, title)
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(TEXT_PRIMARY)),
+                            )
+                            .child(
+                                truncated_line(CAPTION, subtitle).text_color(rgb(TEXT_TERTIARY)),
+                            ),
+                    )
+                    .child(actions.flex_none()),
+            )
+            .into_any_element()
     }
 }
 

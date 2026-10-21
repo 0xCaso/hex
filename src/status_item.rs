@@ -25,6 +25,7 @@ pub enum StatusItemAction {
     PasteLast,
     StartMeeting,
     StopMeeting,
+    CopyLastMeetingTranscript,
     OpenMeetings,
     CheckForUpdates,
     Quit,
@@ -81,6 +82,14 @@ objc2::define_class!(
             let _ = self.ivars().actions.try_send(StatusItemAction::StopMeeting);
         }
 
+        #[unsafe(method(copyLastMeetingTranscript:))]
+        fn copy_last_meeting_transcript(&self, _sender: &AnyObject) {
+            let _ = self
+                .ivars()
+                .actions
+                .try_send(StatusItemAction::CopyLastMeetingTranscript);
+        }
+
         #[unsafe(method(openMeetings:))]
         fn open_meetings(&self, _sender: &AnyObject) {
             let _ = self.ivars().actions.try_send(StatusItemAction::OpenMeetings);
@@ -115,6 +124,7 @@ struct StatusItemController {
     meeting_status: Retained<NSMenuItem>,
     meeting_start: Retained<NSMenuItem>,
     meeting_stop: Retained<NSMenuItem>,
+    meeting_copy_last: Retained<NSMenuItem>,
     meeting_open: Retained<NSMenuItem>,
     meeting_separator: Retained<NSMenuItem>,
     meeting_button: RefCell<(String, bool)>,
@@ -146,6 +156,13 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
     );
     let meeting_stop = add_item(&menu, &target, "Stop & Transcribe", sel!(stopMeeting:), mtm);
     let meeting_start = add_item(&menu, &target, "Record Meeting", sel!(startMeeting:), mtm);
+    let meeting_copy_last = add_item(
+        &menu,
+        &target,
+        "Copy Last Meeting Transcript",
+        sel!(copyLastMeetingTranscript:),
+        mtm,
+    );
     let meeting_open = add_item(&menu, &target, "Meetings…", sel!(openMeetings:), mtm);
     let meeting_separator = NSMenuItem::separatorItem(mtm);
     menu.addItem(&meeting_separator);
@@ -153,6 +170,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         &meeting_status,
         &meeting_stop,
         &meeting_start,
+        &meeting_copy_last,
         &meeting_open,
         &meeting_separator,
     ] {
@@ -263,6 +281,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
             meeting_status,
             meeting_start,
             meeting_stop,
+            meeting_copy_last,
             meeting_open,
             meeting_separator,
             meeting_button: RefCell::new((String::new(), false)),
@@ -453,6 +472,7 @@ pub fn update_meeting(state: &crate::meeting_watcher::MeetingMenuState, enabled:
         let menu = meeting_menu(state, enabled);
         let visible = enabled || menu.status.is_some();
         controller.meeting_separator.setHidden(!visible);
+        controller.meeting_copy_last.setHidden(!visible);
         controller.meeting_open.setHidden(!visible);
         controller.meeting_start.setHidden(!menu.can_start);
         controller.meeting_stop.setHidden(!menu.can_stop);

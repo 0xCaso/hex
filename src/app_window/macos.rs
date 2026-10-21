@@ -87,6 +87,7 @@ pub(super) struct Platform {
     pub(super) update_status_changed_at: Instant,
     pub(super) command_model_status: CommandModelStatus,
     pub(super) meetings_toggle: ToggleSpring,
+    pub(super) meeting_indicator_toggle: ToggleSpring,
     pub(super) meeting_notes_toggle: ToggleSpring,
     pub(super) screen_recording_permitted: bool,
     pub(super) meeting_folder_error: Option<String>,
@@ -172,6 +173,7 @@ impl Platform {
                 crate::recognition::command_model_status()
             },
             meetings_toggle: ToggleSpring::new(settings.meetings.enabled),
+            meeting_indicator_toggle: ToggleSpring::new(settings.meetings.show_recording_indicator),
             meeting_notes_toggle: ToggleSpring::new(
                 settings.meetings.summarize_with_apple_intelligence,
             ),
@@ -1263,6 +1265,16 @@ impl AppWindow {
         }
     }
 
+    pub(crate) fn open_meeting(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.settings.meetings.available() {
+            self.select_pane(Pane::Meetings, cx);
+            self.select_meeting(id);
+            cx.notify();
+        } else {
+            self.show_settings(cx);
+        }
+    }
+
     pub fn meeting_starting(&mut self, cx: &mut Context<Self>) {
         self.platform.meeting_runtime_error = None;
         self.platform.meeting_refresh_started_ms = Some(now_ms());
@@ -1668,6 +1680,10 @@ impl AppWindow {
     ) -> Div {
         let enabled = self.settings.meetings.enabled;
         let position = self.platform.meetings_toggle.render_position(window);
+        let indicator_position = self
+            .platform
+            .meeting_indicator_toggle
+            .render_position(window);
         let notes_position = self.platform.meeting_notes_toggle.render_position(window);
         let folder = self.settings.meetings.resolved_output_folder();
         let folder_label = folder
@@ -1724,6 +1740,22 @@ impl AppWindow {
                         },
                         permission_control,
                     ))
+                    .child(
+                        settings_row(
+                            tr("Show recording indicator"),
+                            tr("Floating pill to copy live transcript turns or stop recording"),
+                            toggle(indicator_position),
+                        )
+                        .id("meeting-indicator-setting")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let show = !this.settings.meetings.show_recording_indicator;
+                            if this.update_settings(cx, |settings| {
+                                settings.meetings.show_recording_indicator = show
+                            }) {
+                                this.platform.meeting_indicator_toggle.set_enabled(show);
+                            }
+                        })),
+                    )
                     .child(settings_row(
                         tr("Transcript folder"),
                         tr("Finished meetings are saved here as Markdown"),
@@ -1877,7 +1909,11 @@ impl AppWindow {
             .into_any_element();
 
         let now = now_ms();
-        let visible = self.visible_meetings(cx);
+        let visible = self
+            .visible_meetings(cx)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
         let searching = !self.meeting_query(cx).is_empty();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut current_day = None;
@@ -1889,6 +1925,14 @@ impl AppWindow {
             }
             let id = meeting.id.clone();
             let selected = self.platform.selected_meeting.as_deref() == Some(id.as_str());
+            let row_copied = self
+                .platform
+                .meeting_copied
+                .as_ref()
+                .is_some_and(|(copied_id, what)| copied_id == &id && *what == "row-transcript");
+            let can_copy_row = meeting.status == MeetingStatus::Complete;
+            let row_manifest = meeting.clone();
+            let row_copy_id = id.clone();
             let mut meta = vec![
                 meeting::clock(meeting.created_at_ms),
                 meeting_length(meeting_duration(meeting)),
@@ -1913,7 +1957,59 @@ impl AppWindow {
                                     false,
                                 ),
                                 |row, chip| row.child(chip),
-                            ),
+                            )
+                            .when(can_copy_row, |row| {
+                                row.child(
+                                    small_button(
+                                        ButtonKind::Secondary,
+                                        if row_copied { tr("Copied") } else { tr("Copy") },
+                                    )
+                                    .id(("meeting-row-copy", index))
+                                    .w(px(MEETING_ROW_COPY_WIDTH))
+                                    .justify_center()
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            let markdown = match &this
+                                                .platform
+                                                .meeting_preview_transcripts
+                                            {
+                                                Some(fixtures) => fixtures
+                                                    .get(&row_copy_id)
+                                                    .map(|entries| {
+                                                        let turns = meeting::coalesce_transcript(
+                                                            entries.clone(),
+                                                        );
+                                                        meeting::transcript_markdown(&turns)
+                                                    })
+                                                    .ok_or_else(|| {
+                                                        color_eyre::eyre::eyre!(
+                                                            "no meeting transcript is available"
+                                                        )
+                                                    }),
+                                                None => {
+                                                    meeting::speaker_turns_markdown_for_manifest(
+                                                        &row_manifest,
+                                                    )
+                                                }
+                                            };
+                                            match markdown {
+                                                Ok(text) => this.copy_meeting_text(
+                                                    row_copy_id.clone(),
+                                                    "row-transcript",
+                                                    text,
+                                                    cx,
+                                                ),
+                                                Err(error) => {
+                                                    this.platform.meeting_action_error =
+                                                        Some(error.to_string());
+                                                    cx.notify();
+                                                }
+                                            }
+                                        },
+                                    )),
+                                )
+                            }),
                     )
                     .child(list_row_meta(meta.join(" · "), selected))
                     .on_click(cx.listener(move |this, _, _, cx| {

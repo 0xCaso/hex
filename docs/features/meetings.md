@@ -13,6 +13,7 @@ Linked checks are locators unless an executed result is recorded below.
 Settings > Meetings > Meetings (beta)               // meetings.opt-in; off by default
 ├── On -> Meetings pane, menu-bar items, call detection, Option-Control-V
 │   ├── Screen & System Audio Recording missing -> "Open settings" row
+│   ├── Show recording indicator -> on by default; corner-snapping floating capsule
 │   ├── Transcript folder -> ~/Documents/Hex Meetings by default; Reveal / choose
 │   └── Summarize with Apple Intelligence -> on by default; one-line availability
 └── Off -> Controller idles; no microphone-activity inspection, pane, or shortcut
@@ -22,7 +23,9 @@ Agents -> hex mcp (read-only MCP server; works whether or not Meetings is on)
 ```
 
 Requires the selected local dictation model, Microphone, and Screen & System
-Audio Recording. The opt-in is `meetings.enabled` in `settings.json`
+Audio Recording. The opt-in is `meetings.enabled` in `settings.json`, alongside
+`meetings.show_recording_indicator` (default `true`) and
+`meetings.recording_indicator_corner` (default `top_right`)
 ([app_settings.rs](../../src/app_settings.rs) `MeetingSettings`). Recording
 refuses to start without Screen Recording and asks macOS to list HEX.
 
@@ -75,7 +78,7 @@ Brave WebRTC `getUserMedia({audio: true})` reproduction on Pro confirmed
 `NSRunningApplication == nil` before parent/bundle resolution and resolved to
 `com.brave.Browser` and `com.tinyspeck.slackmacgap` afterward.
 
-Preview: `scripts/capture-preview.sh OUT meeting-offer [--meeting-panel call-ended|ready]`.
+Preview: `scripts/capture-preview.sh OUT meeting-offer [--meeting-panel recording|recording-expanded|recording-copied|call-ended|ready]` (alias `meeting-capsule`).
 
 ### Record
 
@@ -88,6 +91,17 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      ├── "Recording · <title> · 12:34" -> Meetings pane
      │   └── title follows the provisional title (see Titles And Summary)
      └── Stop & Transcribe
+     (Idle menu bar: "Record Meeting" + "Copy Last Meeting Transcript")
+  -> Floating recording indicator (when Show recording indicator is on) // meetings.indicator
+     ├── Focus-free GPUI capsule; click-through outside the visible pill
+     ├── Drag anywhere -> snaps to nearest corner and saves recording_indicator_corner
+     ├── Compact pill: pulsing red dot (static under Reduce Motion) · tabular mm:ss · title
+     └── Hover expands actions (fixed-width inline "Copied" feedback):
+         ├── Copy new (N) -> copies turns since last Copy new or Option-Control-V;
+         │                   disabled when 0; advances shared cursor only on success
+         ├── Copy all -> echo-filtered live transcript as You/Them Markdown turns
+         ├── Open -> opens the active meeting in the Meetings pane
+         └── Stop -> Stop & Transcribe
   -> Settings window may stay closed
 
 Detected app leaves the microphone for about 3 s     // meetings.call-ended
@@ -96,7 +110,11 @@ Detected app leaves the microphone for about 3 s     // meetings.call-ended
 ```
 
 Starting a recording no longer opens the Settings window; failures still do.
-Checks: `call_end_is_reported_once_per_sustained_absence` and
+Checks: `call_end_is_reported_once_per_sustained_absence`,
+`paste_cursor_counts_coalesced_turns_and_advances_only_on_success` in
+[meeting_tests.rs](../../src/meeting_tests.rs),
+`meeting_delta_tracks_each_source_and_coalesces_turns` in
+[parakeet.rs](../../src/parakeet.rs), and
 `meeting_menu_offers_one_action_per_state` in
 [status_item.rs](../../src/status_item.rs). Native menu-bar and capsule clicks
 are unverified.
@@ -259,9 +277,10 @@ Final publication                                   // meetings.output
     ├── Never overwrites; adds " (2)"
     └── Failure -> Meeting still Complete; "Markdown not saved: …"
 
-Transcript ready capsule (15 s) -> Copy (Markdown) / Reveal
-Meetings pane -> Reveal Markdown (or Reveal Files when none)
-Option-Control-V -> Paste meeting turns added since the last paste
+Transcript ready capsule (15 s) -> Copy (Markdown or speaker turns fallback) / Reveal
+Meetings pane -> Row Copy (completed rows), detail Copy transcript, Reveal Markdown (or Reveal Files when none)
+Menu bar (idle) -> Copy Last Meeting Transcript
+Recording capsule Copy new / Option-Control-V -> One shared cursor (`MeetingPasteCursor` in `meeting.rs`); copies or pastes turns added since the last successful invocation
 ```
 
 ### Meetings Pane
@@ -271,7 +290,7 @@ Header: Search meetings (title, app, notes, final transcript) + Start recording
         (the pane's one Primary button) / Stop & transcribe (Secondary, red dot,
         elapsed time)
 List (grouped Today / Yesterday / date)
-└── Row: title (generated when present) · time · length · app · status chip
+└── Row: title (generated when present) · time · length · app · status chip · Copy (completed rows, fixed-width inline "Copied")
     └── Recording (red dot) / Transcribing / Interrupted / Failed; Ready in detail
 Detail
 ├── Title, status chip, date · time · duration · app

@@ -474,6 +474,7 @@ enum AppPreviewTarget {
     Activity,
     History,
     TranscriptionPicker,
+    #[value(alias = "meeting-capsule")]
     MeetingOffer,
 }
 
@@ -481,6 +482,9 @@ enum AppPreviewTarget {
 #[derive(Clone, Copy, ValueEnum)]
 enum MeetingPanelPreview {
     Offer,
+    Recording,
+    RecordingExpanded,
+    RecordingCopied,
     CallEnded,
     Ready,
 }
@@ -663,6 +667,13 @@ fn main() -> Result<()> {
                     &SHUTDOWN,
                     meeting_watcher::Launch::MeetingPanelPreview(match meeting_panel {
                         MeetingPanelPreview::Offer => meeting_watcher::PanelPreview::Offer,
+                        MeetingPanelPreview::Recording => meeting_watcher::PanelPreview::Recording,
+                        MeetingPanelPreview::RecordingExpanded => {
+                            meeting_watcher::PanelPreview::RecordingExpanded
+                        }
+                        MeetingPanelPreview::RecordingCopied => {
+                            meeting_watcher::PanelPreview::RecordingCopied
+                        }
                         MeetingPanelPreview::CallEnded => meeting_watcher::PanelPreview::CallEnded,
                         MeetingPanelPreview::Ready => meeting_watcher::PanelPreview::Ready,
                     }),

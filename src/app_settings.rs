@@ -19,6 +19,8 @@ static SHORTCUT_TOGGLE: AtomicBool = AtomicBool::new(false);
 static MEETINGS_ENABLED: AtomicBool = AtomicBool::new(false);
 static HEX_MICROPHONE_ENABLED: AtomicBool = AtomicBool::new(false);
 static MEETING_NOTES_ENABLED: AtomicBool = AtomicBool::new(true);
+static MEETING_INDICATOR_ENABLED: AtomicBool = AtomicBool::new(true);
+static MEETING_INDICATOR_CORNER: AtomicU8 = AtomicU8::new(0);
 static MEETING_OUTPUT_FOLDER: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -544,6 +546,37 @@ impl Default for RuntimeHotkeys {
     }
 }
 
+/// Screen corner where the floating meeting recording indicator snaps.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum MeetingIndicatorCorner {
+    #[default]
+    TopRight = 0,
+    TopLeft = 1,
+    BottomRight = 2,
+    BottomLeft = 3,
+}
+
+impl MeetingIndicatorCorner {
+    pub const fn is_right(self) -> bool {
+        matches!(self, Self::TopRight | Self::BottomRight)
+    }
+
+    pub const fn is_top(self) -> bool {
+        matches!(self, Self::TopRight | Self::TopLeft)
+    }
+
+    const fn decode(value: u8) -> Self {
+        match value {
+            1 => Self::TopLeft,
+            2 => Self::BottomRight,
+            3 => Self::BottomLeft,
+            _ => Self::TopRight,
+        }
+    }
+}
+
 /// Opt-in meeting recording. Detection, the Meetings pane, and the meeting
 /// paste shortcut stay off in release builds until `enabled` is set.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -555,6 +588,10 @@ pub struct MeetingSettings {
     /// Title meetings and write a two-sentence summary with Apple
     /// Intelligence when it is available.
     pub summarize_with_apple_intelligence: bool,
+    /// Show the floating recording indicator while a meeting is recording.
+    pub show_recording_indicator: bool,
+    /// Screen corner the floating recording indicator snaps to after dragging.
+    pub recording_indicator_corner: MeetingIndicatorCorner,
 }
 
 impl Default for MeetingSettings {
@@ -563,6 +600,8 @@ impl Default for MeetingSettings {
             enabled: false,
             output_folder: None,
             summarize_with_apple_intelligence: true,
+            show_recording_indicator: true,
+            recording_indicator_corner: MeetingIndicatorCorner::TopRight,
         }
     }
 }
@@ -1061,6 +1100,11 @@ impl AppSettings {
             self.meetings.summarize_with_apple_intelligence,
             Ordering::Release,
         );
+        MEETING_INDICATOR_ENABLED.store(self.meetings.show_recording_indicator, Ordering::Release);
+        MEETING_INDICATOR_CORNER.store(
+            self.meetings.recording_indicator_corner as u8,
+            Ordering::Release,
+        );
         *MEETING_OUTPUT_FOLDER
             .get_or_init(Default::default)
             .write()
@@ -1370,6 +1414,29 @@ pub fn meeting_notes_enabled() -> bool {
     MEETING_NOTES_ENABLED.load(Ordering::Acquire)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn meeting_indicator_enabled() -> bool {
+    MEETING_INDICATOR_ENABLED.load(Ordering::Acquire)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn meeting_indicator_corner() -> MeetingIndicatorCorner {
+    MeetingIndicatorCorner::decode(MEETING_INDICATOR_CORNER.load(Ordering::Acquire))
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn save_meeting_indicator_corner(corner: MeetingIndicatorCorner) {
+    MEETING_INDICATOR_CORNER.store(corner as u8, Ordering::Release);
+    if let Ok(mut settings) = AppSettings::load()
+        && settings.meetings.recording_indicator_corner != corner
+    {
+        settings.meetings.recording_indicator_corner = corner;
+        if let Err(error) = settings.save() {
+            tracing::warn!(%error, "could not persist meeting recording indicator corner");
+        }
+    }
+}
+
 pub fn meeting_output_folder() -> PathBuf {
     MEETING_OUTPUT_FOLDER
         .get_or_init(Default::default)
@@ -1539,6 +1606,11 @@ mod tests {
         assert!(!settings.meetings.enabled);
         assert_eq!(settings.meetings.output_folder, None);
         assert!(settings.meetings.summarize_with_apple_intelligence);
+        assert!(settings.meetings.show_recording_indicator);
+        assert_eq!(
+            settings.meetings.recording_indicator_corner,
+            MeetingIndicatorCorner::TopRight
+        );
         assert!(
             settings
                 .meetings
@@ -1554,6 +1626,11 @@ mod tests {
             serde_json::from_str(r#"{"meetings":{"enabled":true}}"#).unwrap();
         assert!(settings.meetings.enabled);
         assert!(settings.meetings.summarize_with_apple_intelligence);
+        assert!(settings.meetings.show_recording_indicator);
+        assert_eq!(
+            settings.meetings.recording_indicator_corner,
+            MeetingIndicatorCorner::TopRight
+        );
     }
 
     #[test]

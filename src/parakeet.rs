@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Once;
@@ -18,7 +18,7 @@ use crate::dictation::{DictationClip, DictationProtocol, pad_for_parakeet};
 use crate::dictation_processor::ProcessingObservation;
 use crate::gguf_session::OfflineGgufSession;
 use crate::history::{History, HistoryDraft, HistoryKind};
-use crate::meeting::{self, TranscriptEntry, TranscriptPublication};
+use crate::meeting;
 use crate::paste::{PasteMode, Paster};
 use crate::suppression::InputActivity;
 use crate::transcription::WarmTranscriber;
@@ -501,7 +501,6 @@ fn run_output_worker(
 ) {
     let mut paster = Paster::new(activity);
     let mut last_transcript = None;
-    let mut meeting_cursor = MeetingPasteCursor::default();
     let mut ordered = OrderedOutputs::default();
     while let Ok(job) = jobs.recv() {
         if matches!(job, OutputJob::PreparePaste) {
@@ -513,7 +512,6 @@ fn run_output_worker(
                 job,
                 &mut |text, mode, commit| paster.paste(text, mode, commit),
                 &mut last_transcript,
-                &mut meeting_cursor,
                 history.as_ref(),
             );
             let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
@@ -806,7 +804,6 @@ fn finish_output(
     job: OutputJob,
     paste: &mut impl FnMut(&str, PasteMode, &dyn Fn() -> bool) -> Result<()>,
     last_transcript: &mut Option<String>,
-    meeting_cursor: &mut MeetingPasteCursor,
     history: Option<&History>,
 ) -> WorkerEvent {
     match job {
@@ -898,7 +895,7 @@ fn finish_output(
                         Ok(text.to_string())
                     }),
                 PasteKind::MeetingDelta => {
-                    paste_meeting_delta(paste, meeting_cursor).map_err(|error| error.to_string())
+                    paste_meeting_delta(paste).map_err(|error| error.to_string())
                 }
             };
             WorkerEvent::Pasted { kind, result }
@@ -934,59 +931,10 @@ fn strip_transcript_protocol(text: &str, protocol: Option<&DictationProtocol>) -
     protocol.map_or_else(|| text.trim().to_string(), |protocol| protocol.strip(text))
 }
 
-#[derive(Default)]
-struct MeetingPasteCursor {
-    meeting_id: Option<String>,
-    publication: Option<TranscriptPublication>,
-    seen: HashSet<TranscriptEntry>,
-}
-
 fn paste_meeting_delta(
     paste: &mut impl FnMut(&str, PasteMode, &dyn Fn() -> bool) -> Result<()>,
-    cursor: &mut MeetingPasteCursor,
 ) -> Result<String> {
-    let meetings = meeting::list()?;
-    let selected = meeting::active_or_latest(&meetings)
-        .ok_or_else(|| eyre!("no meeting transcript is available"))?;
-    // Live and final ASR use different segment boundaries, so switching a
-    // cursor between them could repeat or skip an overlapping segment.
-    let same_meeting = cursor.meeting_id.as_deref() == Some(&selected.id);
-    let empty = HashSet::new();
-    let (publication, seen) = if same_meeting {
-        (cursor.publication, &cursor.seen)
-    } else {
-        (None, &empty)
-    };
-    let transcript = meeting::completed_transcript(&selected.id, publication)?;
-    let (text, pasted_entries) = prepare_meeting_delta(&transcript.entries, seen)?;
-    paste(&text, PasteMode::Standalone, &|| true)?;
-    if !same_meeting {
-        cursor.seen.clear();
-    }
-    cursor.meeting_id = Some(selected.id.clone());
-    cursor.publication = Some(transcript.publication);
-    cursor.seen.extend(pasted_entries);
-    Ok(text)
-}
-
-fn prepare_meeting_delta(
-    entries: &[TranscriptEntry],
-    seen: &HashSet<TranscriptEntry>,
-) -> Result<(String, Vec<TranscriptEntry>)> {
-    let new_entries = entries
-        .iter()
-        .filter(|entry| !seen.contains(*entry))
-        .cloned()
-        .collect::<Vec<_>>();
-    if new_entries.is_empty() {
-        return Err(eyre!("no new completed meeting transcript is available"));
-    }
-    let text = meeting::coalesce_transcript(new_entries.iter().cloned())
-        .into_iter()
-        .map(|entry| format!("{}: {}", entry.source.label(), entry.text))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    Ok((text, new_entries))
+    meeting::consume_active_or_latest_delta(|text| paste(text, PasteMode::Standalone, &|| true))
 }
 
 pub(crate) fn default_model_path() -> Result<std::path::PathBuf> {
@@ -1242,6 +1190,7 @@ impl Parakeet {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     use hound::WavReader;
@@ -1249,7 +1198,7 @@ mod tests {
     use super::*;
 
     use crate::dictation::resample_for_parakeet;
-    use crate::meeting::MeetingSource;
+    use crate::meeting::{MeetingSource, TranscriptEntry, prepare_meeting_delta};
 
     fn processing_job(target: TranscriptionTarget) -> ProcessorJob {
         ProcessorJob {
@@ -1662,7 +1611,6 @@ mod tests {
                         Ok(())
                     },
                     &mut last_transcript,
-                    &mut MeetingPasteCursor::default(),
                     Some(&history),
                 );
 

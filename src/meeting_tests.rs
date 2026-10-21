@@ -845,3 +845,76 @@ fn deleting_trashes_the_markdown_then_the_recording_and_refuses_while_recording(
     assert_eq!(trashed, [directory]);
     fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn paste_cursor_counts_coalesced_turns_and_advances_only_on_success() {
+    let entry = |source, start_ms, end_ms, text: &str| TranscriptEntry {
+        source,
+        start_ms,
+        end_ms,
+        text: text.into(),
+    };
+    let initial = vec![
+        entry(MeetingSource::Microphone, 0, 1_000, "First."),
+        entry(MeetingSource::Microphone, 1_200, 2_000, "Still me."),
+        entry(MeetingSource::System, 2_500, 3_500, "Got it."),
+    ];
+    let mut cursor = MeetingPasteCursor::default();
+    assert_eq!(cursor.pending_turn_count("meeting-a", &initial), 2);
+
+    // A failed paste or clipboard write must not advance the cursor.
+    let failed = cursor.consume_entries("meeting-a", TranscriptPublication::Live, &initial, |_| {
+        Err(eyre!("clipboard unavailable"))
+    });
+    assert!(failed.is_err());
+    assert_eq!(cursor.pending_turn_count("meeting-a", &initial), 2);
+    assert_eq!(cursor.publication_for("meeting-a"), None);
+
+    // A successful copy/paste commits the seen entries and drops the count to 0.
+    let mut copied = String::new();
+    let text = cursor
+        .consume_entries(
+            "meeting-a",
+            TranscriptPublication::Live,
+            &initial,
+            |delta| {
+                copied = delta.to_string();
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(text, "You: First. Still me.\n\nThem: Got it.");
+    assert_eq!(copied, text);
+    assert_eq!(cursor.pending_turn_count("meeting-a", &initial), 0);
+    assert_eq!(
+        cursor.publication_for("meeting-a"),
+        Some(TranscriptPublication::Live)
+    );
+    assert!(
+        cursor
+            .consume_entries("meeting-a", TranscriptPublication::Live, &initial, |_| Ok(
+                ()
+            ))
+            .is_err()
+    );
+
+    // Appending a new turn makes only that turn pending for the next Copy new / Option-Control-V.
+    let mut extended = initial.clone();
+    extended.push(entry(
+        MeetingSource::Microphone,
+        6_000,
+        7_000,
+        "Next point.",
+    ));
+    assert_eq!(cursor.pending_turn_count("meeting-a", &extended), 1);
+    let delta = cursor
+        .consume_entries("meeting-a", TranscriptPublication::Live, &extended, |_| {
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(delta, "You: Next point.");
+    assert_eq!(cursor.pending_turn_count("meeting-a", &extended), 0);
+
+    // Switching to a new meeting resets the seen set cleanly.
+    assert_eq!(cursor.pending_turn_count("meeting-b", &initial), 2);
+}

@@ -200,6 +200,33 @@ pub(crate) const MODAL_HEIGHT: f32 = 520.0;
 pub(crate) const PROGRESS_HEIGHT: f32 = 3.0;
 pub(crate) const PANEL_HEADER_HEIGHT: f32 = 38.0;
 pub(crate) const SETTINGS_ROW_MIN_HEIGHT: f32 = 56.0;
+/// Fixed width of a meeting row's inline Copy / Copied button.
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const MEETING_ROW_COPY_WIDTH: f32 = 58.0;
+
+// Meeting capsule geometry.
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const MEETING_PANEL_WIDTH: f32 = 420.0;
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const MEETING_PANEL_HEIGHT: f32 = 64.0;
+/// Expanded width of the floating meeting recording capsule.
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const RECORDING_PANEL_WIDTH: f32 = 548.0;
+/// Compact width of the floating meeting recording capsule at rest.
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const RECORDING_COMPACT_WIDTH: f32 = 244.0;
+/// Height of the floating meeting recording capsule window.
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const RECORDING_PANEL_HEIGHT: f32 = 48.0;
+/// Fixed width of the recording capsule's Copy new / Copied button.
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const RECORDING_COPY_NEW_WIDTH: f32 = 108.0;
+/// Fixed width of the recording capsule's Copy all / Copied button.
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const RECORDING_COPY_ALL_WIDTH: f32 = 76.0;
+/// Fixed width of the ready capsule's Copy / Copied button.
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+pub(crate) const READY_COPY_WIDTH: f32 = 68.0;
 
 // Onboarding geometry.
 /// The tour's one column: page art, copy, cards, and footer share its edges.
