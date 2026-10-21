@@ -83,6 +83,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ../resources
       ../assets
       ../packaging
+      ../macos/HexMicrophoneDriver/Info.plist
       ../sdk/commands/package.json
       ../sdk/commands/src
       ../sdk/commands/workspace-template
