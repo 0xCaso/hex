@@ -43,7 +43,7 @@ const smooth = (a, b, x) => {
 // Tuned in the prototype's knobs panel.
 const v = {
   intensity: -0.01, // < 0: follow the arc
-  cycle: 100.5,
+  cycle: 102.5,
   curve: 1.4,
   spawn: 1,
   maxCards: 22,
@@ -1781,10 +1781,10 @@ function updatePower(dt) {
   }
   renderer.setSaiyan?.(clamp(saiyan, 0, 1))
 }
-// Seamless 4 s aura bed, retriggered back to back until the wipe.
+// Seamless 4 s aura bed during Saiyan rapid-fire; stops once the finale starts so finale voice lines stay crystal-clear.
 function aura() {
-  if (powerStage !== "on" || blastStage === "after") return
-  audio.sfx("aura", { bus: "impacts", gain: 0.45 })
+  if (powerStage !== "on" || blastStage) return
+  audio.sfx("aura", { bus: "impacts", gain: 0.38, dur: 4.0 })
   setTimeout0(4, aura)
 }
 
@@ -1951,7 +1951,7 @@ function finalBlast() {
       continue
     }
     const dd = Math.hypot(c.x - hp.x, c.y - hp.y)
-    c.blastAt = time + 0.68 * (1 - Math.pow(1 - clamp(dd / diag, 0, 1), 1 / 3))
+    c.blastAt = time + 0.45 * (1 - Math.pow(1 - clamp(dd / diag, 0, 1), 1 / 3))
     c.hitDir = { x: c.x - hp.x, y: c.y - hp.y }
   }
   while (kept < 6 && !reduced) {
@@ -1970,7 +1970,7 @@ function finalBlast() {
     audio.sfx("dizzy", { gain: 0.6 })
     setTimeout0(0.45, () => {
       const ex = manifest.voice.dizzy.takes[0]
-      say(ex, { gain: 0.95, level: 0.3 })
+      say(ex, { gain: 1.05, level: 0.3, duck: 0.85 })
       const p = headPos()
       ex.words.forEach((w, k) =>
         setTimeout0(w.t, () => launch(w.text, null, { point: { x: p.x + (k - 1.5) * 110, y: p.y + headR() * 1.9 }, size: 18, weight: 500, i: 0, quiet: true })),
@@ -1983,25 +1983,41 @@ function finalBlast() {
     return
   }
 
-  // ─── Beat 1 (Fourth Wall Stare): spin stops, squints at camera, leans in ───
+  // ─── Beat 1 (Fourth Wall Stare): spin stops, beat of silence so explosions decay, then leans in ───
   setTimeout0(0.85, () => {
     blastStage = "stare"
     finale.phase = "stare"
     finale.spin = 0
     head.t = 0
-    setTimeout0(0.25, () => {
+    // Immediate sidechain duck to hush any lingering explosion tails before he speaks
+    audio.setDuck(0.92, 3.6)
+    setTimeout0(0.6, () => {
       const stareTake = manifest.voice["fourth-stare"]?.takes?.[0]
-      if (stareTake) say(stareTake, { gain: 1.05, level: 0.45 })
+      if (stareTake) {
+        say(stareTake, { gain: 1.65, level: 0.48, duck: 0.94 })
+        screenBreak.setCaption({
+          words: stareTake.words,
+          startRtime: rtime,
+          endRtime: rtime + stareTake.dur,
+        })
+      }
     })
   })
 
   // ─── Beat 2 (Cracking the Screen): shoots Z-axis words straight at the glass ───
-  setTimeout0(3.85, () => {
+  setTimeout0(4.25, () => {
     blastStage = "cracking"
     finale.phase = "cracking"
     head.t = 0
     const fireTake = manifest.voice["fourth-fire"]?.takes?.[0]
-    if (fireTake) say(fireTake, { gain: 1.08, level: 1.0 })
+    if (fireTake) {
+      say(fireTake, { gain: 1.65, level: 1.0, duck: 0.85 })
+      screenBreak.setCaption({
+        words: fireTake.words,
+        startRtime: rtime,
+        endRtime: rtime + fireTake.dur,
+      })
+    }
 
     const rootRect = root.getBoundingClientRect()
     const dlEl = root.querySelector(".hero .download")
@@ -2010,13 +2026,13 @@ function finalBlast() {
     const dlY = dlRect && dlRect.height > 0 ? dlRect.top - rootRect.top + dlRect.height * 0.5 : H * 0.72
 
     const targets = [
-      { x: W * 0.33, y: H * 0.34, hitsDownload: false },
-      { x: W * 0.68, y: H * 0.37, hitsDownload: false },
-      { x: W * 0.36, y: H * 0.61, hitsDownload: false },
-      { x: dlX, y: dlY, hitsDownload: true },
-      { x: W * 0.64, y: H * 0.25, hitsDownload: false },
-      { x: W * 0.6, y: H * 0.66, hitsDownload: false },
-      { x: W * 0.5, y: H * 0.48, hitsDownload: false, final: true },
+      { x: W * 0.31, y: H * 0.31, hitsDownload: false },
+      { x: W * 0.69, y: H * 0.29, hitsDownload: false },
+      { x: W * 0.36, y: H * 0.56, hitsDownload: false },
+      { x: dlX - 68, y: dlY - 22, hitsDownload: true },
+      { x: W * 0.66, y: H * 0.48, hitsDownload: false },
+      { x: W * 0.61, y: H * 0.66, hitsDownload: false },
+      { x: W * 0.5, y: H * 0.46, hitsDownload: false, final: true },
     ]
 
     const wordsList = fireTake?.words ?? [
@@ -2048,13 +2064,13 @@ function finalBlast() {
           onImpact: () => {
             const pan = (tgt.x / W) * 1.2 - 0.6
             if (!isFinal) {
+              // Crisp, ducked glass-crack transient so the shouted words stay 100% intelligible
               audio.sfx(idx % 2 === 0 ? "glass-crack-1" : "glass-crack-2", {
                 bus: "impacts",
-                gain: 0.88,
-                rate: rnd(0.94, 1.08),
+                gain: 0.32,
+                rate: rnd(0.96, 1.08),
                 pan,
               })
-              audio.sfx("hit", { bus: "impacts", gain: 0.55, rate: rnd(0.92, 1.08), pan })
               fx.push({ kind: 0, x: tgt.x, y: tgt.y, r: 0, rMax: 165 * v.fx, width: 2.8, t: 0, k: 1.1, age: 0, life: 0.34 })
               fx.push({ kind: 1, x: tgt.x, y: tgt.y, r: 68 * v.fx, t: 0, k: 1.15, age: 0, life: 0.08 })
               chip(tgt.x, tgt.y, 0, -1, 18, 0.9)
@@ -2070,17 +2086,27 @@ function finalBlast() {
               head.t = 0
               for (const c of live) if (c.state !== "dead") retire(c)
               live.length = 0
-              audio.sfx("glass-shatter", { bus: "impacts", gain: 0.96 })
-              audio.sfx("boom", { bus: "impacts", gain: 0.78, rate: 0.85 })
-              setTimeout0(0.32, () => audio.sfx("glass-tinkle", { bus: "impacts", gain: 0.82 }))
+              // Brief window for the glass shatter crash + tinkle before sidechain-ducking for the punchline
+              audio.setDuck(0, 0)
+              audio.sfx("glass-shatter", { bus: "impacts", gain: 0.72, dur: 1.15 })
+              audio.sfx("boom", { bus: "impacts", gain: 0.48, rate: 0.88, dur: 0.8 })
+              setTimeout0(0.28, () => audio.sfx("glass-tinkle", { bus: "impacts", gain: 0.46, dur: 0.9 }))
               fx.push({ kind: 0, x: tgt.x, y: tgt.y, r: 0, rMax: diag * 0.85, width: 4.5, t: 0, k: 1.35, age: 0, life: 0.62 })
               fx.push({ kind: 1, x: tgt.x, y: tgt.y, r: 160 * v.fx, t: 0, k: 1.4, age: 0, life: 0.12 })
               addBlastLight(tgt.x, tgt.y, diag * 0.65, 1.75, 0.52)
               hitStop.remaining = Math.max(hitStop.remaining, 0.085)
               cam.trauma = 1
-              setTimeout0(0.32, () => {
+              // Hold 1.18s while the screen shatters into the void, then sidechain-duck hard & deliver the punchline!
+              setTimeout0(1.18, () => {
                 const goneTake = manifest.voice["fourth-gone"]?.takes?.[0]
-                if (goneTake) say(goneTake, { gain: 1.05, level: 0.65 })
+                if (goneTake) {
+                  say(goneTake, { gain: 1.72, level: 0.68, duck: 0.95 })
+                  screenBreak.setCaption({
+                    words: goneTake.words,
+                    startRtime: rtime,
+                    endRtime: rtime + goneTake.dur,
+                  })
+                }
               })
             }
           },
@@ -2090,17 +2116,19 @@ function finalBlast() {
   })
 
   // ─── Beat 4 (Time-Reverse Crystalline Rebuild): shards, Download button, and title fly back ───
-  setTimeout0(11.15, () => {
+  setTimeout0(12.6, () => {
     blastStage = "rebuilding"
     finale.phase = "rebuilding"
     head.t = 0
-    audio.sfx("glass-rebuild", { bus: "impacts", gain: 0.9 })
-    screenBreak.startRebuild(1.78)
+    screenBreak.setCaption(null)
+    audio.setDuck(0, 0)
+    audio.sfx("glass-rebuild", { bus: "impacts", gain: 0.76, dur: 1.8 })
+    screenBreak.startRebuild(1.8)
     returnTitleWords()
   })
 
   // ─── Beat 5 (Dizzy Exhale & Reset to Calm) ───
-  setTimeout0(13.0, startDizzyExhale)
+  setTimeout0(14.55, startDizzyExhale)
 }
 
 function updateFinale(dt) {
@@ -2358,7 +2386,8 @@ function step(realDt) {
       sparkGravity: 380,
     },
   }))
-  screenBreak.stepAndDraw(realDt)
+  screenBreak.setHeadLight(c.x, c.y, headR())
+  screenBreak.stepAndDraw(realDt, rtime)
 }
 
 // ─── Input ─────────────────────────────────────────────────────────────────────
