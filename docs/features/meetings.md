@@ -285,7 +285,7 @@ Final publication                                   // meetings.output
     └── Failure -> Meeting still Complete; "Markdown not saved: …"
 
 Transcript ready capsule (15 s) -> Copy (Markdown or speaker turns fallback) / Reveal
-Meetings pane -> Row Copy (completed rows), detail Copy transcript, Reveal Markdown (or Reveal Files when none)
+Meetings pane -> Row Copy glyph (selected completed row), detail Copy transcript, Reveal Markdown (or Reveal Files when none)
 Menu bar (idle) -> Copy Last Meeting Transcript
 Recording capsule Copy new / Option-Control-V -> One shared cursor (`MeetingPasteCursor` in `meeting.rs`); copies or pastes turns added since the last successful invocation
 ```
@@ -297,7 +297,7 @@ Header: Search meetings (title, app, notes, final transcript) + Start recording
         (the pane's one Primary button) / Stop & transcribe (Secondary, red dot,
         elapsed time)
 List (grouped Today / Yesterday / date)
-└── Row: title (generated when present) · time · length · app · status chip · Copy (completed rows, fixed-width inline "Copied")
+└── Row: title (generated when present) · time · length · app · status chip · Copy glyph (selected completed row; check mark once copied)
     └── Recording (red dot) / Transcribing / Interrupted / Failed; Ready in detail
 Detail
 ├── Title, status chip, date · time · duration · app

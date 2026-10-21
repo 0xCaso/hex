@@ -1,12 +1,17 @@
 //! Real AppKit materials behind GPUI windows.
 //!
 //! GPUI paints into a non-opaque `CAMetalLayer` inside the window's content
-//! view. An `NSVisualEffectView` added to that content view *below* GPUI's
-//! view shows through wherever GPUI paints nothing, and WindowServer
-//! composites it off-process. This gives the sidebar a true `.sidebar`
-//! material (dimmed by AppKit while the window is inactive, opaque under
-//! Reduce Transparency) and the floating capsules HUD glass, without a GPUI
-//! fork change. GPUI's own `WindowBackgroundAppearance::Blurred` is not used:
+//! view. A material view added to that content view *below* GPUI's view
+//! shows through wherever GPUI paints nothing, and WindowServer composites
+//! it off-process, without a GPUI fork change.
+//!
+//! On macOS 26 and later the sidebar column and the capsules are Liquid
+//! Glass (`NSGlassEffectView`). Glass samples whatever lies beneath it, so
+//! nothing opaque may sit under the sidebar inside the window. Glass stays translucent
+//! while the window is inactive and turns opaque under Reduce Transparency.
+//! Earlier releases fall back to `NSVisualEffectView` with the `.sidebar` and
+//! HUD materials; the `.sidebar` material looks flat grey on macOS 26+
+//! because the system now reserves its translucency for glass. GPUI's own `WindowBackgroundAppearance::Blurred` is not used:
 //! it strips the material's tint and saturation, and on macOS 27 its
 //! `Selection` material no longer blurs at all.
 
@@ -14,7 +19,7 @@ use gpui::Window;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSToolbar, NSView, NSVisualEffectBlendingMode,
+    NSAutoresizingMaskOptions, NSGlassEffectView, NSToolbar, NSView, NSVisualEffectBlendingMode,
     NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
     NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
@@ -43,6 +48,19 @@ fn force_dark(ns_window: &objc2_app_kit::NSWindow) {
         objc2_app_kit::NSAppearanceNameDarkAqua
     });
     objc2_app_kit::NSAppearanceCustomization::setAppearance(ns_window, appearance.as_deref());
+}
+
+/// Whether this macOS has Liquid Glass. Checked once at runtime, since the
+/// class is missing before macOS 26 and allocating it there would crash.
+pub(crate) fn has_glass() -> bool {
+    static GLASS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GLASS.get_or_init(|| objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some())
+}
+
+fn glass_view(mtm: MainThreadMarker, frame: NSRect, radius: f64) -> Retained<NSGlassEffectView> {
+    let glass = NSGlassEffectView::initWithFrame(mtm.alloc(), frame);
+    glass.setCornerRadius(radius);
+    glass
 }
 
 fn effect_view(
@@ -74,17 +92,25 @@ pub(crate) fn install_sidebar_material(window: &Window, sidebar_width: f32) {
         force_dark(&ns_window);
     }
     let height = content.bounds().size.height;
-    let sidebar = effect_view(
-        mtm,
-        NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(f64::from(sidebar_width), height),
-        ),
-        NSVisualEffectMaterial::Sidebar,
-        NSVisualEffectState::FollowsWindowActiveState,
+    let column = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(f64::from(sidebar_width), height),
     );
-    sidebar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
-    content.addSubview_positioned_relativeTo(&sidebar, NSWindowOrderingMode::Below, None);
+    if has_glass() {
+        // Edge to edge; the window's own corners round it.
+        let glass = glass_view(mtm, column, 0.0);
+        glass.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
+        content.addSubview_positioned_relativeTo(&glass, NSWindowOrderingMode::Below, None);
+    } else {
+        let sidebar = effect_view(
+            mtm,
+            column,
+            NSVisualEffectMaterial::Sidebar,
+            NSVisualEffectState::FollowsWindowActiveState,
+        );
+        sidebar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
+        content.addSubview_positioned_relativeTo(&sidebar, NSWindowOrderingMode::Below, None);
+    }
 
     if let Some(ns_window) = content.window() {
         let toolbar = NSToolbar::new(mtm);
@@ -95,14 +121,14 @@ pub(crate) fn install_sidebar_material(window: &Window, sidebar_width: f32) {
     }
 }
 
-/// HUD glass behind a floating capsule: a pill of `size` at `origin` (GPUI
+/// Glass behind a floating capsule: a pill of `size` at `origin` (GPUI
 /// coordinates, top-left origin) inside a transparent panel window. Returns
 /// the view so animated capsules can resize it.
 pub(crate) fn install_capsule_glass(
     window: &Window,
     origin: (f32, f32),
     size: (f32, f32),
-) -> Option<Retained<NSVisualEffectView>> {
+) -> Option<Retained<NSView>> {
     let mtm = MainThreadMarker::new()?;
     let (_, content) = content_views(window)?;
     // The window server would shadow the whole transparent panel as a
@@ -110,13 +136,18 @@ pub(crate) fn install_capsule_glass(
     if let Some(ns_window) = content.window() {
         ns_window.setHasShadow(false);
     }
-    let glass = effect_view(
-        mtm,
-        NSRect::default(),
-        NSVisualEffectMaterial::HUDWindow,
-        NSVisualEffectState::Active,
-    );
-    glass.setWantsLayer(true);
+    let glass: Retained<NSView> = if has_glass() {
+        Retained::into_super(glass_view(mtm, NSRect::default(), 0.0))
+    } else {
+        let hud = effect_view(
+            mtm,
+            NSRect::default(),
+            NSVisualEffectMaterial::HUDWindow,
+            NSVisualEffectState::Active,
+        );
+        hud.setWantsLayer(true);
+        Retained::into_super(hud)
+    };
     if let Some(ns_window) = content.window() {
         force_dark(&ns_window);
     }
@@ -127,11 +158,7 @@ pub(crate) fn install_capsule_glass(
 
 /// Moves and resizes capsule glass without implicit Core Animation, so it
 /// tracks a GPUI-sprung width frame by frame.
-pub(crate) fn set_capsule_glass_frame(
-    glass: &NSVisualEffectView,
-    origin: (f32, f32),
-    size: (f32, f32),
-) {
+pub(crate) fn set_capsule_glass_frame(glass: &NSView, origin: (f32, f32), size: (f32, f32)) {
     let Some(superview) = (unsafe { glass.superview() }) else {
         return;
     };
@@ -146,7 +173,9 @@ pub(crate) fn set_capsule_glass_frame(
     CATransaction::begin();
     CATransaction::setDisableActions(true);
     glass.setFrame(frame);
-    if let Some(layer) = glass.layer() {
+    if let Some(liquid) = glass.downcast_ref::<NSGlassEffectView>() {
+        liquid.setCornerRadius(f64::from(size.1) / 2.0);
+    } else if let Some(layer) = glass.layer() {
         layer.setCornerRadius(f64::from(size.1) / 2.0);
         layer.setMasksToBounds(true);
     }

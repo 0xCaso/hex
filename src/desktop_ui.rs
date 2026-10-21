@@ -62,16 +62,10 @@ impl NavigationIcon {
 }
 
 #[cfg(target_os = "macos")]
-fn navigation_icon(icon: NavigationIcon, selected: bool) -> AnyElement {
-    sf_symbol(
-        icon.sf_symbol(),
-        ICON_SIZE,
-        if selected {
-            TEXT_PRIMARY
-        } else {
-            TEXT_SECONDARY
-        },
-    )
+fn navigation_icon(icon: NavigationIcon, _selected: bool) -> AnyElement {
+    // Sidebar symbols match their labels, as Finder's do over glass; grey
+    // strokes wash out against the backdrop.
+    sf_symbol(icon.sf_symbol(), ICON_SIZE, TEXT_PRIMARY)
 }
 
 /// An SF Symbol rasterized by AppKit at medium weight.
@@ -339,7 +333,7 @@ pub(crate) fn content_frame() -> Div {
 }
 
 /// The navigation column: [`SIDEBAR_WIDTH`] wide, clear of the title bar. On
-/// macOS it is transparent over an `NSVisualEffectView` sidebar material.
+/// macOS it is transparent over the native sidebar glass or material.
 pub(crate) fn sidebar_frame() -> Div {
     div()
         .w(px(SIDEBAR_WIDTH))
@@ -1030,6 +1024,26 @@ pub(crate) fn busy_label(label: impl IntoElement) -> Div {
 pub(crate) fn disclosure_button(label: impl Into<SharedString>) -> Div {
     disclosure_frame()
         .w(px(DISCLOSURE_WIDTH))
+        .child(truncated_line(BODY, label).flex_1())
+        .child(icon(Icon::UpDown, TEXT_SECONDARY))
+}
+
+/// A pop-up button that hugs its title, as AppKit's do, up to
+/// [`DISCLOSURE_WIDTH`]. Rows right-align it, so trailing edges still line up.
+pub(crate) fn fitted_disclosure_button(label: impl Into<SharedString>, window: &mut Window) -> Div {
+    let label = label.into();
+    let font_size = px(BODY.size);
+    let style = window.text_style();
+    let runs = vec![style.to_run(label.len())];
+    let text = window
+        .text_system()
+        .shape_line(label.clone(), font_size, &runs, None);
+    // Leading 10 pt, gap 4 pt, chevron, trailing 6 pt.
+    let chrome = 10.0 + 4.0 + Icon::UpDown.optical_size() + 6.0;
+    let width =
+        (f32::from(text.width).ceil() + chrome).clamp(DISCLOSURE_MIN_WIDTH, DISCLOSURE_WIDTH);
+    disclosure_frame()
+        .w(px(width))
         .child(truncated_line(BODY, label).flex_1())
         .child(icon(Icon::UpDown, TEXT_SECONDARY))
 }

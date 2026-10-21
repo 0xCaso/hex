@@ -1967,15 +1967,16 @@ impl AppWindow {
                                 ),
                                 |row, chip| row.child(chip),
                             )
-                            .when(can_copy_row, |row| {
+                            // Only the selected row offers Copy, as a glyph, so the
+                            // list reads as titles rather than a column of buttons.
+                            .when(can_copy_row && selected, |row| {
                                 row.child(
-                                    small_button(
+                                    icon_button(
                                         ButtonKind::Secondary,
-                                        if row_copied { tr("Copied") } else { tr("Copy") },
+                                        if row_copied { Icon::Check } else { Icon::Copy },
                                     )
                                     .id(("meeting-row-copy", index))
-                                    .w(px(MEETING_ROW_COPY_WIDTH))
-                                    .justify_center()
+                                    .size(px(CONTROL_HEIGHT_SMALL))
                                     .on_click(cx.listener(
                                         move |this, _, _, cx| {
                                             cx.stop_propagation();

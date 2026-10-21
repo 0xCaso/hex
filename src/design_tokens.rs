@@ -50,6 +50,9 @@ pub(crate) const RECORDING_STOP_FILL: u32 = 0xff453a2e;
 /// The graphite laid over the HUD material so capsules stay legible over
 /// bright windows.
 pub(crate) const GLASS_OVER_MATERIAL: u32 = 0x1c1c1eb3;
+/// The light graphite over Liquid Glass capsules (macOS 26+), which carry
+/// their own depth: enough for white text over a bright window, no more.
+pub(crate) const GLASS_OVER_LIQUID: u32 = 0x1c1c1e47;
 /// The graphite that tints HUD glass where no material is available.
 pub(crate) const GLASS_TINT: u32 = 0x1c1c1eeb;
 
@@ -356,6 +359,8 @@ pub(crate) const MENU_OFFSET: f32 = 4.0;
 pub(crate) const NAV_ITEM_HEIGHT: f32 = 28.0;
 pub(crate) const MULTILINE_INPUT_HEIGHT: f32 = 76.0;
 pub(crate) const DISCLOSURE_WIDTH: f32 = 220.0;
+/// The narrowest pop-up button, so one-word choices are still easy targets.
+pub(crate) const DISCLOSURE_MIN_WIDTH: f32 = 72.0;
 pub(crate) const SEARCH_FIELD_WIDTH: f32 = 200.0;
 /// The widest an inline field beside a row label grows.
 pub(crate) const MODE_FIELD_WIDTH: f32 = 300.0;
@@ -395,9 +400,6 @@ pub(crate) const TRANSCRIPT_SPEAKER_WIDTH: f32 = 52.0;
 /// The timestamp column of a meeting transcript.
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 pub(crate) const TRANSCRIPT_TIME_WIDTH: f32 = 44.0;
-/// Fixed width of a meeting row's inline Copy / Copied button.
-#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
-pub(crate) const MEETING_ROW_COPY_WIDTH: f32 = 58.0;
 
 // Meeting capsule geometry. Capsules are concentric: a 60 pt pill, 12 pt
 // padding, 36 pt pill buttons.

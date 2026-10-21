@@ -1713,7 +1713,7 @@ struct MeetingPanel {
     commands: SyncSender<ControllerCommand>,
     copied: bool,
     /// The HUD material behind the capsule.
-    glass: Option<objc2::rc::Retained<objc2_app_kit::NSVisualEffectView>>,
+    glass: Option<objc2::rc::Retained<objc2_app_kit::NSView>>,
 }
 
 /// Fades a capsule out, then closes its window.
@@ -1988,14 +1988,7 @@ impl MeetingPanel {
                 .pl_4()
                 .pr_1p5()
                 .rounded_full()
-                .capsule_shadow()
-                .border(HAIRLINE)
-                .border_color(rgba(GLASS_RIM))
-                .bg(rgba(if self.glass.is_some() {
-                    GLASS_OVER_MATERIAL
-                } else {
-                    GLASS_TINT
-                }))
+                .map(|pill| capsule_chrome(pill, self.glass.is_some()))
                 .overflow_hidden()
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -2291,14 +2284,7 @@ impl Render for MeetingPanel {
                     .pl(px((CAPSULE_HEIGHT - CAPSULE_LENS_SIZE) / 2.0))
                     .pr(px((CAPSULE_HEIGHT - CAPSULE_BUTTON_HEIGHT) / 2.0))
                     .rounded_full()
-                    .capsule_shadow()
-                    .border(HAIRLINE)
-                    .border_color(rgba(GLASS_RIM))
-                    .bg(rgba(if self.glass.is_some() {
-                        GLASS_OVER_MATERIAL
-                    } else {
-                        GLASS_TINT
-                    }))
+                    .map(|pill| capsule_chrome(pill, self.glass.is_some()))
                     .overflow_hidden()
                     .child(lens.render())
                     .child(
@@ -2393,6 +2379,23 @@ pub fn probe() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The pill's own paint over its native glass. Liquid Glass brings its rim,
+/// shadow, and depth, so the pill adds only a light tint for legible text;
+/// the older HUD material needs the painted rim, shadow, and a denser tint.
+fn capsule_chrome<E: Styled>(pill: E, has_material: bool) -> E {
+    if has_material && crate::window_material::has_glass() {
+        return pill.bg(rgba(GLASS_OVER_LIQUID));
+    }
+    pill.capsule_shadow()
+        .border(HAIRLINE)
+        .border_color(rgba(GLASS_RIM))
+        .bg(rgba(if has_material {
+            GLASS_OVER_MATERIAL
+        } else {
+            GLASS_TINT
+        }))
 }
 
 #[cfg(test)]

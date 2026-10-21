@@ -74,8 +74,9 @@ SCRIM             #00000099 // modal backdrops
 
 Over a material (RGBA): `SIDEBAR_SELECTED` / `SIDEBAR_SELECTED_INACTIVE` for
 the sidebar selection in key and non-key windows, `GLASS_FILL`, `GLASS_RIM`,
-`GLASS_OVER_MATERIAL` (graphite laid over HUD glass so capsules stay legible
-over bright windows), and `GLASS_TINT` where no material exists.
+`GLASS_OVER_LIQUID` (the light graphite over Liquid Glass capsules),
+`GLASS_OVER_MATERIAL` (the denser graphite over pre-26 HUD glass), and
+`GLASS_TINT` where no material exists.
 
 ### Text
 
@@ -195,16 +196,22 @@ while unsettled, and honours `accessibilityDisplayShouldReduceMotion` (or
 [`src/window_material.rs`](../src/window_material.rs) puts real AppKit
 materials behind GPUI's transparent Metal layer:
 
-- **Sidebar:** an `NSVisualEffectView` (`.sidebar`, follows the window's active
-  state) under the navigation column, which paints nothing itself. AppKit dims
-  it in a non-key window and makes it opaque under Reduce Transparency;
-  `navigation_item(…, window_active)` dims the selection to match.
+- **Sidebar:** on macOS 26+ an edge-to-edge `NSGlassEffectView` under the
+  navigation column, which paints nothing itself. Glass samples whatever is
+  beneath it, so nothing opaque may sit under the sidebar inside the window;
+  it stays translucent in a non-key window (as Finder's does) and turns opaque
+  under Reduce Transparency. `navigation_item(…, window_active)` dims the
+  selection in a non-key window. Earlier macOS falls back to an
+  `NSVisualEffectView` (`.sidebar`, follows the active state). On 26+ that
+  material renders flat grey, which is why v1 of this design looked opaque.
 - **Toolbar:** an empty unified `NSToolbar` places the traffic lights in the
   52 pt toolbar row, with their native hit areas and full-screen behaviour.
-- **Capsules:** HUD glass behind each meeting capsule, masked to the pill and
-  resized with it. The panel's window-server shadow is off (it would outline
-  the whole transparent panel); the pill draws `capsule_shadow()` inside its
-  8 pt margin.
+- **Capsules:** Liquid Glass behind each meeting capsule, its corner radius
+  half the pill height and resized with it; the pill adds only
+  `GLASS_OVER_LIQUID`, since glass brings its own rim and depth. The panel's
+  window-server shadow is off (it would outline the whole transparent panel).
+  Before macOS 26 the capsules use HUD glass and the pill draws its rim and
+  `capsule_shadow()` inside its 8 pt margin.
 
 GPUI's `WindowBackgroundAppearance::Blurred` is not used: it strips the
 material's tint and saturation.
@@ -229,7 +236,7 @@ and inactive-window dimming.
 | Any text that must fit one line | `truncated_line(STEP, text)` (ends in "…") |
 | Group of rows | `panel()` (no box: rows divided by hairlines); titled: `panel_header(title, action)` |
 | Separators | `Hairlines`: `.hairline_t()`, `.hairline_b()`, `.hairline_r()` |
-| Settings | `settings_section_label` → `panel` → `settings_row(title, description, control)` |
+| Settings | `settings_section_label` → `panel` → `settings_row(title, description, control)`; every row keeps its hairline, controls end on one trailing edge, and a shortcut is bare keycaps whose popover holds Record, Key side, and Clear |
 | Label above a group | `section_label` (caption, semibold, tertiary) |
 | Label / value in a detail | `detail_row` |
 | Main action of a view (at most one) | `button(ButtonKind::Primary, …)` |
@@ -238,12 +245,13 @@ and inactive-window dimming.
 | Action inside a row | `small_button(kind, …)` |
 | Icon-only action | `icon_button(ButtonKind::Ghost, Icon)`; `Secondary` when it stands alone |
 | Work in progress where a button was | `busy_label` |
-| Pop-up button | `disclosure_button(label)` (up/down chevron); custom content: `disclosure_frame()` |
+| Pop-up button | `fitted_disclosure_button(label, window)` hugs its title, right-aligned in the row; fixed-width `disclosure_button(label)` in form grids; custom content: `disclosure_frame()` |
 | Popover / menu and its choices | `menu()`, `menu_item(selected)`; under a control: `dropdown_menu()` / `dropdown_menu_with_progress` |
 | Destructive / unavailable menu choice | `danger_menu_item()` after `menu_separator()`; `disabled_menu_item()` |
 | Overflow of less common actions | `icon_button(ButtonKind::Secondary, Icon::Ellipsis)` opening a `dropdown_menu()` |
 | On/off | `toggle(position)`; never repeat "On"/"Off" beside it |
-| A few exclusive choices | `segmented_control` + `segmented_item`, or the sliding variants |
+| Two exclusive choices | `sliding_segmented_control`; three or more use a pop-up button |
+| Setting on/off | a switch, never a two-segment control |
 | Status (never clickable) | `tag(Tone, label)`: coloured caption text |
 | Count | `count_badge(n)` |
 | Live / recorded state | `status_dot(colour)` |

@@ -29,13 +29,14 @@ use crate::desktop_transcription_picker::{
 use crate::desktop_ui::{
     ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, content_frame, danger_menu_item,
     detail_body, detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
-    disclosure_frame, dropdown_menu_with_progress, error_message, error_panel, hotkey_keycaps,
-    icon, icon_button, inline_error, list_row, list_row_meta, list_row_title, listener_status,
-    menu_item, menu_with_progress, mix_color, navigation_item, pane_content, pane_detail,
-    pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header,
-    progress_track, section_label, settings_copy, settings_row, settings_section_label,
-    sidebar_frame, sliding_segmented_control, sliding_segmented_for, sliding_segmented_item,
-    small_button, split_body, status_dot, tag, toggle, truncated_line, window_frame,
+    disclosure_frame, dropdown_menu_with_progress, error_message, error_panel,
+    fitted_disclosure_button, hotkey_keycaps, icon, icon_button, inline_error, list_row,
+    list_row_meta, list_row_title, listener_status, menu_item, menu_separator, menu_with_progress,
+    mix_color, navigation_item, pane_content, pane_detail, pane_header, pane_header_with_action,
+    pane_list, pane_scroll_body, panel, panel_header, progress_track, section_label, settings_copy,
+    settings_row, settings_section_label, sidebar_frame, sliding_segmented_control,
+    sliding_segmented_for, sliding_segmented_item, small_button, split_body, status_dot, tag,
+    toggle, truncated_line, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
@@ -64,13 +65,11 @@ const WINDOW_HEIGHT: f32 = 700.0;
 const MINIMUM_WIDTH: f32 = 860.0;
 const MINIMUM_HEIGHT: f32 = 560.0;
 const HOTKEY_MIN_WIDTH: f32 = 148.0;
-/// Wide enough for "100%" with the segment's own padding.
-const SOUND_VOLUME_ITEM_WIDTH: f32 = 40.0;
+/// The "Set shortcut" pop-up shown for an optional shortcut with none set.
+const HOTKEY_UNSET_WIDTH: f32 = 104.0;
+const HOTKEY_POPOVER_WIDTH: f32 = 240.0;
 /// Left / Either / Right segment widths.
 const HOTKEY_SIDE_WIDTHS: [f32; 3] = [40.0, 50.0, 40.0];
-/// The side segments plus the control's 2 px padding and 1 px border per side.
-const HOTKEY_SIDE_SELECTOR_WIDTH: f32 =
-    HOTKEY_SIDE_WIDTHS[0] + HOTKEY_SIDE_WIDTHS[1] + HOTKEY_SIDE_WIDTHS[2] + 6.0;
 const OPENCODE_INSTALL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// The setup screen flips each row as macOS grants it.
@@ -792,6 +791,16 @@ enum SoftwareUpdate {
     ReadyToRestart { version: Option<String> },
 }
 
+/// A Settings pop-up or popover that is open. One at a time, as in AppKit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsPopup {
+    Hotkey(HotkeyKind),
+    RecordingAudio,
+    IndicatorPosition,
+    SoundVolume,
+    HexMicrophoneMode,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HotkeyKind {
     Dictation,
@@ -1132,6 +1141,8 @@ impl Render for FunWaveformView {
 /// Root GPUI entity for the production app shell.
 pub struct AppWindow {
     preview: bool,
+    /// `--meetings-enabled` previews lead Settings with the Meetings section.
+    preview_meetings_first: bool,
     pane: Pane,
     navigation_sidebar: Entity<NavigationSidebar>,
     navigation_view: AnyView,
@@ -1158,6 +1169,7 @@ pub struct AppWindow {
     microphone_devices: Vec<String>,
     microphone_picker_open: bool,
     microphone_picker_error: Option<String>,
+    settings_popup: Option<SettingsPopup>,
     launch_at_login_status: Option<LoginItemStatus>,
     login_item_worker: Option<LoginItemWorker>,
     launch_at_login_error: Option<String>,
@@ -1204,7 +1216,6 @@ pub struct AppWindow {
     hotkey_capture: HotkeyCaptureState,
     hotkey_capture_animation: ToggleSpring,
     hotkey_width_spring: ToggleSpring,
-    hotkey_side_animations: [ToggleSpring; 3],
     hotkey_side_selection_springs: [ToggleSpring; 3],
     window_focus: FocusHandle,
     hotkey_focus: FocusHandle,
@@ -1314,8 +1325,8 @@ impl AppWindow {
                 ..AppSettings::default()
             };
             settings.voice_action.enabled = preview.voice_action_enabled;
-            settings.meetings.enabled =
-                preview.meetings_enabled || matches!(preview.pane, DeveloperPane::Meetings);
+            // Previews show the whole product, so every pane is in the sidebar.
+            settings.meetings.enabled = true;
             settings.experimental.hex_microphone =
                 preview.experimental_mic || matches!(preview.pane, DeveloperPane::Fun);
             if let Some(mode) = preview.fun_mode {
@@ -1605,6 +1616,9 @@ impl AppWindow {
         }
         let mut window = Self {
             preview: preview_mode,
+            preview_meetings_first: preview
+                .as_ref()
+                .is_some_and(|preview| preview.meetings_enabled),
             pane: initial_pane,
             navigation_sidebar,
             navigation_view,
@@ -1626,6 +1640,7 @@ impl AppWindow {
             microphone_devices,
             microphone_picker_open: false,
             microphone_picker_error: None,
+            settings_popup: None,
             launch_at_login_status,
             login_item_worker,
             launch_at_login_error,
@@ -1734,18 +1749,6 @@ impl AppWindow {
             hotkey_capture: HotkeyCaptureState::Idle,
             hotkey_capture_animation: ToggleSpring::new(false),
             hotkey_width_spring: ToggleSpring::at(HOTKEY_MIN_WIDTH),
-            hotkey_side_animations: [
-                HotkeyKind::Dictation,
-                HotkeyKind::Edit,
-                HotkeyKind::PasteLast,
-            ]
-            .map(|kind| {
-                ToggleSpring::new(
-                    hotkey_binding(&settings, kind)
-                        .and_then(standalone_modifier_side)
-                        .is_some(),
-                )
-            }),
             hotkey_side_selection_springs: [
                 HotkeyKind::Dictation,
                 HotkeyKind::Edit,
@@ -2826,10 +2829,14 @@ impl AppWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let binding_keycaps = hotkey_binding(&self.settings, kind)
-            .map_or_else(|| vec![tr("Off").into()], HotkeyBinding::keycaps);
-        let idle_width =
-            hotkey_idle_width(binding_keycaps.len()) + hotkey_label_overflow(&binding_keycaps);
+        let bound = hotkey_binding(&self.settings, kind).is_some();
+        let binding_keycaps =
+            hotkey_binding(&self.settings, kind).map_or_else(Vec::new, HotkeyBinding::keycaps);
+        let idle_width = if bound {
+            hotkey_idle_width(binding_keycaps.len()) + hotkey_label_overflow(&binding_keycaps)
+        } else {
+            HOTKEY_UNSET_WIDTH
+        };
         if matches!(
             self.hotkey_capture,
             HotkeyCaptureState::Saved { saved_at, .. }
@@ -2940,18 +2947,18 @@ impl AppWindow {
                 .into_any_element(),
             HotkeyCaptureState::Idle
             | HotkeyCaptureState::Listening { .. }
-            | HotkeyCaptureState::Saved { .. } => div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(hotkey_keycaps(binding_keycaps, 1.0))
-                .child(
-                    div()
-                        .text_footnote()
+            | HotkeyCaptureState::Saved { .. } => {
+                if bound {
+                    hotkey_keycaps(binding_keycaps, 1.0)
+                } else {
+                    disclosure_frame()
+                        .w_full()
+                        .justify_center()
                         .text_color(rgb(TEXT_SECONDARY))
-                        .child(tr("Change shortcut")),
-                )
-                .into_any_element(),
+                        .child(tr("Set shortcut"))
+                        .into_any_element()
+                }
+            }
         };
         div()
             .id(match kind {
@@ -2961,30 +2968,34 @@ impl AppWindow {
             })
             .track_focus(&self.hotkey_focus)
             .w(px(control_width))
-            .min_w(px(HOTKEY_MIN_WIDTH))
             .h(px(CONTROL_HEIGHT))
-            .px(px(2.0))
             .flex()
             .items_center()
+            .justify_end()
             .overflow_hidden()
             .rounded(RADIUS_CONTROL)
-            .border_1()
-            .border_color(mix_color(
-                rgb(LINE),
-                rgb(TEXT_SECONDARY),
-                control_intensity * 0.55,
-            ))
-            .bg(mix_color(
-                rgb(CANVAS),
-                capture_color,
-                control_intensity * (0.55 + pulse * 0.15),
-            ))
+            // At rest the shortcut is just its keycaps; recording turns it
+            // into a field that pulses until a shortcut lands.
+            .when(this_capture, |control| {
+                control
+                    .min_w(px(HOTKEY_MIN_WIDTH))
+                    .px(px(2.0))
+                    .justify_start()
+                    .bg(mix_color(
+                        rgb(FILL_QUIET),
+                        capture_color,
+                        control_intensity * (0.55 + pulse * 0.15),
+                    ))
+                    .focus_ring()
+            })
             .child(content)
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
                 if this.hotkey_capture.is_listening() && this_capture {
                     this.cancel_hotkey_capture(cx);
                 } else {
-                    this.begin_hotkey_capture(kind, window, cx);
+                    let popup = SettingsPopup::Hotkey(kind);
+                    this.settings_popup = (this.settings_popup != Some(popup)).then_some(popup);
+                    cx.notify();
                 }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -2996,6 +3007,8 @@ impl AppWindow {
             .into_any_element()
     }
 
+    /// A shortcut setting: the keycaps, and on click a popover to record a
+    /// new shortcut, pick the modifier's side, or clear an optional one.
     fn render_hotkey_setting_control(
         &mut self,
         kind: HotkeyKind,
@@ -3003,66 +3016,220 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hotkey = self.render_hotkey_control(kind, window, cx);
+        let popup = SettingsPopup::Hotkey(kind);
+        let open = self.settings_popup == Some(popup) && !self.hotkey_capture.is_listening();
+        let progress = window.spring_when(
+            ("hotkey-popover-progress", hotkey_kind_index(kind)),
+            open,
+            SPRING_SNAP,
+        );
         let side = hotkey_binding(&self.settings, kind)
             .filter(|_| platform::CAPABILITIES.modifier_sides)
             .and_then(standalone_modifier_side);
-        let side_animation = &mut self.hotkey_side_animations[hotkey_kind_index(kind)];
-        side_animation.set_enabled(side.is_some());
-        let side_position = side_animation.render_position(window).clamp(0.0, 1.0);
         let selected = side.unwrap_or(ModifierSide::Either);
         let side_widths = HOTKEY_SIDE_WIDTHS;
         let side_selection_spring =
             &mut self.hotkey_side_selection_springs[hotkey_kind_index(kind)];
         side_selection_spring.set_target(hotkey_side_index(selected) as f32);
         let selection_position = side_selection_spring.render_position(window);
-        let side_selector = div()
-            .w(px(HOTKEY_SIDE_SELECTOR_WIDTH * side_position))
-            .mr(px(8.0 * side_position))
+        let clearable = kind == HotkeyKind::PasteLast && self.settings.paste_last_hotkey.is_some();
+        let popover = (open || (!cfg!(test) && progress > 0.01)).then(|| {
+            dropdown_menu_with_progress(progress)
+                .id(("hotkey-popover", hotkey_kind_index(kind)))
+                .debug_selector(move || format!("hotkey-popover-{}", hotkey_kind_index(kind)))
+                .right_0()
+                .w(px(HOTKEY_POPOVER_WIDTH))
+                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                    if this.settings_popup == Some(popup) {
+                        this.settings_popup = None;
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    menu_item(false)
+                        .id(("record-hotkey", hotkey_kind_index(kind)))
+                        .child(tr("Record new shortcut…"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.settings_popup = None;
+                            this.begin_hotkey_capture(kind, window, cx);
+                        })),
+                )
+                .when(side.is_some(), |menu| {
+                    menu.child(menu_separator()).child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_footnote()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child(tr("Key side")),
+                            )
+                            .child(
+                                sliding_segmented_control(selection_position, &side_widths)
+                                    .children(
+                                        [
+                                            (tr("Left"), ModifierSide::Left),
+                                            (tr("Either"), ModifierSide::Either),
+                                            (tr("Right"), ModifierSide::Right),
+                                        ]
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(
+                                            |(index, (label, side))| {
+                                                let candidate =
+                                                    hotkey_side_binding(&self.settings, kind, side);
+                                                sliding_segmented_item(
+                                                    side_widths[index],
+                                                    selected == side,
+                                                )
+                                                .id((
+                                                    "hotkey-side",
+                                                    hotkey_kind_index(kind) * 3 + index,
+                                                ))
+                                                .when(candidate.is_none(), |item| {
+                                                    item.opacity(DISABLED_OPACITY)
+                                                })
+                                                .child(label)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.set_hotkey_side(kind, side, index, cx);
+                                                }))
+                                            },
+                                        ),
+                                    ),
+                            ),
+                    )
+                })
+                .when(clearable, |menu| {
+                    menu.child(menu_separator()).child(
+                        danger_menu_item()
+                            .id("disable-paste-last-hotkey")
+                            .child(tr("Clear shortcut"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.settings_popup = None;
+                                this.update_settings(cx, |settings| {
+                                    settings.paste_last_hotkey = None
+                                });
+                            })),
+                    )
+                })
+        });
+        div()
+            .relative()
             .flex_none()
-            .overflow_hidden()
-            .opacity(side_position)
-            .child(
-                sliding_segmented_control(selection_position, &side_widths)
-                    .w(px(HOTKEY_SIDE_SELECTOR_WIDTH))
-                    .children(
-                        [
-                            (tr("Left"), ModifierSide::Left),
-                            (tr("Either"), ModifierSide::Either),
-                            (tr("Right"), ModifierSide::Right),
-                        ]
+            .child(hotkey)
+            .children(popover.map(deferred))
+            .into_any_element()
+    }
+
+    /// Releasing the microphone turns Commands off, so it asks first.
+    fn request_release_microphone(&mut self, release: bool, cx: &mut Context<Self>) {
+        if release {
+            self.pending_microphone_policy =
+                Some(MicrophonePolicyChange::DisableCommandsAndRelease);
+            cx.notify();
+            return;
+        }
+        self.pending_microphone_policy = None;
+        if let Err(error) =
+            self.update_microphone_policy(MicrophonePolicyChange::SetReleaseWhileIdle(false), cx)
+        {
+            tracing::error!(%error, "could not update microphone policy");
+        }
+        cx.notify();
+    }
+
+    fn set_hotkey_side(
+        &mut self,
+        kind: HotkeyKind,
+        side: ModifierSide,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(candidate) = hotkey_side_binding(&self.settings, kind, side) else {
+            return;
+        };
+        if !self.update_settings(cx, |settings| {
+            set_hotkey_binding(settings, kind, candidate);
+        }) {
+            return;
+        }
+        if kind == HotkeyKind::Edit {
+            self.voice_action_inputs.error = None;
+        }
+        self.hotkey_side_selection_springs[hotkey_kind_index(kind)].set_target(index as f32);
+    }
+
+    /// A pop-up button: the current choice, and a menu of the others.
+    #[allow(clippy::too_many_arguments)]
+    fn render_popup_choice<T: Copy + PartialEq + 'static>(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        popup: SettingsPopup,
+        id: &'static str,
+        choices: Vec<(SharedString, T)>,
+        selected: T,
+        apply: fn(&mut Self, T, &mut Context<Self>),
+    ) -> AnyElement {
+        let open = self.settings_popup == Some(popup);
+        let progress = window.spring_when((id, 1usize), open, SPRING_SNAP);
+        let label = choices
+            .iter()
+            .find(|(_, value)| *value == selected)
+            .map(|(label, _)| label.clone())
+            .unwrap_or_default();
+        let menu = (open || (!cfg!(test) && progress > 0.01)).then(|| {
+            dropdown_menu_with_progress(progress)
+                .id((id, 2usize))
+                .debug_selector(move || format!("{id}-menu"))
+                .right_0()
+                .w(px(DISCLOSURE_WIDTH))
+                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                    if this.settings_popup == Some(popup) {
+                        this.settings_popup = None;
+                        cx.notify();
+                    }
+                }))
+                .children(
+                    choices
                         .into_iter()
                         .enumerate()
-                        .map(|(index, (label, side))| {
-                            let candidate = hotkey_side_binding(&self.settings, kind, side);
-                            sliding_segmented_item(side_widths[index], selected == side)
-                                .id(("hotkey-side", hotkey_kind_index(kind) * 3 + index))
-                                .when(candidate.is_none(), |item| item.opacity(DISABLED_OPACITY))
-                                .child(label)
+                        .map(|(index, (label, value))| {
+                            menu_item(value == selected)
+                                .id((id, 10 + index))
+                                .child(truncated_line(BODY, label))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    let Some(candidate) =
-                                        hotkey_side_binding(&this.settings, kind, side)
-                                    else {
-                                        return;
-                                    };
-                                    if !this.update_settings(cx, |settings| {
-                                        set_hotkey_binding(settings, kind, candidate);
-                                    }) {
-                                        return;
+                                    cx.stop_propagation();
+                                    this.settings_popup = None;
+                                    if value != selected {
+                                        apply(this, value, cx);
                                     }
-                                    if kind == HotkeyKind::Edit {
-                                        this.voice_action_inputs.error = None;
-                                    }
-                                    this.hotkey_side_selection_springs[hotkey_kind_index(kind)]
-                                        .set_target(index as f32);
+                                    cx.notify();
                                 }))
                         }),
-                    ),
-            );
+                )
+        });
         div()
-            .flex()
-            .items_center()
-            .child(side_selector)
-            .child(hotkey)
+            .relative()
+            .flex_none()
+            .child(
+                fitted_disclosure_button(label, window)
+                    .id(id)
+                    .debug_selector(move || id.to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_popup = (this.settings_popup != Some(popup)).then_some(popup);
+                        cx.notify();
+                    })),
+            )
+            .children(menu.map(deferred))
             .into_any_element()
     }
 
@@ -3687,14 +3854,15 @@ impl AppWindow {
             .then(|| self.render_listener_card(cx))
             .flatten();
         let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
-        let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
+        let paste_last_control =
+            self.render_hotkey_setting_control(HotkeyKind::PasteLast, window, cx);
         let transcription_model = definition(self.settings.transcription.model);
         let transcription_label = format!(
             "{} · {}",
             language_name(&self.settings.transcription.language),
             transcription_model.name
         );
-        let transcription_control = disclosure_button(transcription_label)
+        let transcription_control = fitted_disclosure_button(transcription_label, window)
             .id("transcription-model-setting")
             .on_click(cx.listener(|this, _, _, cx| {
                 this.transcription_picker_language =
@@ -3716,41 +3884,31 @@ impl AppWindow {
             .clamp(0.0, 1.0);
         let dock_icon_position = self.dock_icon_toggle.render_position(window);
         let platform_section = self.platform_settings_section(window, cx);
-        let (top_platform_section, bottom_platform_section) =
-            if self.preview && self.settings.meetings.enabled {
-                (platform_section, Vec::new())
-            } else {
-                (Vec::new(), platform_section)
-            };
+        let (top_platform_section, bottom_platform_section) = if self.preview_meetings_first {
+            (platform_section, Vec::new())
+        } else {
+            (Vec::new(), platform_section)
+        };
         let enable_on_launch_position = self.enable_on_launch_toggle.render_position(window);
         let terminal_paste_position = self.terminal_paste_toggle.render_position(window);
-        let indicator_position = self.indicator_position_spring.render_position(window);
-        let indicator_control = sliding_segmented_control(indicator_position, &[64.0; 3])
-            .id("indicator-position")
-            .debug_selector(|| "indicator-position".into())
-            .children(
-                [
-                    (tr("Top"), IndicatorPosition::Top),
-                    (tr("Bottom"), IndicatorPosition::Bottom),
-                    (tr("Off"), IndicatorPosition::Hidden),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(index, (label, position))| {
-                    sliding_segmented_item(64.0, self.settings.indicator_position == position)
-                        .id(("indicator-position", index))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.settings.indicator_position != position
-                                && this.update_settings(cx, |settings| {
-                                    settings.indicator_position = position;
-                                })
-                            {
-                                this.indicator_position_spring.set_target(index as f32);
-                            }
-                        }))
-                }),
-            );
+        let indicator_control = self.render_popup_choice(
+            window,
+            cx,
+            SettingsPopup::IndicatorPosition,
+            "indicator-position",
+            vec![
+                (tr("Top").into(), IndicatorPosition::Top),
+                (tr("Bottom").into(), IndicatorPosition::Bottom),
+                (tr("Off").into(), IndicatorPosition::Hidden),
+            ],
+            self.settings.indicator_position,
+            |this, position, cx| {
+                if this.update_settings(cx, |settings| settings.indicator_position = position) {
+                    this.indicator_position_spring
+                        .set_target(indicator_position_index(position) as f32);
+                }
+            },
+        );
         let interface_language_control = capabilities
             .interface_language
             .then(|| self.render_interface_language_control(window, cx));
@@ -3772,41 +3930,33 @@ impl AppWindow {
         let microphone_picker = (self.microphone_picker_open
             || (!cfg!(test) && microphone_picker_progress > 0.01))
             .then(|| self.render_microphone_picker(microphone_picker_progress, cx));
-        let sound_volume_position = self.sound_volume_spring.render_position(window);
-        let selected_volume = sound_volume_index(&self.settings);
-        let sound_volume =
-            sliding_segmented_control(sound_volume_position, &[SOUND_VOLUME_ITEM_WIDTH; 5])
-                .children(
-                    crate::desktop_ui::SOUND_VOLUME_STEPS
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, (label, volume))| {
-                            sliding_segmented_item(
-                                SOUND_VOLUME_ITEM_WIDTH,
-                                selected_volume == index,
-                            )
-                            .id(("sound-volume", index))
-                            .child(tr(label))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    if !this.update_settings(cx, |settings| {
-                                        settings.sound_effects = volume > 0.0;
-                                        if volume > 0.0 {
-                                            settings.sound_effect_volume = volume;
-                                        }
-                                    }) {
-                                        return;
-                                    }
-                                    this.sound_volume_spring.set_target(index as f32);
-                                    if volume > 0.0 && !this.preview {
-                                        crate::feedback::play(
-                                            crate::feedback::Tone::DictationStart,
-                                        );
-                                    }
-                                },
-                            ))
-                        }),
-                );
+        let sound_volume = self.render_popup_choice(
+            window,
+            cx,
+            SettingsPopup::SoundVolume,
+            "sound-volume",
+            crate::desktop_ui::SOUND_VOLUME_STEPS
+                .into_iter()
+                .enumerate()
+                .map(|(index, (label, _))| (SharedString::from(tr(label)), index))
+                .collect(),
+            sound_volume_index(&self.settings),
+            |this, index, cx| {
+                let volume = crate::desktop_ui::SOUND_VOLUME_STEPS[index].1;
+                if !this.update_settings(cx, |settings| {
+                    settings.sound_effects = volume > 0.0;
+                    if volume > 0.0 {
+                        settings.sound_effect_volume = volume;
+                    }
+                }) {
+                    return;
+                }
+                this.sound_volume_spring.set_target(index as f32);
+                if volume > 0.0 && !this.preview {
+                    crate::feedback::play(crate::feedback::Tone::DictationStart);
+                }
+            },
+        );
         let launch_at_login_control = if self.launch_at_login_status.is_none() {
             div()
                 .text_footnote()
@@ -3828,27 +3978,28 @@ impl AppWindow {
         } else {
             toggle(launch_at_login_position)
         };
-        let recording_audio_position = self.recording_audio_spring.render_position(window);
-        let audio_widths = [50.0, 90.0, 80.0];
-        let audio_behavior = sliding_segmented_control(recording_audio_position, &audio_widths)
-            .children(RecordingAudioBehavior::ALL.into_iter().enumerate().map(
-                |(index, behavior)| {
-                    let selected = self.settings.recording_audio_behavior == behavior;
-                    sliding_segmented_item(audio_widths[index], selected)
-                        .id(("recording-audio-behavior", index))
-                        .child(tr(behavior.label()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.settings.recording_audio_behavior == behavior {
-                                return;
-                            }
-                            if this.update_settings(cx, |settings| {
-                                settings.recording_audio_behavior = behavior
-                            }) {
-                                this.recording_audio_spring.set_target(index as f32);
-                            }
-                        }))
-                },
-            ));
+        let audio_behavior = self.render_popup_choice(
+            window,
+            cx,
+            SettingsPopup::RecordingAudio,
+            "recording-audio-behavior",
+            RecordingAudioBehavior::ALL
+                .into_iter()
+                .map(|behavior| (SharedString::from(tr(behavior.label())), behavior))
+                .collect(),
+            self.settings.recording_audio_behavior,
+            |this, behavior, cx| {
+                if this.update_settings(cx, |settings| settings.recording_audio_behavior = behavior)
+                {
+                    this.recording_audio_spring.set_target(
+                        RecordingAudioBehavior::ALL
+                            .iter()
+                            .position(|candidate| *candidate == behavior)
+                            .unwrap_or_default() as f32,
+                    );
+                }
+            },
+        );
         let shortcut_mode_position = self.shortcut_mode_toggle.render_position(window);
         let shortcut_mode = sliding_segmented_control(shortcut_mode_position, &[72.0; 2])
             .id("shortcut-mode")
@@ -3866,42 +4017,6 @@ impl AppWindow {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_shortcut_mode(mode, cx);
                         }))
-                }),
-            );
-        let microphone_mode = sliding_segmented_control(release_microphone_position, &[114.0; 2])
-            .id("microphone-mode")
-            .children(
-                [
-                    (tr("Keep ready (fast)"), false),
-                    (tr("Release when idle"), true),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(index, (label, release))| {
-                    sliding_segmented_item(
-                        114.0,
-                        self.settings.release_microphone_while_idle == release,
-                    )
-                    .id(("microphone-mode", index))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if release && !this.settings.release_microphone_while_idle {
-                            this.pending_microphone_policy =
-                                Some(MicrophonePolicyChange::DisableCommandsAndRelease);
-                            cx.notify();
-                            return;
-                        }
-                        this.pending_microphone_policy = None;
-                        if this.settings.release_microphone_while_idle != release
-                            && let Err(error) = this.update_microphone_policy(
-                                MicrophonePolicyChange::SetReleaseWhileIdle(release),
-                                cx,
-                            )
-                        {
-                            tracing::error!(%error, "could not update microphone policy");
-                        }
-                        cx.notify();
-                    }))
                 }),
             );
         let microphone_confirmation = (self.pending_microphone_policy
@@ -3964,40 +4079,13 @@ impl AppWindow {
                 .child(settings_section_label(tr("Dictation")))
                 .child(
                     panel()
-                        .child(settings_row(
-                            tr("Local transcription"),
-                            tr("Language and on-device speech model"),
-                            transcription_control,
-                        ))
-                        .child(settings_row(
-                            tr("Microphone"),
-                            tr("Input device for dictation and commands"),
-                            div()
-                                .relative()
-                                .flex_none()
-                                .child(
-                                    disclosure_button(microphone_label)
-                                        .id("microphone-setting")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.toggle_microphone_picker(cx)
-                                        })),
-                                )
-                                .children(microphone_picker.map(deferred)),
-                        ))
-                        .when(
-                            transcription_model.supports_recognition_hints,
-                            |settings| {
-                                settings.child(settings_row(
-                                    tr("Recognition hints"),
-                                    tr("Names and terms to prime the speech model"),
-                                    div()
-                                        .w(px(320.0))
-                                        .flex_none()
-                                        .child(
-                                            self.transcription_hints.entity.clone(),
-                                        ),
-                                ))
-                            },
+                        .child(
+                            settings_row(
+                                tr("Dictation shortcut"),
+                                tr("Starts dictation in any app"),
+                                hotkey_control,
+                            )
+                            .id("dictation-hotkey-setting"),
                         )
                         .child(settings_row(
                             tr("Shortcut mode"),
@@ -4008,42 +4096,6 @@ impl AppWindow {
                             },
                             shortcut_mode,
                         ))
-                        .child(
-                            settings_row(
-                                tr("Dictation shortcut"),
-                                tr("Click to record a new shortcut"),
-                                hotkey_control,
-                            )
-                            .border_b_0()
-                            .id("dictation-hotkey-setting"),
-                        ),
-                )
-                .child(settings_section_label(tr("Behavior")))
-                .child(
-                    panel()
-                        .when(capabilities.recording_audio, |panel| {
-                            panel.child(
-                                settings_row(
-                                    tr("While dictating"),
-                                    tr("Mute or pause other audio during dictation"),
-                                    audio_behavior,
-                                )
-                                .id("recording-audio-setting"),
-                            )
-                        })
-                        .when(capabilities.release_microphone, |panel| {
-                            panel
-                                .child(settings_row(
-                                    tr("Microphone mode"),
-                                    if self.settings.release_microphone_while_idle {
-                                        tr("Opens only while holding the shortcut. Disables pre-roll and commands.")
-                                    } else {
-                                        tr("Keeps the microphone open for instant start and pre-roll")
-                                    },
-                                    microphone_mode,
-                                ))
-                                .children(microphone_confirmation)
-                        })
                         .when(!toggle_mode, |panel| {
                             panel.child(
                                 settings_row(
@@ -4076,16 +4128,94 @@ impl AppWindow {
                                     })),
                                 ),
                         ))
+                        .when(capabilities.paste_last, |panel| panel.child(
+                            settings_row(
+                                tr("Paste last dictation"),
+                                tr("Re-paste the most recent dictation"),
+                                paste_last_control,
+                            )
+                            .id("paste-last-hotkey-setting"),
+                        )),
+                )
+                .child(settings_section_label(tr("Local transcription")))
+                .child(
+                    panel()
+                        .child(settings_row(
+                            tr("Model"),
+                            tr("Language and on-device speech model"),
+                            transcription_control,
+                        ))
+                        .child(settings_row(
+                            tr("Microphone"),
+                            tr("Input device for dictation and commands"),
+                            div()
+                                .relative()
+                                .flex_none()
+                                .child(
+                                    fitted_disclosure_button(microphone_label, window)
+                                        .id("microphone-setting")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_microphone_picker(cx)
+                                        })),
+                                )
+                                .children(microphone_picker.map(deferred)),
+                        ))
+                        .when(
+                            transcription_model.supports_recognition_hints,
+                            |settings| {
+                                settings.child(settings_row(
+                                    tr("Recognition hints"),
+                                    tr("Names and terms to prime the speech model"),
+                                    div()
+                                        .w(px(320.0))
+                                        .flex_none()
+                                        .child(
+                                            self.transcription_hints.entity.clone(),
+                                        ),
+                                ))
+                            },
+                        )
+                        .when(capabilities.release_microphone, |panel| {
+                            panel
+                                .child(
+                                    settings_row(
+                                        tr("Release microphone when idle"),
+                                        if self.settings.release_microphone_while_idle {
+                                            tr("Opens only while holding the shortcut. Disables pre-roll and commands.")
+                                        } else {
+                                            tr("Off keeps it open for instant start and pre-roll")
+                                        },
+                                        toggle(release_microphone_position),
+                                    )
+                                    .id("microphone-mode-setting")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let release = !this.settings.release_microphone_while_idle;
+                                        this.request_release_microphone(release, cx);
+                                    })),
+                                )
+                                .children(microphone_confirmation)
+                        }),
+                )
+                .child(settings_section_label(tr("Behavior")))
+                .child(
+                    panel()
+                        .when(capabilities.recording_audio, |panel| {
+                            panel.child(
+                                settings_row(
+                                    tr("While dictating"),
+                                    tr("Mute or pause other audio during dictation"),
+                                    audio_behavior,
+                                )
+                                .id("recording-audio-setting"),
+                            )
+                        })
                         .when(capabilities.indicator_position, |panel| {
                             panel.child(
                                 settings_row(
                                     tr("Recording indicator"),
-                                    tr("Show the dictation pill at the top or bottom of the screen"),
+                                    tr("Where the dictation pill appears on screen"),
                                     indicator_control,
                                 )
-                                .when(!capabilities.terminal_paste && !capabilities.paste_last, |row| {
-                                    row.border_b_0()
-                                })
                                 .id("indicator-position-setting"),
                             )
                         })
@@ -4096,7 +4226,6 @@ impl AppWindow {
                                     tr("Paste with Ctrl+Shift+V so terminals accept it"),
                                     toggle(terminal_paste_position),
                                 )
-                                .when(!capabilities.paste_last, |row| row.border_b_0())
                                 .id("terminal-paste-setting")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let enabled = !this.settings.paste_with_shift;
@@ -4107,29 +4236,7 @@ impl AppWindow {
                                     }
                                 })),
                             )
-                        })
-                        .when(capabilities.paste_last, |panel| panel.child(
-                            settings_row(
-                                tr("Paste last dictation"),
-                                tr("Re-paste the most recent dictation"),
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(paste_last_control)
-                                    .when(self.settings.paste_last_hotkey.is_some(), |row| {
-                                        row.child(
-                                            button(ButtonKind::Secondary, tr("Clear"))
-                                                .id("disable-paste-last-hotkey")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.update_settings(cx, |settings| settings.paste_last_hotkey = None);
-                                                })),
-                                        )
-                                    }),
-                            )
-                            .border_b_0()
-                            .id("paste-last-hotkey-setting"),
-                        ))
+                        }),
                 )
                 .children(bottom_platform_section)
                 .child(settings_section_label(tr("Application")))
@@ -4208,7 +4315,6 @@ impl AppWindow {
                                 tr("Recording, cancellation, and error tones"),
                                 sound_volume,
                             )
-                            .when(software_update_control.is_none(), |row| row.border_b_0())
                             .id("sound-effects-setting"),
                         )
                         .when_some(software_update_control, |panel, control| {
@@ -4218,7 +4324,6 @@ impl AppWindow {
                                     tr("Checks for new Hex releases in the background"),
                                     control,
                                 )
-                                .border_b_0()
                                 .id("software-updates-setting"),
                             )
                         }),
@@ -4237,39 +4342,29 @@ impl AppWindow {
                         let mode = self.settings.experimental.hex_microphone_mode;
                         let comfort_position =
                             self.fun_comfort_noise_toggle.render_position(window);
-                        const SETTINGS_FUN_MODE_WIDTHS: [f32; 4] = [66.0, 56.0, 52.0, 62.0];
-                        let settings_choices = [
+                        let mut mode_choices = vec![
                             crate::voice_filter::VoiceFilterMode::Muffled,
                             crate::voice_filter::VoiceFilterMode::Muted,
                             crate::voice_filter::VoiceFilterMode::Quiet,
                             crate::voice_filter::VoiceFilterMode::Normal,
                         ];
-                        let settings_mode_idx = settings_choices
-                            .iter()
-                            .position(|&c| c == mode)
-                            .unwrap_or(0);
-                        let mode_pills = sliding_segmented_for(
+                        // A Fun-pane voice stays listed while it is the active one.
+                        if !mode_choices.contains(&mode) {
+                            mode_choices.push(mode);
+                        }
+                        let mode_pills = self.render_popup_choice(
                             window,
-                            "settings-hex-mic-mode-picker",
-                            settings_mode_idx,
-                            &SETTINGS_FUN_MODE_WIDTHS,
-                        )
-                        .id("settings-hex-mic-mode")
-                        .children(
-                            settings_choices
+                            cx,
+                            SettingsPopup::HexMicrophoneMode,
+                            "settings-hex-mic-mode",
+                            mode_choices
                                 .into_iter()
-                                .enumerate()
-                                .map(|(index, choice)| {
-                                    sliding_segmented_item(
-                                        SETTINGS_FUN_MODE_WIDTHS[index],
-                                        mode == choice,
-                                    )
-                                    .id(("settings-hex-mic-mode-item", index))
-                                    .child(Self::voice_filter_mode_label(choice))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.set_hex_microphone_mode(choice, cx);
-                                    }))
-                                }),
+                                .map(|choice| {
+                                    (SharedString::from(Self::voice_filter_mode_label(choice)), choice)
+                                })
+                                .collect(),
+                            mode,
+                            |this, choice, cx| this.set_hex_microphone_mode(choice, cx),
                         );
                         let comfort_control = div()
                             .id("settings-hex-mic-comfort-noise")
@@ -7430,7 +7525,10 @@ impl Render for AppWindow {
                 if event.keystroke.key != "escape" {
                     return;
                 }
-                if this.history_retention_open {
+                if this.settings_popup.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if this.history_retention_open {
                     this.history_retention_open = false;
                     cx.stop_propagation();
                     cx.notify();
@@ -7589,7 +7687,7 @@ fn set_voice_action_enabled(settings: &mut AppSettings, enabled: bool) -> Result
 }
 
 fn hotkey_idle_width(keycap_count: usize) -> f32 {
-    (112.0 + hotkey_keycaps_width(keycap_count)).max(HOTKEY_MIN_WIDTH)
+    hotkey_keycaps_width(keycap_count)
 }
 
 const fn hotkey_kind_index(kind: HotkeyKind) -> usize {

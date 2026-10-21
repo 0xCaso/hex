@@ -352,19 +352,22 @@ latency measurement.
 
 ```ts
 Settings                                 // settings
-├── Dictation shortcut -> Capture a replacement binding
+├── Dictation shortcut -> Keycaps; click opens a popover
+│   ├── Record new shortcut… -> Capture a replacement binding
+│   └── Key side -> Left / Either / Right for a standalone modifier
+├── Paste last dictation -> Same popover, plus Clear shortcut
 ├── Microphone -> Automatic or saved device
 │   ├── Automatic -> Compiled preferences, then the macOS default
 │   │   └── Default is a Bluetooth headset -> Built-in mic when present // avoids the call profile
 │   └── Open menu covers the controls beneath it; click elsewhere dismisses
-├── Microphone mode
-│   ├── Keep ready (fast) -> Open while idle; pre-roll available
-│   └── Release when idle -> Open on press; no pre-roll; startup delay
+├── Release microphone when idle (switch)
+│   ├── Off (Keep ready) -> Open while idle; pre-roll available
+│   └── On -> Open on press; no pre-roll; startup delay
 │       └── Commands enabled? -> Confirm turning Commands off
-├── While dictating -> Mute / Pause media / Do nothing
+├── While dictating (pop-up) -> Mute / Pause media / Do nothing
 │   ├── Intentional capture only, not ordinary shortcut chords
 │   └── Pause/resume only players already reported running by macOS
-└── Sound volume -> Immediate feedback setting; zero suppresses tones
+└── Sound volume (pop-up) -> Immediate feedback setting; Off suppresses tones
 
 Intentional recording                    // recording.environment
 ├── Acquire native macOS no-idle-sleep assertion
