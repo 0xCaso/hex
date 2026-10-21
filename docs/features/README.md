@@ -558,6 +558,7 @@ Cancellation / interruption / failure    // recovery
   -> Next capture succeeds               // this is the proof, not a cleared error
 
 Menu bar and Settings                    // maintenance
+├── Icon -> 18 pt monochrome Hex mark template (recording variant + elapsed time)
 ├── Settings / Paste Last -> Reachable with Dock icon hidden
 ├── Launch at Login -> macOS owns registration state
 ├── Check for Updates -> Signed packaged-app Sparkle lifecycle

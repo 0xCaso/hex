@@ -818,13 +818,25 @@ async fn drive_ui(
             let result = cx.update(|cx| match event {
                 ControllerEvent::Offer(candidate) => {
                     close_window(offer_window.take(), cx);
-                    offer_window = open_panel(
-                        PanelKind::Offer(candidate),
+                    match open_panel(
+                        PanelKind::Offer(candidate.clone()),
                         ui.commands.clone(),
                         Some(OFFER_TIMEOUT),
                         cx,
-                    )
-                    .ok();
+                    ) {
+                        Ok(window) => {
+                            tracing::info!(
+                                source = candidate.source.label(),
+                                title = %candidate.title,
+                                application = ?candidate.application,
+                                "meeting recording offer shown"
+                            );
+                            offer_window = Some(window);
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "could not open meeting offer capsule");
+                        }
+                    }
                 }
                 ControllerEvent::Starting => {
                     close_window(offer_window.take(), cx);
@@ -1169,13 +1181,17 @@ fn controller_loop(
                 .into_iter()
                 .filter(|application| application.is_supported_meeting_app())
                 .min_by_key(|application| application.detection_priority());
-            let context = if application
-                .as_ref()
-                .is_some_and(|application| application.is_browser())
-            {
-                ContextSnapshot::capture().unwrap_or_default()
-            } else {
-                ContextSnapshot::default()
+            let context = match application.as_ref().and_then(|application| {
+                application
+                    .is_browser()
+                    .then(|| application.canonical_bundle_id())
+                    .flatten()
+                    .filter(|bundle_id| !detector.is_application_snoozed(bundle_id))
+            }) {
+                Some(bundle_id) => {
+                    ContextSnapshot::capture_for_meeting(bundle_id).unwrap_or_default()
+                }
+                None => ContextSnapshot::default(),
             };
             let candidate = application
                 .and_then(|application| candidate_from_microphone(&application, &context));
@@ -1271,7 +1287,16 @@ fn open_panel(
     if let Some(timeout) = timeout {
         cx.spawn(async move |cx| {
             Timer::after(timeout).await;
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            let _ = handle.update(cx, |panel, window, _| {
+                if let PanelKind::Offer(candidate) = &panel.kind {
+                    tracing::info!(
+                        source = candidate.source.label(),
+                        title = %candidate.title,
+                        "meeting recording offer timed out"
+                    );
+                }
+                window.remove_window();
+            });
         })
         .detach();
     }
@@ -1315,6 +1340,7 @@ impl Render for MeetingPanel {
                 let dismiss = self.commands.clone();
                 let record = self.commands.clone();
                 let candidate = candidate.clone();
+                let dismissed_candidate = candidate.clone();
                 let is_preview = candidate.key == "preview";
                 let title = if candidate.named {
                     candidate.title.clone()
@@ -1333,6 +1359,11 @@ impl Render for MeetingPanel {
                             "not-now",
                             "Not now",
                             move |window, _| {
+                                tracing::info!(
+                                    source = dismissed_candidate.source.label(),
+                                    title = %dismissed_candidate.title,
+                                    "meeting recording offer dismissed"
+                                );
                                 let _ = dismiss.try_send(ControllerCommand::Dismiss);
                                 window.remove_window();
                             },

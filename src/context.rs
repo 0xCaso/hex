@@ -157,6 +157,27 @@ impl ContextSnapshot {
         Ok(Self::default())
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn capture_for_meeting(canonical_bundle_id: &str) -> Result<Self> {
+        if canonical_bundle_id == "com.brave.Browser"
+            && let Some((browser_url, window_title)) = capture_brave_meeting_tab()?
+        {
+            return Ok(Self {
+                application: Some("Brave Browser".into()),
+                browser_url: Some(browser_url),
+                window_title,
+                selected_text: None,
+                input_revision: None,
+            });
+        }
+        capture_macos()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn capture_for_meeting(_canonical_bundle_id: &str) -> Result<Self> {
+        Self::capture()
+    }
+
     pub fn browser_host(&self) -> Option<&str> {
         self.browser_url.as_ref().and_then(Url::host_str)
     }
@@ -224,9 +245,21 @@ pub fn frontmost_bundle_identifier() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn capture_brave_url() -> Result<Option<Url>> {
+    let url = run_osascript(BRAVE_URL_SCRIPT)?;
+    Ok(Url::parse(url.trim()).ok())
+}
+
+#[cfg(target_os = "macos")]
+fn capture_brave_meeting_tab() -> Result<Option<(Url, Option<String>)>> {
+    let output = run_osascript(BRAVE_MEETING_TAB_SCRIPT)?;
+    Ok(parse_brave_tab_output(&output))
+}
+
+#[cfg(target_os = "macos")]
+fn run_osascript(script: &str) -> Result<String> {
     const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
     let mut child = Command::new("/usr/bin/osascript")
-        .args(["-e", BRAVE_URL_SCRIPT])
+        .args(["-e", script])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -256,8 +289,16 @@ fn capture_brave_url() -> Result<Option<Url>> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let url = String::from_utf8_lossy(&output.stdout);
-    Ok(Url::parse(url.trim()).ok())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_brave_tab_output(output: &str) -> Option<(Url, Option<String>)> {
+    let mut lines = output.lines();
+    let url = Url::parse(lines.next()?.trim()).ok()?;
+    let title = lines.collect::<Vec<_>>().join(" ");
+    let title = title.trim();
+    Some((url, (!title.is_empty()).then(|| title.to_string())))
 }
 
 fn normalize_browser_host(host: &str) -> String {
@@ -294,6 +335,27 @@ tell application "Brave Browser"
     if (count of windows) > 0 then return URL of active tab of front window
 end tell
 return ""
+"#;
+
+#[cfg(target_os = "macos")]
+const BRAVE_MEETING_TAB_SCRIPT: &str = r#"
+tell application "Brave Browser"
+    if (count of windows) is 0 then return ""
+    set activeTab to active tab of front window
+    set activeUrl to URL of activeTab
+    if activeUrl contains "meet.google.com/" then
+        return activeUrl & linefeed & (title of activeTab)
+    end if
+    repeat with w in windows
+        repeat with t in tabs of w
+            set u to URL of t
+            if u contains "meet.google.com/" then
+                return u & linefeed & (title of t)
+            end if
+        end repeat
+    end repeat
+    return activeUrl & linefeed & (title of activeTab)
+end tell
 "#;
 
 #[cfg(test)]
@@ -369,5 +431,26 @@ mod tests {
                 .unwrap(),
             ContextSnapshot::default()
         );
+    }
+
+    #[test]
+    fn parses_brave_tab_url_and_title_output() {
+        assert_eq!(
+            parse_brave_tab_output(
+                "https://meet.google.com/abc-defg-hij\nDesign sync - Google Meet\n"
+            ),
+            Some((
+                Url::parse("https://meet.google.com/abc-defg-hij").unwrap(),
+                Some("Design sync - Google Meet".into()),
+            ))
+        );
+        assert_eq!(
+            parse_brave_tab_output("https://meet.google.com/abc-defg-hij\n"),
+            Some((
+                Url::parse("https://meet.google.com/abc-defg-hij").unwrap(),
+                None,
+            ))
+        );
+        assert_eq!(parse_brave_tab_output(""), None);
     }
 }

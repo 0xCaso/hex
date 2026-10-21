@@ -4,13 +4,17 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use color_eyre::eyre::{Result, eyre};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
-use objc2::{DefinedClass, MainThreadOnly, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
-use objc2_foundation::{MainThreadMarker, NSObject, NSString};
+use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSSize, NSString};
 
 use crate::app_settings::AppSettings;
 use crate::transcription_models::{MODELS, ModelDefinition, TranscriptionModelId, language_name};
 use crate::transcription_preparation::PreparationStatus;
+
+const IDLE_ICON_PNG: &[u8] = include_bytes!("../assets/icons/menubar-idle@2x.png");
+const RECORDING_ICON_PNG: &[u8] = include_bytes!("../assets/icons/menubar-recording@2x.png");
+const STATUS_ICON_POINTS: f64 = 18.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusItemAction {
@@ -107,13 +111,13 @@ impl StatusItemTarget {
 struct StatusItemController {
     item: Retained<NSStatusItem>,
     idle_symbol: Retained<NSImage>,
-    recording_symbol: Option<Retained<NSImage>>,
+    recording_symbol: Retained<NSImage>,
     meeting_status: Retained<NSMenuItem>,
     meeting_start: Retained<NSMenuItem>,
     meeting_stop: Retained<NSMenuItem>,
     meeting_open: Retained<NSMenuItem>,
     meeting_separator: Retained<NSMenuItem>,
-    meeting_title: RefCell<String>,
+    meeting_button: RefCell<(String, bool)>,
     _menu: Retained<NSMenu>,
     _target: Retained<StatusItemTarget>,
     model_items: Vec<(TranscriptionModelId, Retained<NSMenuItem>)>,
@@ -246,21 +250,10 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
     let button = item
         .button(mtm)
         .ok_or_else(|| eyre!("status item button is unavailable"))?;
-    let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("hexagon"),
-        Some(&NSString::from_str("Hex")),
-    )
-    .ok_or_else(|| eyre!("Hex status symbol is unavailable"))?;
-    symbol.setTemplate(true);
+    let symbol = status_bar_icon(IDLE_ICON_PNG, "Hex")?;
+    let recording_symbol = status_bar_icon(RECORDING_ICON_PNG, "Hex is recording a meeting")?;
     button.setImage(Some(&symbol));
     item.setMenu(Some(&menu));
-    let recording_symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("record.circle"),
-        Some(&NSString::from_str("Hex is recording a meeting")),
-    );
-    if let Some(recording_symbol) = &recording_symbol {
-        recording_symbol.setTemplate(true);
-    }
 
     STATUS_ITEM.with(|status_item| {
         *status_item.borrow_mut() = Some(StatusItemController {
@@ -272,7 +265,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
             meeting_stop,
             meeting_open,
             meeting_separator,
-            meeting_title: RefCell::new(String::new()),
+            meeting_button: RefCell::new((String::new(), false)),
             _menu: menu,
             _target: target,
             model_items,
@@ -283,6 +276,16 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         });
     });
     Ok(receiver)
+}
+
+fn status_bar_icon(png: &[u8], accessibility_description: &str) -> Result<Retained<NSImage>> {
+    let data = NSData::with_bytes(png);
+    let image = NSImage::initWithData(NSImage::alloc(), &data)
+        .ok_or_else(|| eyre!("could not decode Hex status item icon"))?;
+    image.setSize(NSSize::new(STATUS_ICON_POINTS, STATUS_ICON_POINTS));
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(&NSString::from_str(accessibility_description)));
+    Ok(image)
 }
 
 fn add_item(
@@ -459,17 +462,18 @@ pub fn update_meeting(state: &crate::meeting_watcher::MeetingMenuState, enabled:
                 .meeting_status
                 .setTitle(&NSString::from_str(status));
         }
-        let mut title = controller.meeting_title.borrow_mut();
-        if *title != menu.button_title
+        let mut button_state = controller.meeting_button.borrow_mut();
+        if (*button_state != (menu.button_title.clone(), menu.recording))
             && let Some(button) = controller.item.button(mtm)
         {
             button.setTitle(&NSString::from_str(&menu.button_title));
-            let symbol = match (&controller.recording_symbol, menu.recording) {
-                (Some(recording), true) => recording,
-                _ => &controller.idle_symbol,
+            let symbol = if menu.recording {
+                &controller.recording_symbol
+            } else {
+                &controller.idle_symbol
             };
             button.setImage(Some(symbol));
-            *title = menu.button_title;
+            *button_state = (menu.button_title, menu.recording);
         }
     });
 }
@@ -550,6 +554,28 @@ mod tests {
                 model_from_tag(index as isize),
                 model.available().then_some(model.id)
             );
+        }
+    }
+
+    #[test]
+    fn status_bar_icons_load_as_18pt_retina_templates() {
+        for (png, description) in [
+            (IDLE_ICON_PNG, "Hex"),
+            (RECORDING_ICON_PNG, "Hex is recording a meeting"),
+        ] {
+            let icon = status_bar_icon(png, description).unwrap();
+            assert!(icon.isTemplate());
+            assert_eq!(
+                icon.size(),
+                NSSize::new(STATUS_ICON_POINTS, STATUS_ICON_POINTS)
+            );
+            assert_eq!(
+                icon.accessibilityDescription().unwrap().to_string(),
+                description
+            );
+            let rep = icon.representations().firstObject().unwrap();
+            assert_eq!(rep.pixelsWide(), 36);
+            assert_eq!(rep.pixelsHigh(), 36);
         }
     }
 }

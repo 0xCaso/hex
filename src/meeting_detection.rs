@@ -101,21 +101,31 @@ impl MeetingSource {
 pub struct MeetingDetector {
     pending: Option<(String, u8)>,
     offered: Option<String>,
+    offered_application: Option<String>,
     absent_observations: u8,
 }
 
 impl MeetingDetector {
+    pub fn is_application_snoozed(&self, canonical_bundle_id: &str) -> bool {
+        self.offered_application.as_deref() == Some(canonical_bundle_id)
+    }
+
     pub fn observe(&mut self, candidate: Option<MeetingCandidate>) -> Option<MeetingCandidate> {
         let Some(candidate) = candidate else {
             self.pending = None;
             self.absent_observations = self.absent_observations.saturating_add(1);
             if self.absent_observations >= ABSENT_OBSERVATIONS_TO_RESET {
                 self.offered = None;
+                self.offered_application = None;
             }
             return None;
         };
         self.absent_observations = 0;
-        if self.offered.as_deref() == Some(&candidate.key) {
+        if self.offered.as_deref() == Some(&candidate.key)
+            || (candidate.application.is_some()
+                && self.offered_application == candidate.application)
+        {
+            self.pending = None;
             return None;
         }
         let observations = match &mut self.pending {
@@ -133,6 +143,7 @@ impl MeetingDetector {
         }
         self.pending = None;
         self.offered = Some(candidate.key.clone());
+        self.offered_application = candidate.application.clone();
         Some(candidate)
     }
 }
@@ -143,14 +154,14 @@ pub fn candidate_from_context(context: &ContextSnapshot) -> Option<MeetingCandid
     let title = context.window_title.as_deref().unwrap_or("").trim();
     let title_lower = title.to_ascii_lowercase();
 
-    if application_lower.contains("brave")
+    if is_browser_application(&application_lower)
         && let Some(url) = &context.browser_url
         && is_google_meet_call(url)
     {
         return Some(named(candidate(
             MeetingSource::GoogleMeet,
             url.as_str(),
-            clean_title(title, &[" - Google Meet", " | Google Meet"]),
+            &clean_google_meet_title(title),
         )));
     }
     if application_lower.contains("zoom")
@@ -183,10 +194,7 @@ pub fn candidate_from_microphone(
 ) -> Option<MeetingCandidate> {
     let canonical_bundle = application.canonical_bundle_id()?;
     if application.is_browser() {
-        if context
-            .application
-            .as_deref()
-            .is_some_and(|foreground| foreground.contains(&application.name))
+        if context_matches_browser(canonical_bundle, &application.name, context)
             && let Some(mut candidate) = candidate_from_context(context)
         {
             candidate.application = Some(canonical_bundle.into());
@@ -206,6 +214,34 @@ pub fn candidate_from_microphone(
     let mut candidate = candidate(source, canonical_bundle, title);
     candidate.application = Some(canonical_bundle.into());
     Some(candidate)
+}
+
+fn is_browser_application(application_lower: &str) -> bool {
+    ["brave", "chrome", "safari", "firefox", "edge"]
+        .iter()
+        .any(|browser| application_lower.contains(browser))
+}
+
+fn context_matches_browser(
+    canonical_bundle: &str,
+    application_name: &str,
+    context: &ContextSnapshot,
+) -> bool {
+    let Some(foreground) = context.application.as_deref() else {
+        return false;
+    };
+    if foreground.contains(application_name) || application_name.contains(foreground) {
+        return true;
+    }
+    let lower = foreground.to_ascii_lowercase();
+    match canonical_bundle {
+        "com.brave.Browser" => lower.contains("brave"),
+        "com.google.Chrome" => lower.contains("chrome"),
+        "com.apple.Safari" => lower.contains("safari"),
+        "org.mozilla.firefox" => lower.contains("firefox"),
+        "com.microsoft.edgemac" => lower.contains("edge"),
+        _ => false,
+    }
 }
 
 fn candidate(source: MeetingSource, identity: &str, title: &str) -> MeetingCandidate {
@@ -235,6 +271,50 @@ fn is_google_meet_call(url: &Url) -> bool {
     }
     let path = url.path().trim_matches('/');
     !path.is_empty() && path != "landing" && path != "new"
+}
+
+fn clean_google_meet_title(title: &str) -> String {
+    let mut cleaned = clean_title(
+        title,
+        &[
+            " - Audio playing - Brave",
+            " - Brave",
+            " - Brave Browser",
+            " - Google Chrome",
+            " — Mozilla Firefox",
+            " - Microsoft Edge",
+            " - Safari",
+        ],
+    );
+    cleaned = clean_title(cleaned, &[" - Google Meet", " | Google Meet"]);
+    for prefix in ["Meet - ", "Meet – ", "Meet — "] {
+        if let Some(rest) = cleaned.strip_prefix(prefix) {
+            cleaned = rest.trim();
+            break;
+        }
+    }
+    if cleaned.eq_ignore_ascii_case("Google Meet")
+        || cleaned.eq_ignore_ascii_case("Meet")
+        || is_google_meet_code(cleaned)
+    {
+        return String::new();
+    }
+    cleaned.to_string()
+}
+
+fn is_google_meet_code(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let (Some(first), Some(second), Some(third), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    first.len() == 3
+        && second.len() == 4
+        && third.len() == 3
+        && [first, second, third]
+            .into_iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_lowercase()))
 }
 
 fn clean_title<'a>(title: &'a str, suffixes: &[&str]) -> &'a str {
@@ -355,5 +435,103 @@ mod tests {
             assert!(!presence.observe(false));
         }
         assert!(presence.observe(false));
+    }
+
+    #[test]
+    fn classifies_helper_and_host_microphone_applications() {
+        let brave_helper = ActiveMicrophoneApplication {
+            pid: 2352,
+            bundle_id: "com.brave.Browser.helper".into(),
+            name: "Brave Browser Helper".into(),
+        };
+        let meet_context = context(
+            "Brave Browser",
+            Some("https://meet.google.com/abc-defg-hij"),
+            "Meet - Design sync - Brave",
+        );
+        let meet = candidate_from_microphone(&brave_helper, &meet_context).unwrap();
+        assert_eq!(meet.source, MeetingSource::GoogleMeet);
+        assert_eq!(meet.title, "Design sync");
+        assert!(meet.named);
+        assert_eq!(meet.application.as_deref(), Some("com.brave.Browser"));
+
+        let slack_helper = ActiveMicrophoneApplication {
+            pid: 31807,
+            bundle_id: "com.tinyspeck.slackmacgap.helper".into(),
+            name: "Slack Helper".into(),
+        };
+        let huddle = candidate_from_microphone(&slack_helper, &ContextSnapshot::default()).unwrap();
+        assert_eq!(huddle.source, MeetingSource::SlackHuddle);
+        assert_eq!(
+            huddle.application.as_deref(),
+            Some("com.tinyspeck.slackmacgap")
+        );
+
+        let zoom_helper = ActiveMicrophoneApplication {
+            pid: 9010,
+            bundle_id: "us.zoom.CptHost".into(),
+            name: "CptHost".into(),
+        };
+        let zoom = candidate_from_microphone(&zoom_helper, &ContextSnapshot::default()).unwrap();
+        assert_eq!(zoom.source, MeetingSource::Zoom);
+        assert_eq!(zoom.application.as_deref(), Some("us.zoom.xos"));
+
+        let safari_gpu = ActiveMicrophoneApplication {
+            pid: 7100,
+            bundle_id: "com.apple.WebKit.GPU".into(),
+            name: "Safari Graphics and Media".into(),
+        };
+        let browser = candidate_from_microphone(&safari_gpu, &ContextSnapshot::default()).unwrap();
+        assert_eq!(browser.source, MeetingSource::BrowserCall);
+        assert_eq!(browser.application.as_deref(), Some("com.apple.Safari"));
+    }
+
+    #[test]
+    fn cleans_google_meet_titles_and_ignores_raw_meet_codes() {
+        let code_only = candidate_from_context(&context(
+            "Brave Browser",
+            Some("https://meet.google.com/abc-defg-hij"),
+            "Meet - abc-defg-hij - Brave",
+        ))
+        .unwrap();
+        assert_eq!(code_only.source, MeetingSource::GoogleMeet);
+        assert_eq!(code_only.title, "Google Meet");
+        assert!(!code_only.named);
+        assert_eq!(code_only.recording_start().title, None);
+
+        let named_prefix = candidate_from_context(&context(
+            "Google Chrome",
+            Some("https://meet.google.com/abc-defg-hij"),
+            "Meet – Weekly Architecture - Google Chrome",
+        ))
+        .unwrap();
+        assert_eq!(named_prefix.title, "Weekly Architecture");
+        assert!(named_prefix.named);
+    }
+
+    #[test]
+    fn switching_tabs_during_a_snoozed_browser_call_does_not_re_offer() {
+        let brave = ActiveMicrophoneApplication {
+            pid: 1592,
+            bundle_id: "com.brave.Browser".into(),
+            name: "Brave Browser".into(),
+        };
+        let meet_context = context(
+            "Brave Browser",
+            Some("https://meet.google.com/abc-defg-hij"),
+            "Design sync - Google Meet",
+        );
+        let meet = candidate_from_microphone(&brave, &meet_context).unwrap();
+        let fallback = candidate_from_microphone(&brave, &ContextSnapshot::default()).unwrap();
+
+        let mut detector = MeetingDetector::default();
+        for _ in 0..STABLE_OBSERVATIONS - 1 {
+            assert!(detector.observe(Some(meet.clone())).is_none());
+        }
+        assert!(detector.observe(Some(meet)).is_some());
+        assert!(detector.is_application_snoozed("com.brave.Browser"));
+        for _ in 0..STABLE_OBSERVATIONS + 2 {
+            assert!(detector.observe(Some(fallback.clone())).is_none());
+        }
     }
 }
