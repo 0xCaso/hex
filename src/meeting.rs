@@ -100,15 +100,6 @@ pub fn system_audio_ready() -> bool {
     )
 }
 
-pub fn open_system_audio_settings() {
-    if let Err(error) = std::process::Command::new("/usr/bin/open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")
-        .spawn()
-    {
-        tracing::error!(%error, "could not open System Audio Recording settings");
-    }
-}
-
 pub fn reveal(path: &Path) {
     if let Err(error) = std::process::Command::new("/usr/bin/open")
         .arg("-R")
