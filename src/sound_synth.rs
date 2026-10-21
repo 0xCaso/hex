@@ -6,7 +6,7 @@
 //! the tuning prototype. Keep the two step for step identical; the parity test
 //! compares this module against renders exported from it.
 
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, PI, TAU};
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -21,6 +21,7 @@ pub enum Cue {
 }
 
 impl Cue {
+    #[cfg(test)]
     pub const ALL: [Cue; 3] = [Cue::Start, Cue::Stop, Cue::Cancel];
 
     fn index(self) -> u32 {
@@ -89,6 +90,7 @@ pub fn presets() -> &'static [Preset] {
     })
 }
 
+#[cfg(test)]
 pub fn preset(id: &str) -> Option<&'static Preset> {
     presets().iter().find(|preset| preset.id == id)
 }
@@ -113,7 +115,7 @@ fn biquad(x: &[f64], b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Ve
 
 fn low_pass(x: &[f64], cutoff: f64, sr: f64) -> Vec<f64> {
     let w = TAU * cutoff.min(sr * 0.45) / sr;
-    let (c, alpha) = (w.cos(), w.sin() / (2.0 * 0.7071067811865476));
+    let (c, alpha) = (w.cos(), w.sin() / (2.0 * FRAC_1_SQRT_2));
     biquad(
         x,
         (1.0 - c) / 2.0,
@@ -242,6 +244,7 @@ fn rms(x: &[f64]) -> f64 {
 }
 
 /// BS.1770 K-weighted loudness of a clip in a 400 ms window (zero-padded), in LUFS.
+#[cfg(test)]
 pub fn loudness(x: &[f32], sample_rate: u32) -> f64 {
     let x: Vec<f64> = x.iter().map(|&v| f64::from(v)).collect();
     loudness_f64(&x, f64::from(sample_rate))
@@ -251,7 +254,7 @@ fn loudness_f64(x: &[f64], sr: f64) -> f64 {
     let n = x.len().max((0.4 * sr).round() as usize);
     let mut padded = x.to_vec();
     padded.resize(n, 0.0);
-    let mut w = TAU * 1681.9744509555319 / sr;
+    let mut w = TAU * 1_681.974_450_955_532 / sr;
     let mut c = w.cos();
     let a = 10_f64.powf(3.99984385397 / 40.0);
     let sq = a.sqrt();
@@ -430,8 +433,10 @@ mod tests {
         );
         std::fs::read(&path)
             .unwrap_or_else(|error| panic!("{path}: {error}"))
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect()
     }
 
