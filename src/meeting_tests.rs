@@ -336,6 +336,73 @@ fn capture_failures_are_persisted_instead_of_looking_interrupted() {
 }
 
 #[test]
+fn mid_meeting_capture_loss_proceeds_to_transcription_when_audio_was_recorded() {
+    let directory = std::env::temp_dir().join(format!(
+        "voice-control-meeting-capture-loss-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let mut manifest = MeetingManifest {
+        schema_version: 1,
+        id: "capture-loss-test".into(),
+        title: "Capture loss test".into(),
+        status: MeetingStatus::Recording,
+        created_at_ms: now_ms(),
+        ended_at_ms: Some(now_ms()),
+        duration_ms: Some(60_000),
+        system: TrackManifest::default(),
+        microphone: TrackManifest::default(),
+        live_dropped_packets: 0,
+        live_transcription_error: None,
+        error: None,
+        app: None,
+        export_path: None,
+        export_error: None,
+        echo_suppressed_utterances: 0,
+        provisional_title: None,
+        notes: None,
+        notes_error: None,
+    };
+    let (sender, receiver) = mpsc::sync_channel(4);
+
+    let empty_error = prepare_for_transcription(
+        &directory,
+        &mut manifest,
+        Some("SCStream error (No capture source provided)".into()),
+        Ok(()),
+        Some(&sender),
+    )
+    .unwrap_err();
+    assert!(
+        empty_error
+            .to_string()
+            .contains("No capture source provided")
+    );
+    assert!(receiver.try_recv().is_err());
+
+    manifest.system.samples = 16_000 * 60;
+    prepare_for_transcription(
+        &directory,
+        &mut manifest,
+        Some(
+            "SCStream error (No capture source provided): Failed to find any displays or windows to capture"
+                .into(),
+        ),
+        Err(eyre!("stream already stopped")),
+        Some(&sender),
+    )
+    .unwrap();
+    assert_eq!(manifest.status, MeetingStatus::Transcribing);
+    assert_eq!(manifest.error, None);
+    assert_eq!(receiver.try_recv().unwrap(), RecordingUpdate::Transcribing);
+    let persisted = read_manifest(&directory).unwrap();
+    assert_eq!(persisted.status, MeetingStatus::Transcribing);
+    assert_eq!(persisted.error, None);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn abandoned_recording_and_finalization_are_recovered_as_interrupted() {
     assert_eq!(
         recovered_status(MeetingStatus::Starting, false, false),

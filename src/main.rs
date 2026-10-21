@@ -109,7 +109,6 @@ mod microphone_activity;
 mod moonshine;
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod moonshine_lab;
-#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod motion;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod onboarding;
@@ -538,6 +537,8 @@ enum MeetingCommand {
     },
     /// Print applications currently using microphone input.
     Probe,
+    /// Transcribe a meeting's recorded WAV tracks and publish its transcript.
+    Transcribe { id: String },
     /// Write an Apple Intelligence title and summary for a meeting id, or
     /// time the provisional title and the final title and summary for a
     /// transcript Markdown file without saving them.
@@ -952,6 +953,21 @@ fn main() -> Result<()> {
         Command::Meeting {
             command: MeetingCommand::Probe,
         } => meeting_watcher::probe(),
+        #[cfg(debug_assertions)]
+        Command::Meeting {
+            command: MeetingCommand::Transcribe { id },
+        } => {
+            app_settings::AppSettings::load()?;
+            let manifest = meeting::transcribe_meeting(&id)?;
+            println!("{}", meeting::display_title(&manifest));
+            if let Some(path) = manifest.export_path {
+                println!("{}", path.display());
+            }
+            if let Some(error) = manifest.export_error {
+                println!("{error}");
+            }
+            Ok(())
+        }
         #[cfg(debug_assertions)]
         Command::Meeting {
             command:

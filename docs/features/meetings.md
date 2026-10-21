@@ -107,6 +107,11 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
 Detected app leaves the microphone for about 3 s     // meetings.call-ended
   -> "Zoom left the call" capsule: Keep recording / Stop & transcribe
   -> No timeout; nothing stops automatically
+
+SCStream loses its display mid-recording (monitor unplug / display sleep)
+  -> Audio delivered before error -> restart SCStream on current display once
+     ├── Display available -> keep recording into the same tracks
+     └── No display (e.g. display sleep) -> stop capture and transcribe recorded audio
 ```
 
 Starting a recording no longer opens the Settings window; failures still do.
@@ -116,7 +121,9 @@ Checks: `call_end_is_reported_once_per_sustained_absence`,
 `meeting_delta_tracks_each_source_and_coalesces_turns` in
 [parakeet.rs](../../src/parakeet.rs), and
 `meeting_menu_offers_one_action_per_state` in
-[status_item.rs](../../src/status_item.rs). Native menu-bar and capsule clicks
+[status_item.rs](../../src/status_item.rs), and
+`mid_meeting_capture_loss_proceeds_to_transcription_when_audio_was_recorded` in
+[meeting_tests.rs](../../src/meeting_tests.rs). Native menu-bar and capsule clicks
 are unverified.
 
 ### Transcribe

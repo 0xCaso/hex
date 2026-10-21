@@ -424,7 +424,7 @@ impl Pane {
         Self::Activity,
     ];
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn all(capabilities: Capabilities, developer_features: bool, meetings: bool) -> Vec<Self> {
         Self::all_with_fun(capabilities, developer_features, meetings, false)
     }
