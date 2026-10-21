@@ -69,7 +69,7 @@ including manual checks, with the `DisableUpdates` Boolean in the
 single Mac run `defaults write com.kitlangton.hex2 DisableUpdates -bool true`.
 Relaunch HEX to apply it. Model downloads still work.
 
-**Download blocked?** [Alternative download: GitHub — Hex 2.3.0](https://github.com/anomalyco/hex/releases/download/app-v2.3.0/HEX-2.3.0-arm64.dmg)
+**Download blocked?** [Alternative download: GitHub — Hex 2.3.1](https://github.com/anomalyco/hex/releases/download/app-v2.3.1/HEX-2.3.1-arm64.dmg)
 contains the identical signed DMG for Apple silicon and macOS 15+. App releases
 use `app-v…` tags; the repository also publishes separate TypeScript SDK releases.
 If an older installation cannot check for updates on your network, install the
@@ -204,8 +204,8 @@ driver, Parakeet Unified English streams while you speak, so text arrives within
 about 100 ms of release even after minutes of talking; ARM64 transcribes on the
 CPU. Voice commands, meetings, and the local transcription API are not included.
 Download the installer for
-[x64](https://downloads.hex.kitlangton.com/releases/HEX-Setup-2.3.0-x64.exe) or
-[ARM64](https://downloads.hex.kitlangton.com/releases/HEX-Setup-2.3.0-arm64.exe)
+[x64](https://downloads.hex.kitlangton.com/releases/HEX-Setup-2.3.1-x64.exe) or
+[ARM64](https://downloads.hex.kitlangton.com/releases/HEX-Setup-2.3.1-arm64.exe)
 and run it; it installs for your user without administrator rights. It is not
 code-signed yet, so SmartScreen may warn: choose **More info**, then **Run
 anyway**. See the [Windows guide](docs/windows.md) for details or to build from
