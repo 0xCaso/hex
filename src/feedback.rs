@@ -1,15 +1,16 @@
 use std::io::Cursor;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use rodio::buffer::SamplesBuffer;
-use rodio::{Decoder, DeviceSinkBuilder, Source};
+use rodio::cpal::BufferSize;
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tone {
@@ -24,7 +25,18 @@ pub enum Tone {
     Cancel,
 }
 
-static DICTATION_PLAYER: OnceLock<SyncSender<Tone>> = OnceLock::new();
+/// A request to the playback worker. The start tone of a shortcut press is
+/// provisional: the press may still become a chord or short tap, which
+/// retracts it before or while it sounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Request {
+    Play(Tone),
+    ProvisionalStart,
+    RetractStart,
+    Prepare,
+}
+
+static DICTATION_PLAYER: OnceLock<SyncSender<Request>> = OnceLock::new();
 static LOADER_STARTED: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static VOLUME: AtomicU32 = AtomicU32::new(0.5_f32.to_bits());
@@ -115,8 +127,8 @@ fn admission_error(outcome: Result<Result<()>, mpsc::RecvTimeoutError>) -> Resul
 }
 
 fn publish_player(
-    player: &OnceLock<SyncSender<Tone>>,
-    sender: SyncSender<Tone>,
+    player: &OnceLock<SyncSender<Request>>,
+    sender: SyncSender<Request>,
     ready: SyncSender<Result<()>>,
     outcome: Result<()>,
 ) {
@@ -133,7 +145,7 @@ pub fn preload() -> Result<()> {
         // the player itself, so report the same slow-audio outcome.
         return Err(eyre!("feedback audio is still initializing"));
     }
-    let (sender, receiver) = mpsc::sync_channel(8);
+    let (sender, receiver) = mpsc::sync_channel::<Request>(8);
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let result = (|| -> Result<_> {
@@ -157,58 +169,68 @@ pub fn preload() -> Result<()> {
             return;
         };
         let mut output = FeedbackOutput::new();
-        let open = || {
-            let mut sink = DeviceSinkBuilder::open_default_sink()
-                .wrap_err("could not open the audio output")?;
-            sink.log_on_drop(false);
-            Ok(sink)
-        };
         // The device opens for the first tone, not at startup, so an idle app
         // holds no output stream. Publish before any tone arrives.
         publish_player(&DICTATION_PLAYER, sender, ready_sender, Ok(()));
+        let mut start_tone = ProvisionalStart::default();
         loop {
-            let tone = match receiver.recv_timeout(Duration::from_millis(250)) {
-                Ok(tone) => Some(tone),
+            let timeout = start_tone.wait(Instant::now(), OBSERVATION_INTERVAL);
+            let request = match receiver.recv_timeout(timeout) {
+                Ok(request) => Some(request),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
+            let received_at = Instant::now();
+            let timed_out = request.is_none();
             let enabled = sounds_enabled();
-            output.release_when_idle(enabled, Instant::now());
-            let Some(tone) = tone.filter(|_| enabled) else {
-                continue;
-            };
-            let sound = match tone {
-                Tone::DictationStart => &start,
-                Tone::DictationStop => &stop,
-                Tone::Cancel => &cancel,
-                #[cfg(target_os = "macos")]
-                Tone::Wake | Tone::Sleep | Tone::Error => continue,
-            };
-            let opening = Instant::now();
-            let cold = output.sink.is_none();
-            if let Err(error) = output.open_for_tone(Instant::now(), open) {
-                tracing::warn!(%error, "recording audio output unavailable; retrying");
-            }
-            tracing::debug!(
-                ?tone,
-                cold,
-                open_ms = opening.elapsed().as_millis(),
-                "playing feedback tone"
-            );
-            // Opening may have been slow; recheck the latest preference before
-            // retaining the output or playing the queued sound.
-            if !sounds_enabled() {
-                output.release_when_idle(false, Instant::now());
+            output.release_when_idle(enabled, received_at);
+            if !enabled {
+                start_tone.retract();
                 continue;
             }
-            let Some(sink) = output.sink.as_ref() else {
-                continue;
+            let tone = match request {
+                Some(Request::Play(tone)) => {
+                    if tone == Tone::DictationStart {
+                        start_tone.cancel_pending();
+                    }
+                    Some(tone)
+                }
+                Some(Request::ProvisionalStart) => {
+                    start_tone.request(received_at);
+                    // Opening during the chord grace keeps a cold device off
+                    // the path to the audible tone.
+                    output.prepare(received_at);
+                    None
+                }
+                Some(Request::RetractStart) => {
+                    start_tone.retract();
+                    None
+                }
+                Some(Request::Prepare) => {
+                    output.prepare(received_at);
+                    None
+                }
+                None => None,
             };
-            sink.mixer().add(sound.clone().amplify(volume()));
-            output.mark_playing(
-                Instant::now(),
-                sound.total_duration().unwrap_or(Duration::ZERO),
-            );
+            if let Some(tone) = tone {
+                let sound = match tone {
+                    Tone::DictationStart => &start,
+                    Tone::DictationStop => &stop,
+                    Tone::Cancel => &cancel,
+                    #[cfg(target_os = "macos")]
+                    Tone::Wake | Tone::Sleep | Tone::Error => continue,
+                };
+                output.play(sound.clone(), tone);
+            } else if timed_out && start_tone.is_due(Instant::now()) {
+                // Only an empty queue reaches here, so a retraction sent while
+                // the device opened always wins over the tone.
+                let (sound, retracted) = Retractable::new(start.clone());
+                if output.play(sound, Tone::DictationStart) {
+                    start_tone.sounding(retracted);
+                } else {
+                    start_tone.retract();
+                }
+            }
         }
     });
     let outcome = ready_receiver.recv_timeout(Duration::from_secs(2));
@@ -222,16 +244,200 @@ pub fn play(tone: Tone) {
     }
     match tone {
         Tone::DictationStart | Tone::DictationStop | Tone::Cancel => {
-            enqueue(DICTATION_PLAYER.get(), tone);
+            enqueue(DICTATION_PLAYER.get(), Request::Play(tone));
         }
         #[cfg(target_os = "macos")]
         Tone::Wake | Tone::Sleep | Tone::Error => play_system_sound(tone),
     }
 }
 
-fn enqueue(player: Option<&SyncSender<Tone>>, tone: Tone) {
+/// Plays the start tone for a shortcut press that may still become a chord or
+/// short tap. It sounds after [`CHORD_GRACE`] unless [`retract_start`] arrives
+/// first, so modifiers pressed together for another shortcut stay silent.
+pub fn play_provisional_start() {
+    if sounds_enabled() {
+        enqueue(DICTATION_PLAYER.get(), Request::ProvisionalStart);
+    }
+}
+
+/// Withdraws a provisional start tone: drops it before it sounds, or fades it
+/// out over [`RETRACT_FADE`]. Has no effect on a tone that already finished.
+pub fn retract_start() {
+    enqueue(DICTATION_PLAYER.get(), Request::RetractStart);
+}
+
+/// Opens the output ahead of a tone expected soon, without playing anything.
+pub fn prepare() {
+    if sounds_enabled() {
+        enqueue(DICTATION_PLAYER.get(), Request::Prepare);
+    }
+}
+
+fn enqueue(player: Option<&SyncSender<Request>>, request: Request) {
     if let Some(player) = player {
-        let _ = player.try_send(tone);
+        let _ = player.try_send(request);
+    }
+}
+
+/// How long a provisional start tone waits before sounding. Modifiers pressed
+/// together for another application's shortcut arrive within this window, so
+/// those chords stay silent while a deliberate press still sounds at once.
+const CHORD_GRACE: Duration = Duration::from_millis(40);
+/// How quickly a retracted start tone fades out instead of clicking off.
+const RETRACT_FADE: Duration = Duration::from_millis(20);
+const OBSERVATION_INTERVAL: Duration = Duration::from_millis(250);
+/// The output buffer, about 10 ms at 48 kHz. Rodio's default 50 ms buffer adds
+/// that much again to every tone.
+const OUTPUT_BUFFER_FRAMES: u32 = 512;
+
+/// The worker's view of the provisional start tone: due while waiting out the
+/// chord grace, then retractable while it sounds.
+#[derive(Default)]
+struct ProvisionalStart {
+    due: Option<Instant>,
+    sounding: Option<Arc<AtomicBool>>,
+}
+
+impl ProvisionalStart {
+    fn request(&mut self, at: Instant) {
+        self.retract();
+        self.due = Some(at + CHORD_GRACE);
+    }
+
+    /// How long the worker may block before the pending tone is due.
+    fn wait(&self, now: Instant, observation: Duration) -> Duration {
+        self.due
+            .map_or(observation, |due| due.saturating_duration_since(now))
+            .min(observation)
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        self.due.is_some_and(|due| now >= due)
+    }
+
+    fn sounding(&mut self, retracted: Arc<AtomicBool>) {
+        self.due = None;
+        self.sounding = Some(retracted);
+    }
+
+    fn cancel_pending(&mut self) {
+        self.due = None;
+    }
+
+    fn retract(&mut self) {
+        self.due = None;
+        if let Some(retracted) = self.sounding.take() {
+            retracted.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// A sound that fades out over [`RETRACT_FADE`] once its flag is set.
+struct Retractable<S> {
+    inner: S,
+    retracted: Arc<AtomicBool>,
+    gain: f32,
+    step: f32,
+    channel: u16,
+}
+
+impl<S: Source> Retractable<S> {
+    fn new(inner: S) -> (Self, Arc<AtomicBool>) {
+        let retracted = Arc::new(AtomicBool::new(false));
+        let fade_frames = RETRACT_FADE.as_secs_f32() * inner.sample_rate().get() as f32;
+        let sound = Self {
+            inner,
+            retracted: retracted.clone(),
+            gain: 1.0,
+            step: 1.0 / fade_frames.max(1.0),
+            channel: 0,
+        };
+        (sound, retracted)
+    }
+}
+
+impl<S: Source> Iterator for Retractable<S> {
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let channels = self.inner.channels().get();
+        if self.channel == 0 && self.retracted.load(Ordering::Acquire) {
+            if self.gain <= 0.0 {
+                return None;
+            }
+            self.gain = (self.gain - self.step).max(0.0);
+        }
+        self.channel = (self.channel + 1) % channels;
+        self.inner.next().map(|sample| sample * self.gain)
+    }
+}
+
+impl<S: Source> Source for Retractable<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+}
+
+fn open_output() -> Result<MixerDeviceSink> {
+    let mut sink = DeviceSinkBuilder::from_default_device()
+        .and_then(|builder| {
+            builder
+                .with_buffer_size(BufferSize::Fixed(OUTPUT_BUFFER_FRAMES))
+                .open_stream()
+        })
+        .or_else(|_| DeviceSinkBuilder::open_default_sink())
+        .wrap_err("could not open the audio output")?;
+    sink.log_on_drop(false);
+    Ok(sink)
+}
+
+impl FeedbackOutput<MixerDeviceSink> {
+    /// Opens the output and starts its idle grace without playing anything.
+    fn prepare(&mut self, now: Instant) {
+        let opening = Instant::now();
+        let cold = self.sink.is_none();
+        if let Err(error) = self.open_for_tone(now, open_output) {
+            tracing::warn!(%error, "recording audio output unavailable; retrying");
+        }
+        if cold && self.sink.is_some() {
+            tracing::debug!(
+                open_ms = opening.elapsed().as_millis(),
+                "opened feedback output"
+            );
+        }
+        self.mark_playing(Instant::now(), Duration::ZERO);
+    }
+
+    /// Plays a sound, opening the output first if needed. Returns whether it
+    /// reached the mixer.
+    fn play(&mut self, sound: impl Source + Send + 'static, tone: Tone) -> bool {
+        self.prepare(Instant::now());
+        // Opening may have been slow; recheck the latest preference before
+        // retaining the output or playing the queued sound.
+        if !sounds_enabled() {
+            self.release_when_idle(false, Instant::now());
+            return false;
+        }
+        let Some(sink) = self.sink.as_ref() else {
+            return false;
+        };
+        let duration = sound.total_duration().unwrap_or(Duration::ZERO);
+        sink.mixer().add(sound.amplify(volume()));
+        tracing::debug!(?tone, "playing feedback tone");
+        self.mark_playing(Instant::now(), duration);
+        true
     }
 }
 
@@ -316,6 +522,82 @@ mod tests {
     }
 
     #[test]
+    fn provisional_start_sounds_after_the_chord_grace_unless_retracted() {
+        let now = Instant::now();
+        let observation = Duration::from_millis(250);
+        let mut start = ProvisionalStart::default();
+        assert_eq!(start.wait(now, observation), observation);
+        assert!(!start.is_due(now + Duration::from_secs(1)));
+
+        // A press waits out the grace, then is due.
+        start.request(now);
+        assert_eq!(start.wait(now, observation), CHORD_GRACE);
+        assert!(!start.is_due(now + CHORD_GRACE - Duration::from_millis(1)));
+        assert!(start.is_due(now + CHORD_GRACE));
+        assert_eq!(
+            start.wait(now + CHORD_GRACE * 2, observation),
+            Duration::ZERO
+        );
+
+        // A chord inside the grace never sounds.
+        start.retract();
+        assert!(!start.is_due(now + CHORD_GRACE));
+        assert_eq!(start.wait(now, observation), observation);
+
+        // A chord after the tone began fades that tone, and only once.
+        start.request(now);
+        let (_, sounding) = Retractable::new(SamplesBuffer::new(
+            std::num::NonZero::new(1).unwrap(),
+            std::num::NonZero::new(48_000).unwrap(),
+            vec![1.0; 10],
+        ));
+        start.sounding(sounding.clone());
+        assert!(!start.is_due(now + CHORD_GRACE));
+        start.retract();
+        assert!(sounding.load(Ordering::Acquire));
+
+        // A later press supersedes an earlier pending one; a definitive start
+        // tone cancels the provisional one instead of doubling it.
+        start.request(now);
+        start.request(now + Duration::from_millis(10));
+        assert!(!start.is_due(now + CHORD_GRACE));
+        start.cancel_pending();
+        assert!(!start.is_due(now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn retracted_tone_fades_out_without_a_click_or_channel_skew() {
+        let rate = 48_000_u32;
+        let frames = rate as usize;
+        let buffer = || {
+            SamplesBuffer::new(
+                std::num::NonZero::new(2).unwrap(),
+                std::num::NonZero::new(rate).unwrap(),
+                vec![1.0; frames * 2],
+            )
+        };
+        let (untouched, _) = Retractable::new(buffer());
+        assert_eq!(untouched.count(), frames * 2);
+
+        let (mut sound, retracted) = Retractable::new(buffer());
+        for _ in 0..101 {
+            assert_eq!(sound.next(), Some(1.0));
+        }
+        // Retracting mid-frame finishes that frame at full gain first.
+        retracted.store(true, Ordering::Release);
+        assert_eq!(sound.next(), Some(1.0));
+        let rest = sound.collect::<Vec<_>>();
+        let fade_frames = (RETRACT_FADE.as_secs_f32() * rate as f32) as usize;
+        assert_eq!(rest.len() % 2, 0, "the fade ends on a frame boundary");
+        assert!(rest.len().abs_diff(fade_frames * 2) <= 4, "{}", rest.len());
+        for frame in rest.chunks(2) {
+            assert_eq!(frame[0], frame[1]);
+        }
+        assert!(rest.windows(2).all(|pair| pair[1] <= pair[0]));
+        assert!(rest[0] < 1.0 && *rest.last().unwrap() < 0.01);
+    }
+
+    #[test]
     fn timed_out_admission_still_publishes_a_usable_player() {
         let player = OnceLock::new();
         let (sender, receiver) = mpsc::sync_channel(8);
@@ -323,8 +605,11 @@ mod tests {
         assert!(admission_error(waiting.recv_timeout(Duration::ZERO)).is_err());
         drop(waiting);
         publish_player(&player, sender, ready, Ok(()));
-        enqueue(player.get(), Tone::DictationStart);
-        assert_eq!(receiver.try_recv().unwrap(), Tone::DictationStart);
+        enqueue(player.get(), Request::Play(Tone::DictationStart));
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            Request::Play(Tone::DictationStart)
+        );
     }
 
     #[test]
@@ -445,6 +730,109 @@ mod tests {
         assert!(released, "releasing the output should clear the assertion");
     }
 
+    /// Times the default output's tone path without recording it: from the
+    /// request to the mixer's first pull of the tone, plus one output buffer
+    /// until that sample is presented. `HEX_TONE_PATH=legacy` measures the
+    /// previous path (rodio's default 50 ms buffer). Route the default output
+    /// to a virtual device first so nothing sounds aloud.
+    #[test]
+    #[ignore = "opens the native default output; route it to a silent device or set HEX_TONE_MUTED"]
+    fn native_start_tone_path_latency() {
+        use std::sync::Mutex;
+
+        struct Probe<S> {
+            inner: S,
+            pulled: Arc<Mutex<Option<Instant>>>,
+        }
+        impl<S: Source> Iterator for Probe<S> {
+            type Item = rodio::Sample;
+            fn next(&mut self) -> Option<Self::Item> {
+                self.pulled.lock().unwrap().get_or_insert_with(Instant::now);
+                self.inner.next()
+            }
+        }
+        impl<S: Source> Source for Probe<S> {
+            fn current_span_len(&self) -> Option<usize> {
+                None
+            }
+            fn channels(&self) -> rodio::ChannelCount {
+                self.inner.channels()
+            }
+            fn sample_rate(&self) -> rodio::SampleRate {
+                self.inner.sample_rate()
+            }
+            fn total_duration(&self) -> Option<Duration> {
+                self.inner.total_duration()
+            }
+        }
+
+        let legacy = std::env::var("HEX_TONE_PATH").is_ok_and(|path| path == "legacy");
+        // A muted probe times a real speaker path without sounding.
+        let gain = if std::env::var_os("HEX_TONE_MUTED").is_some() {
+            0.0
+        } else {
+            1.0
+        };
+        let device =
+            rodio::cpal::traits::HostTrait::default_output_device(&rodio::cpal::default_host())
+                .and_then(|device| rodio::DeviceTrait::description(&device).ok())
+                .map(|description| description.name().to_owned());
+        eprintln!("default output: {device:?}");
+        let start = decode(include_bytes!("../resources/audio/startRecording.mp3")).unwrap();
+        let open = || {
+            if legacy {
+                let mut sink = DeviceSinkBuilder::open_default_sink().unwrap();
+                sink.log_on_drop(false);
+                sink
+            } else {
+                open_output().unwrap()
+            }
+        };
+        let measure = |sink: &mut Option<MixerDeviceSink>, label: &str| {
+            let requested = Instant::now();
+            let sink = sink.get_or_insert_with(open);
+            let opened = requested.elapsed();
+            let config = sink.config();
+            let buffer = match config.buffer_size() {
+                BufferSize::Fixed(frames) => Duration::from_secs_f64(
+                    f64::from(*frames) / f64::from(config.sample_rate().get()),
+                ),
+                BufferSize::Default => Duration::ZERO,
+            };
+            let pulled = Arc::new(Mutex::new(None));
+            sink.mixer().add(
+                Probe {
+                    inner: start.clone(),
+                    pulled: pulled.clone(),
+                }
+                .amplify(gain),
+            );
+            while pulled.lock().unwrap().is_none() {
+                thread::sleep(Duration::from_micros(200));
+            }
+            let pulled = pulled.lock().unwrap().unwrap();
+            let latency = pulled - requested + buffer;
+            eprintln!(
+                "{label}: open {} ms, buffer {} ms, presented ~{} ms after request",
+                opened.as_millis(),
+                buffer.as_millis(),
+                latency.as_millis()
+            );
+            thread::sleep(Duration::from_millis(1_200));
+            latency
+        };
+        let mut sink = None;
+        let cold = measure(&mut sink, "cold");
+        let warm: Vec<_> = (0..5)
+            .map(|_| measure(&mut sink, "warm").as_millis())
+            .collect();
+        eprintln!(
+            "{} path: cold {} ms, warm {warm:?} ms",
+            if legacy { "legacy" } else { "current" },
+            cold.as_millis()
+        );
+    }
+
     #[test]
     fn bundled_recording_sounds_decode_without_an_audio_device() {
         for bytes in [
@@ -461,15 +849,15 @@ mod tests {
     #[test]
     fn feedback_admission_never_waits_for_playback() {
         let (sender, receiver) = mpsc::sync_channel(2);
-        enqueue(Some(&sender), Tone::DictationStart);
-        enqueue(Some(&sender), Tone::DictationStop);
-        enqueue(Some(&sender), Tone::Cancel);
-        assert_eq!(receiver.try_recv().unwrap(), Tone::DictationStart);
-        assert_eq!(receiver.try_recv().unwrap(), Tone::DictationStop);
+        enqueue(Some(&sender), Request::ProvisionalStart);
+        enqueue(Some(&sender), Request::RetractStart);
+        enqueue(Some(&sender), Request::Play(Tone::Cancel));
+        assert_eq!(receiver.try_recv().unwrap(), Request::ProvisionalStart);
+        assert_eq!(receiver.try_recv().unwrap(), Request::RetractStart);
         assert!(receiver.try_recv().is_err());
         drop(receiver);
-        enqueue(Some(&sender), Tone::Cancel);
-        enqueue(None, Tone::DictationStart);
+        enqueue(Some(&sender), Request::Play(Tone::Cancel));
+        enqueue(None, Request::ProvisionalStart);
     }
 
     #[test]

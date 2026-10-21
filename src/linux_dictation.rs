@@ -321,15 +321,16 @@ pub fn run(
                     recording_voice = action == HotkeyEvent::VoiceStart;
                     if audio_ready {
                         // An instruction plays no start tone, as on Windows.
-                        start_capture(&mut capture, captured_through, |tone| {
+                        start_capture(&mut capture, captured_through, |_| {
                             if !recording_voice {
-                                feedback::play(tone);
+                                feedback::play_provisional_start();
                             }
                         });
                         stream_when_due(&mut capture, &engine, toggle);
                     } else if release_while_idle {
                         start_pending = true;
                         input.request_open();
+                        feedback::prepare();
                     } else {
                         continue;
                     }
@@ -374,6 +375,7 @@ pub fn run(
                 HotkeyEvent::Cancel if capture.is_recording() => {
                     recording_voice = false;
                     capture.cancel();
+                    feedback::retract_start();
                     feedback::play(Tone::Cancel);
                     suppressor.restore();
                     if release_while_idle {
@@ -433,9 +435,9 @@ pub fn run(
                         // The on-demand open finished while the shortcut is
                         // held: recording starts here, without pre-roll.
                         start_pending = false;
-                        start_capture(&mut capture, captured_through, |tone| {
+                        start_capture(&mut capture, captured_through, |_| {
                             if !recording_voice {
-                                feedback::play(tone);
+                                feedback::play_provisional_start();
                             }
                         });
                     }
@@ -454,6 +456,7 @@ pub fn run(
                 if capture.is_recording() && finishing.is_none() {
                     recording_voice = false;
                     capture.cancel();
+                    feedback::retract_start();
                     feedback::play(Tone::Cancel);
                     suppressor.restore();
                     events.dictation(DictationPhase::Cancelled, "")?;
@@ -584,7 +587,11 @@ fn submit_capture(
     voice: bool,
 ) -> Result<()> {
     match capture.finish_with_tail(ended_at, POST_RELEASE_TAIL) {
-        Finish::Discard => events.dictation(DictationPhase::Discarded, "")?,
+        Finish::Discard => {
+            // A short tap or chord withdraws the start tone of its press.
+            feedback::retract_start();
+            events.dictation(DictationPhase::Discarded, "")?
+        }
         Finish::Transcribe(clip) if clip.is_near_silent() => {
             events.dictation(DictationPhase::Discarded, "")?
         }

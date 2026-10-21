@@ -290,6 +290,11 @@ CoreAudio formats, AppleScript details, or event serialization.
 - Recording audio behavior and idle-sleep prevention begin only after the
   intentional-hold threshold. Ordinary shortcut chords must not mute output,
   pause media, or prevent sleep.
+- The start tone confirms the shortcut press itself, not the hold threshold: it
+  is provisional, sounds after a 40 ms chord grace, and a chord, short tap,
+  cancel, or Voice Action takeover retracts it (silently inside the grace, else
+  a 20 ms fade). With the microphone released while idle, the tone waits for
+  the open microphone and the hold.
 - `Release microphone while idle` and Commands are mutually exclusive through
   explicit confirmed transitions and a shared runtime policy. When release is
   enabled, pressing the shortcut opens the selected device asynchronously with

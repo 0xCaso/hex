@@ -444,6 +444,7 @@ pub fn listen(
                             &input.device_name(),
                             &mut events,
                             indicator.as_ref(),
+                            microphone_policy.release_while_idle,
                         )?;
                     }
                     RecognitionControl::PasteLast => {}
@@ -834,6 +835,7 @@ pub fn listen(
                     &input.device_name(),
                     &mut events,
                     indicator.as_ref(),
+                    microphone_policy.release_while_idle,
                 )?;
             }
         }
@@ -893,6 +895,8 @@ pub fn listen(
                 .as_mut()
                 .and_then(|edit| edit.process(input_event, capture_at));
             if matches!(edit_action, Some(HotkeyAction::Start)) && voice.is_none() {
+                // Voice Action confirms itself once its own hold counts.
+                feedback::retract_start();
                 start_pending_voice_action(
                     &mut edit_pending_since,
                     capture_at,
@@ -924,6 +928,7 @@ pub fn listen(
                         &input.device_name(),
                         &mut events,
                         indicator.as_ref(),
+                        microphone_policy.release_while_idle,
                     )?;
                     if !accepted {
                         hotkeys.dictation.suspend();
@@ -1016,6 +1021,7 @@ pub fn listen(
                 &input,
                 microphone_policy.release_while_idle,
             ))?
+            && microphone_policy.release_while_idle
         {
             feedback::play(Tone::DictationStart);
         }
@@ -1550,11 +1556,19 @@ fn handle_hotkey_action(
     device: &str,
     events: &mut EventLog,
     indicator: Option<&DictationIndicatorSender>,
+    release_while_idle: bool,
 ) -> Result<bool> {
     match action {
         HotkeyAction::Start => {
             if !dictation.start(action_at)? {
                 return Ok(false);
+            }
+            // The tone confirms the press at once; a chord or short tap
+            // retracts it. A released microphone confirms only once it opens.
+            if release_while_idle {
+                feedback::prepare();
+            } else {
+                feedback::play_provisional_start();
             }
             reset_command_recognizer(dictation, recognizer)?;
             worker.prepare_paste();
@@ -1565,10 +1579,10 @@ fn handle_hotkey_action(
             emit_state(events, true, mode, device)
         }
         HotkeyAction::Finish => {
-            if dictation.become_intentional(action_at)? {
+            if dictation.become_intentional(action_at)? && release_while_idle {
                 feedback::play(Tone::DictationStart);
             }
-            let _ = finish_dictation(
+            let finished = finish_dictation(
                 dictation,
                 action_at,
                 POST_RELEASE_TAIL,
@@ -1580,23 +1594,31 @@ fn handle_hotkey_action(
                 events,
                 indicator,
             )?;
+            if matches!(finished, FinishResult::Discarded) {
+                feedback::retract_start();
+            }
             reset_command_recognizer(dictation, recognizer)?;
             emit_engine_state(events, false, worker, mode, device)
         }
-        HotkeyAction::Discard | HotkeyAction::Cancel => end_capture(
-            if matches!(action, HotkeyAction::Cancel) {
-                CaptureEnd::Cancelled
-            } else {
-                CaptureEnd::Discarded
-            },
-            dictation,
-            recognizer,
-            mode,
-            device,
-            events,
-            indicator,
-        ),
+        HotkeyAction::Discard | HotkeyAction::Cancel => {
+            feedback::retract_start();
+            end_capture(
+                if matches!(action, HotkeyAction::Cancel) {
+                    CaptureEnd::Cancelled
+                } else {
+                    CaptureEnd::Discarded
+                },
+                dictation,
+                recognizer,
+                mode,
+                device,
+                events,
+                indicator,
+            )
+        }
         HotkeyAction::PasteLast | HotkeyAction::PasteMeeting => {
+            // The paste chord's modifier press started a provisional capture.
+            feedback::retract_start();
             dictation.cancel()?;
             reset_command_recognizer(dictation, recognizer)?;
             let paste_result = match action {

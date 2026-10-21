@@ -442,6 +442,13 @@ no foreground application consumes the clipboard.
 Record -> Release -> Transcribing/processing/paste -> Finished // dictate.feedback
   HUD + tones distinguish capture from pending work          // never take focus
   Pending processing/paste -> Still unfinished, not recording
+  Shortcut press -> Start tone ~50 ms later                  // dictate.start-tone
+     -> Chord within 40 ms (e.g. Option-Command-I) -> Silent
+     -> Chord or short tap before 300 ms -> Tone fades out over 20 ms
+     -> Hold reaches 300 ms -> Tone already played; mute/pause/sleep begin now
+     -> Voice Action takeover -> Retracted; Voice Action rings at its own hold
+     -> Release microphone while idle -> Output warms on press; tone once
+        the microphone is open and the hold counts
   Tone requested -> Playback worker opens the default output, then plays
      -> Output stays open five minutes past the last tone, then releases
      -> Released output holds no macOS idle-sleep assertion
@@ -470,6 +477,23 @@ two seconds, and a released device reopens without that backoff. Bundled
 samples remain decoded in memory. A tone that arrives after the grace pays a
 cold device open first; the tone is delayed, not clipped or dropped.
 Overlapping tones extend the playing window rather than shortening it.
+
+**Fixed after 2.3.0:** the start tone used to wait for the 300 ms intentional
+hold, then pay rodio's default 50 ms output buffer, so it sounded about 345 ms
+after the press (about 375 ms from a cold device) where the Swift app rang on
+key-down. The press now requests a provisional tone. The worker opens the
+output at once, waits out a 40 ms chord grace (on Kit's Mac about 40% of
+discarded presses were modifier chords landing within ~25 ms), then plays
+through a 512-frame (~10 ms) buffer: about 50 ms warm or cold on the built-in
+speakers. A chord or short tap retracts the tone, dropping it inside the grace
+or fading it over 20 ms. Recording mute, media pause, and idle-sleep prevention
+still begin only at the 300 ms threshold. Checks:
+`provisional_start_sounds_after_the_chord_grace_unless_retracted`,
+`retracted_tone_fades_out_without_a_click_or_channel_skew`, and the ignored
+`native_start_tone_path_latency` (open-to-presentation timing, with
+`HEX_TONE_PATH=legacy` for the old path; route output to a silent device or set
+`HEX_TONE_MUTED`). The chord-to-retraction path is checked by reading the code,
+not by a physical keyboard run.
 
 **Fixed in 2.1.21:** through 2.1.20 the worker opened the output at startup
 and kept it open for as long as sounds were On, so `coreaudiod` held a

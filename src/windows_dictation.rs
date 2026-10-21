@@ -242,6 +242,8 @@ pub fn run_with_transcriber(
     let mut recording_voice = false;
     let mut pending_voice = false;
     let mut recording_feedback_started = false;
+    // Whether this capture's start tone already played on its press.
+    let mut start_tone_played = false;
     let mut pending = 0_usize;
     // The worker drains its queue in order, so a FIFO of ids pairs each
     // result with the HUD job it belongs to. Repaste jobs get ids too (to
@@ -320,13 +322,12 @@ pub fn run_with_transcriber(
                     capture.start_at(occurred_at);
                     recording = true;
                     recording_voice = false;
-                    // A toggle press is deliberate, so confirm it at once.
-                    // Hold waits for the hold threshold so quick chords
-                    // meant for other applications stay silent.
+                    // A toggle press is deliberate, so it streams at once.
                     recording_feedback_started = toggle_mode;
-                    if toggle_mode {
-                        crate::feedback::play(crate::feedback::Tone::DictationStart);
-                    }
+                    // The tone confirms the press at once; a short tap or a
+                    // chord meant for another application retracts it.
+                    crate::feedback::play_provisional_start();
+                    start_tone_played = true;
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.suppress();
                     }
@@ -357,6 +358,7 @@ pub fn run_with_transcriber(
                     recording = true;
                     recording_voice = true;
                     recording_feedback_started = false;
+                    start_tone_played = false;
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.suppress();
                     }
@@ -373,6 +375,7 @@ pub fn run_with_transcriber(
                     start_pending = true;
                     pending_voice = false;
                     input.request_open();
+                    crate::feedback::prepare();
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.suppress();
                     }
@@ -480,11 +483,15 @@ pub fn run_with_transcriber(
                         suppressor.restore();
                     }
                     if !recording_feedback_started && capture.become_intentional(occurred_at) {
-                        crate::feedback::play(crate::feedback::Tone::DictationStart);
+                        if !start_tone_played {
+                            crate::feedback::play(crate::feedback::Tone::DictationStart);
+                        }
                         recording_feedback_started = true;
                     }
                     if recording_feedback_started {
                         crate::feedback::play(crate::feedback::Tone::DictationStop);
+                    } else {
+                        crate::feedback::retract_start();
                     }
                     recording_feedback_started = false;
                     recording = false;
@@ -494,6 +501,7 @@ pub fn run_with_transcriber(
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.restore();
                     }
+                    crate::feedback::retract_start();
                     if recording_feedback_started {
                         crate::feedback::play(crate::feedback::Tone::Cancel);
                     }
@@ -605,6 +613,7 @@ pub fn run_with_transcriber(
                         pending_voice = false;
                         // The released microphone is ready only now.
                         recording_feedback_started = toggle_mode && !recording_voice;
+                        start_tone_played = recording_feedback_started;
                         if recording_feedback_started {
                             crate::feedback::play(crate::feedback::Tone::DictationStart);
                         }
@@ -628,7 +637,9 @@ pub fn run_with_transcriber(
                         indicator.meter(&samples);
                     }
                     if capture.become_intentional(captured_through) && !recording_feedback_started {
-                        crate::feedback::play(crate::feedback::Tone::DictationStart);
+                        if !start_tone_played {
+                            crate::feedback::play(crate::feedback::Tone::DictationStart);
+                        }
                         recording_feedback_started = true;
                     }
                     // Short taps and shortcut chords never reach the model;
@@ -646,6 +657,7 @@ pub fn run_with_transcriber(
                 }
                 audio_ready = false;
                 if recording {
+                    crate::feedback::retract_start();
                     if recording_feedback_started {
                         crate::feedback::play(crate::feedback::Tone::Cancel);
                     }
