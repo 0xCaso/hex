@@ -27,15 +27,16 @@ use crate::desktop_transcription_picker::{
     transcription_selection_is_active,
 };
 use crate::desktop_ui::{
-    ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, danger_menu_item, detail_body,
-    detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
+    ButtonKind, Icon, NavigationIcon, Tone, Tweak, busy_label, button, danger_menu_item,
+    detail_body, detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
     disclosure_frame, dropdown_menu_with_progress, error_message, error_panel, hotkey_keycaps,
     icon, icon_button, inline_error, list_row, list_row_meta, list_row_title, listener_status,
-    menu_item, menu_with_progress, mix_color, navigation_item, pane_body, pane_content,
-    pane_detail, pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel,
-    panel_header, progress_track, section_label, settings_copy, settings_row,
+    menu_item, menu_separator, menu_with_progress, mix_color, navigation_item, pane_body,
+    pane_content, pane_detail, pane_header, pane_header_with_action, pane_list, pane_scroll_body,
+    panel, panel_header, progress_track, section_label, settings_copy, settings_row,
     settings_section_label, sidebar_frame, sliding_segmented_control, sliding_segmented_for,
-    sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, window_frame,
+    sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, tweak,
+    window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
@@ -64,6 +65,11 @@ const WINDOW_HEIGHT: f32 = 700.0;
 const MINIMUM_WIDTH: f32 = 860.0;
 const MINIMUM_HEIGHT: f32 = 560.0;
 const HOTKEY_MIN_WIDTH: f32 = 148.0;
+/// The keycaps-only shortcut control's padding and border (the `keycaps` tweak).
+const HOTKEY_COMPACT_PADDING: f32 = 6.0;
+const HOTKEY_POPOVER_WIDTH: f32 = 240.0;
+/// Pop-up buttons for three or more choices (the `popups` tweak).
+const POPUP_CHOICE_WIDTH: f32 = 140.0;
 /// Wide enough for "100%" with the segment's own padding.
 const SOUND_VOLUME_ITEM_WIDTH: f32 = 40.0;
 /// Left / Either / Right segment widths.
@@ -792,6 +798,16 @@ enum SoftwareUpdate {
     ReadyToRestart { version: Option<String> },
 }
 
+/// A Settings pop-up or popover that is open (the `keycaps` and `popups`
+/// tweaks). One at a time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsPopup {
+    Hotkey(HotkeyKind),
+    RecordingAudio,
+    IndicatorPosition,
+    SoundVolume,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HotkeyKind {
     Dictation,
@@ -1162,6 +1178,7 @@ pub struct AppWindow {
     microphone_devices: Vec<String>,
     microphone_picker_open: bool,
     microphone_picker_error: Option<String>,
+    settings_popup: Option<SettingsPopup>,
     launch_at_login_status: Option<LoginItemStatus>,
     login_item_worker: Option<LoginItemWorker>,
     launch_at_login_error: Option<String>,
@@ -1628,6 +1645,15 @@ impl AppWindow {
             microphone_devices,
             microphone_picker_open: false,
             microphone_picker_error: None,
+            // Previews can open one tweak's pop-up for captures.
+            settings_popup: preview_mode
+                .then(|| std::env::var("HEX_PREVIEW_SETTINGS_POPUP").ok())
+                .flatten()
+                .and_then(|popup| match popup.as_str() {
+                    "hotkey" => Some(SettingsPopup::Hotkey(HotkeyKind::Dictation)),
+                    "recording-audio" => Some(SettingsPopup::RecordingAudio),
+                    _ => None,
+                }),
             launch_at_login_status,
             login_item_worker,
             launch_at_login_error,
@@ -2791,10 +2817,16 @@ impl AppWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let compact = tweak(Tweak::Keycaps);
         let binding_keycaps = hotkey_binding(&self.settings, kind)
             .map_or_else(|| vec![tr("Off").into()], HotkeyBinding::keycaps);
-        let idle_width =
-            hotkey_idle_width(binding_keycaps.len()) + hotkey_label_overflow(&binding_keycaps);
+        let idle_width = if compact {
+            hotkey_keycaps_width(binding_keycaps.len())
+                + hotkey_label_overflow(&binding_keycaps)
+                + HOTKEY_COMPACT_PADDING
+        } else {
+            hotkey_idle_width(binding_keycaps.len()) + hotkey_label_overflow(&binding_keycaps)
+        };
         if matches!(
             self.hotkey_capture,
             HotkeyCaptureState::Saved { saved_at, .. }
@@ -2911,12 +2943,14 @@ impl AppWindow {
                 .items_center()
                 .gap_2()
                 .child(hotkey_keycaps(binding_keycaps, 1.0))
-                .child(
-                    div()
-                        .text_footnote()
-                        .text_color(rgb(TEXT_SECONDARY))
-                        .child(tr("Change shortcut")),
-                )
+                .when(!compact, |content| {
+                    content.child(
+                        div()
+                            .text_footnote()
+                            .text_color(rgb(TEXT_SECONDARY))
+                            .child(tr("Change shortcut")),
+                    )
+                })
                 .into_any_element(),
         };
         div()
@@ -2927,7 +2961,9 @@ impl AppWindow {
             })
             .track_focus(&self.hotkey_focus)
             .w(px(control_width))
-            .min_w(px(HOTKEY_MIN_WIDTH))
+            .when(!compact || this_capture, |control| {
+                control.min_w(px(HOTKEY_MIN_WIDTH))
+            })
             .h(px(CONTROL_HEIGHT))
             .px(px(2.0))
             .flex()
@@ -2952,6 +2988,10 @@ impl AppWindow {
             .on_click(cx.listener(move |this, _, window, cx| {
                 if this.hotkey_capture.is_listening() && this_capture {
                     this.cancel_hotkey_capture(cx);
+                } else if compact {
+                    let popup = SettingsPopup::Hotkey(kind);
+                    this.settings_popup = (this.settings_popup != Some(popup)).then_some(popup);
+                    cx.notify();
                 } else {
                     this.begin_hotkey_capture(kind, window, cx);
                 }
@@ -2971,6 +3011,9 @@ impl AppWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if tweak(Tweak::Keycaps) {
+            return self.render_hotkey_popover_control(kind, window, cx);
+        }
         let hotkey = self.render_hotkey_control(kind, window, cx);
         let side = hotkey_binding(&self.settings, kind)
             .filter(|_| platform::CAPABILITIES.modifier_sides)
@@ -3033,6 +3076,232 @@ impl AppWindow {
             .child(side_selector)
             .child(hotkey)
             .into_any_element()
+    }
+
+    /// The `keycaps` tweak: the shortcut is its keycaps alone, and clicking
+    /// opens a popover to record a new one, pick the modifier's side, or
+    /// clear an optional shortcut.
+    fn render_hotkey_popover_control(
+        &mut self,
+        kind: HotkeyKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hotkey = self.render_hotkey_control(kind, window, cx);
+        let popup = SettingsPopup::Hotkey(kind);
+        let open = self.settings_popup == Some(popup) && !self.hotkey_capture.is_listening();
+        let progress = window.spring_when(
+            ("hotkey-popover-progress", hotkey_kind_index(kind)),
+            open,
+            SPRING_SNAP,
+        );
+        let side = hotkey_binding(&self.settings, kind)
+            .filter(|_| platform::CAPABILITIES.modifier_sides)
+            .and_then(standalone_modifier_side);
+        let selected = side.unwrap_or(ModifierSide::Either);
+        let side_widths = HOTKEY_SIDE_WIDTHS;
+        let side_selection_spring =
+            &mut self.hotkey_side_selection_springs[hotkey_kind_index(kind)];
+        side_selection_spring.set_target(hotkey_side_index(selected) as f32);
+        let selection_position = side_selection_spring.render_position(window);
+        let clearable = kind == HotkeyKind::PasteLast && self.settings.paste_last_hotkey.is_some();
+        let popover = (open || (!cfg!(test) && progress > 0.01)).then(|| {
+            dropdown_menu_with_progress(progress)
+                .id(("hotkey-popover", hotkey_kind_index(kind)))
+                .right_0()
+                .w(px(HOTKEY_POPOVER_WIDTH))
+                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                    if this.settings_popup == Some(popup) {
+                        this.settings_popup = None;
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    menu_item(false)
+                        .id(("record-hotkey", hotkey_kind_index(kind)))
+                        .child(tr("Record new shortcut…"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.settings_popup = None;
+                            this.begin_hotkey_capture(kind, window, cx);
+                        })),
+                )
+                .when(side.is_some(), |menu| {
+                    menu.child(menu_separator()).child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_footnote()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child(tr("Key side")),
+                            )
+                            .child(
+                                sliding_segmented_control(selection_position, &side_widths)
+                                    .children(
+                                        [
+                                            (tr("Left"), ModifierSide::Left),
+                                            (tr("Either"), ModifierSide::Either),
+                                            (tr("Right"), ModifierSide::Right),
+                                        ]
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(
+                                            |(index, (label, side))| {
+                                                let candidate =
+                                                    hotkey_side_binding(&self.settings, kind, side);
+                                                sliding_segmented_item(
+                                                    side_widths[index],
+                                                    selected == side,
+                                                )
+                                                .id((
+                                                    "hotkey-side",
+                                                    hotkey_kind_index(kind) * 3 + index,
+                                                ))
+                                                .when(candidate.is_none(), |item| {
+                                                    item.opacity(DISABLED_OPACITY)
+                                                })
+                                                .child(label)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.set_hotkey_side(kind, side, index, cx);
+                                                }))
+                                            },
+                                        ),
+                                    ),
+                            ),
+                    )
+                })
+                .when(clearable, |menu| {
+                    menu.child(menu_separator()).child(
+                        danger_menu_item()
+                            .id("disable-paste-last-hotkey")
+                            .child(tr("Clear shortcut"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.settings_popup = None;
+                                this.update_settings(cx, |settings| {
+                                    settings.paste_last_hotkey = None
+                                });
+                            })),
+                    )
+                })
+        });
+        div()
+            .relative()
+            .flex_none()
+            .child(hotkey)
+            .children(popover.map(deferred))
+            .into_any_element()
+    }
+
+    fn set_hotkey_side(
+        &mut self,
+        kind: HotkeyKind,
+        side: ModifierSide,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(candidate) = hotkey_side_binding(&self.settings, kind, side) else {
+            return;
+        };
+        if !self.update_settings(cx, |settings| {
+            set_hotkey_binding(settings, kind, candidate);
+        }) {
+            return;
+        }
+        if kind == HotkeyKind::Edit {
+            self.voice_action_inputs.error = None;
+        }
+        self.hotkey_side_selection_springs[hotkey_kind_index(kind)].set_target(index as f32);
+    }
+
+    /// The `popups` tweak: a pop-up button showing the current choice, with
+    /// a menu of the others.
+    #[allow(clippy::too_many_arguments)]
+    fn render_popup_choice<T: Copy + PartialEq + 'static>(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        popup: SettingsPopup,
+        id: &'static str,
+        choices: Vec<(SharedString, T)>,
+        selected: T,
+        apply: fn(&mut Self, T, &mut Context<Self>),
+    ) -> AnyElement {
+        let open = self.settings_popup == Some(popup);
+        let progress = window.spring_when((id, 1usize), open, SPRING_SNAP);
+        let label = choices
+            .iter()
+            .find(|(_, value)| *value == selected)
+            .map(|(label, _)| label.clone())
+            .unwrap_or_default();
+        let menu = (open || (!cfg!(test) && progress > 0.01)).then(|| {
+            dropdown_menu_with_progress(progress)
+                .id((id, 2usize))
+                .right_0()
+                .w(px(POPUP_CHOICE_WIDTH))
+                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                    if this.settings_popup == Some(popup) {
+                        this.settings_popup = None;
+                        cx.notify();
+                    }
+                }))
+                .children(
+                    choices
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (label, value))| {
+                            menu_item(value == selected)
+                                .id((id, 10 + index))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.settings_popup = None;
+                                    if value != selected {
+                                        apply(this, value, cx);
+                                    }
+                                    cx.notify();
+                                }))
+                        }),
+                )
+        });
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                disclosure_button(label)
+                    .id(id)
+                    .w(px(POPUP_CHOICE_WIDTH))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_popup = (this.settings_popup != Some(popup)).then_some(popup);
+                        cx.notify();
+                    })),
+            )
+            .children(menu.map(deferred))
+            .into_any_element()
+    }
+
+    /// Releasing the microphone turns Commands off, so it asks first.
+    fn request_release_microphone(&mut self, release: bool, cx: &mut Context<Self>) {
+        if release {
+            self.pending_microphone_policy =
+                Some(MicrophonePolicyChange::DisableCommandsAndRelease);
+            cx.notify();
+            return;
+        }
+        self.pending_microphone_policy = None;
+        if let Err(error) =
+            self.update_microphone_policy(MicrophonePolicyChange::SetReleaseWhileIdle(false), cx)
+        {
+            tracing::error!(%error, "could not update microphone policy");
+        }
+        cx.notify();
     }
 
     fn begin_hotkey_capture(
@@ -3658,7 +3927,11 @@ impl AppWindow {
             .then(|| self.render_listener_card(cx))
             .flatten();
         let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
-        let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
+        let paste_last_control = if tweak(Tweak::Keycaps) {
+            self.render_hotkey_setting_control(HotkeyKind::PasteLast, window, cx)
+        } else {
+            self.render_hotkey_control(HotkeyKind::PasteLast, window, cx)
+        };
         let transcription_model = definition(self.settings.transcription.model);
         let transcription_label = format!(
             "{} · {}",
@@ -3722,6 +3995,25 @@ impl AppWindow {
                         }))
                 }),
             );
+        let indicator_control = if tweak(Tweak::Popups) {
+            self.render_popup_choice(
+                window,
+                cx,
+                SettingsPopup::IndicatorPosition,
+                "indicator-position-popup",
+                vec![
+                    (tr("Top").into(), IndicatorPosition::Top),
+                    (tr("Bottom").into(), IndicatorPosition::Bottom),
+                    (tr("Off").into(), IndicatorPosition::Hidden),
+                ],
+                self.settings.indicator_position,
+                |this, position, cx| {
+                    this.update_settings(cx, |settings| settings.indicator_position = position);
+                },
+            )
+        } else {
+            indicator_control.into_any_element()
+        };
         let interface_language_control = capabilities
             .interface_language
             .then(|| self.render_interface_language_control(window, cx));
@@ -3778,6 +4070,35 @@ impl AppWindow {
                             ))
                         }),
                 );
+        let sound_volume = if tweak(Tweak::Popups) {
+            self.render_popup_choice(
+                window,
+                cx,
+                SettingsPopup::SoundVolume,
+                "sound-volume-popup",
+                crate::desktop_ui::SOUND_VOLUME_STEPS
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, _))| (tr(label).into(), index))
+                    .collect(),
+                selected_volume,
+                |this, index, cx| {
+                    let volume = crate::desktop_ui::SOUND_VOLUME_STEPS[index].1;
+                    if this.update_settings(cx, |settings| {
+                        settings.sound_effects = volume > 0.0;
+                        if volume > 0.0 {
+                            settings.sound_effect_volume = volume;
+                        }
+                    }) && volume > 0.0
+                        && !this.preview
+                    {
+                        crate::feedback::play(crate::feedback::Tone::DictationStart);
+                    }
+                },
+            )
+        } else {
+            sound_volume.into_any_element()
+        };
         let launch_at_login_control = if self.launch_at_login_status.is_none() {
             div()
                 .text_footnote()
@@ -3820,6 +4141,26 @@ impl AppWindow {
                         }))
                 },
             ));
+        let audio_behavior = if tweak(Tweak::Popups) {
+            self.render_popup_choice(
+                window,
+                cx,
+                SettingsPopup::RecordingAudio,
+                "recording-audio-popup",
+                RecordingAudioBehavior::ALL
+                    .into_iter()
+                    .map(|behavior| (tr(behavior.label()).into(), behavior))
+                    .collect(),
+                self.settings.recording_audio_behavior,
+                |this, behavior, cx| {
+                    this.update_settings(cx, |settings| {
+                        settings.recording_audio_behavior = behavior
+                    });
+                },
+            )
+        } else {
+            audio_behavior.into_any_element()
+        };
         let shortcut_mode_position = self.shortcut_mode_toggle.render_position(window);
         let shortcut_mode = sliding_segmented_control(shortcut_mode_position, &[72.0; 2])
             .id("shortcut-mode")
@@ -4004,17 +4345,35 @@ impl AppWindow {
                             )
                         })
                         .when(capabilities.release_microphone, |panel| {
-                            panel
-                                .child(settings_row(
-                                    tr("Microphone mode"),
-                                    if self.settings.release_microphone_while_idle {
-                                        tr("Opens only while holding the shortcut. Disables pre-roll and commands.")
-                                    } else {
-                                        tr("Keeps the microphone open for instant start and pre-roll")
-                                    },
-                                    microphone_mode,
-                                ))
-                                .children(microphone_confirmation)
+                            let description = if self.settings.release_microphone_while_idle {
+                                tr("Opens only while holding the shortcut. Disables pre-roll and commands.")
+                            } else {
+                                tr("Keeps the microphone open for instant start and pre-roll")
+                            };
+                            if tweak(Tweak::Switches) {
+                                panel
+                                    .child(
+                                        settings_row(
+                                            tr("Release microphone when idle"),
+                                            description,
+                                            toggle(release_microphone_position),
+                                        )
+                                        .id("release-microphone-setting")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let release = !this.settings.release_microphone_while_idle;
+                                            this.request_release_microphone(release, cx);
+                                        })),
+                                    )
+                                    .children(microphone_confirmation)
+                            } else {
+                                panel
+                                    .child(settings_row(
+                                        tr("Microphone mode"),
+                                        description,
+                                        microphone_mode,
+                                    ))
+                                    .children(microphone_confirmation)
+                            }
                         })
                         .when(!toggle_mode, |panel| {
                             panel.child(
@@ -4089,7 +4448,7 @@ impl AppWindow {
                                     .items_center()
                                     .gap_2()
                                     .child(paste_last_control)
-                                    .when(self.settings.paste_last_hotkey.is_some(), |row| {
+                                    .when(self.settings.paste_last_hotkey.is_some() && !tweak(Tweak::Keycaps), |row| {
                                         row.child(
                                             button(ButtonKind::Secondary, tr("Clear"))
                                                 .id("disable-paste-last-hotkey")
@@ -7420,7 +7779,10 @@ impl Render for AppWindow {
                 if event.keystroke.key != "escape" {
                     return;
                 }
-                if this.history_retention_open {
+                if this.settings_popup.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if this.history_retention_open {
                     this.history_retention_open = false;
                     cx.stop_propagation();
                     cx.notify();

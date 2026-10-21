@@ -168,6 +168,7 @@ pub(crate) enum Icon {
     Accessibility,
     Waveform,
     Check,
+    Copy,
 }
 
 impl Icon {
@@ -199,6 +200,7 @@ impl Icon {
             Self::Accessibility => "accessibility",
             Self::Waveform => "waveform",
             Self::Check => "checkmark",
+            Self::Copy => "doc.on.doc",
         }
     }
 
@@ -217,6 +219,7 @@ impl Icon {
             Self::Accessibility => "◉",
             Self::Waveform => "≋",
             Self::Check => "✓",
+            Self::Copy => "⧉",
         }
     }
 
@@ -235,6 +238,7 @@ impl Icon {
             Self::Accessibility => "\u{E776}",
             Self::Waveform => "\u{E8D6}",
             Self::Check => "\u{E73E}",
+            Self::Copy => "\u{E8C8}",
         }
     }
 }
@@ -322,6 +326,37 @@ pub(crate) fn sidebar_frame() -> Div {
         .border_color(rgb(LINE))
 }
 
+/// Design tweaks under review, each enabled in isolation through
+/// `HEX_TWEAKS` (a comma list of `keycaps`, `switches`, `popups`, `tiles`,
+/// `meeting-copy`, or `all`). Off in tests and by default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Tweak {
+    Keycaps,
+    Switches,
+    Popups,
+    Tiles,
+    MeetingCopy,
+}
+
+pub(crate) fn tweak(tweak: Tweak) -> bool {
+    static ENABLED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if cfg!(test) {
+        return false;
+    }
+    let enabled = ENABLED.get_or_init(|| std::env::var("HEX_TWEAKS").unwrap_or_default());
+    let name = match tweak {
+        Tweak::Keycaps => "keycaps",
+        Tweak::Switches => "switches",
+        Tweak::Popups => "popups",
+        Tweak::Tiles => "tiles",
+        Tweak::MeetingCopy => "meeting-copy",
+    };
+    enabled
+        .split(',')
+        .map(str::trim)
+        .any(|item| item == name || item == "all")
+}
+
 pub(crate) fn navigation_item(icon: NavigationIcon, selected: bool) -> Div {
     div()
         .h(px(NAV_ITEM_HEIGHT))
@@ -352,8 +387,64 @@ pub(crate) fn navigation_item(icon: NavigationIcon, selected: bool) -> Div {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(navigation_icon(icon, selected)),
+                .child(navigation_glyph(icon, selected)),
         )
+}
+
+#[cfg(target_os = "macos")]
+fn navigation_glyph(icon: NavigationIcon, selected: bool) -> AnyElement {
+    if tweak(Tweak::Tiles) {
+        icon_tile(icon.sf_symbol(), icon.tile_color())
+    } else {
+        navigation_icon(icon, selected)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn navigation_glyph(icon: NavigationIcon, selected: bool) -> AnyElement {
+    navigation_icon(icon, selected)
+}
+
+impl NavigationIcon {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    const fn tile_color(self) -> TileColor {
+        match self {
+            Self::Settings => TileColor::Gray,
+            Self::Modes => TileColor::Purple,
+            Self::Commands => TileColor::Blue,
+            Self::VoiceAction => TileColor::Orange,
+            Self::History => TileColor::Teal,
+            Self::Meetings => TileColor::Green,
+            Self::Fun => TileColor::Pink,
+            Self::Activity => TileColor::Indigo,
+            Self::HudLab => TileColor::Red,
+        }
+    }
+}
+
+/// A System Settings-style icon tile: a white SF Symbol on a top-lit
+/// rounded square of a system colour.
+#[cfg(target_os = "macos")]
+fn icon_tile(symbol: &'static str, color: TileColor) -> AnyElement {
+    let base = rgb(color.base());
+    let top = mix_color(base, rgb(TILE_GLYPH), TILE_GRADIENT_LIFT);
+    let bottom = mix_color(base, rgb(TILE_SHADE), TILE_GRADIENT_SINK);
+    div()
+        .size(px(TILE_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(TILE_RADIUS)
+        .bg(gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(top, 0.0),
+            gpui::linear_color_stop(bottom, 1.0),
+        ))
+        .border_t(px(0.5))
+        .border_color(gpui::rgba(TILE_HIGHLIGHT))
+        .child(sf_symbol(symbol, TILE_GLYPH_SIZE, TILE_GLYPH))
+        .into_any_element()
 }
 
 pub(crate) fn pane_header(title: &'static str) -> AnyElement {

@@ -167,6 +167,57 @@ pub(crate) const MENU_ITEM_HEIGHT: f32 = 28.0;
 pub(crate) const MENU_WIDTH: f32 = 180.0;
 /// The gap between a control and the menu it opens.
 pub(crate) const MENU_OFFSET: f32 = 4.0;
+// Icon tiles (the `tiles` tweak): System Settings' coloured squares as
+// measured on macOS 27.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const TILE_SIZE: f32 = 20.0;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const TILE_RADIUS: Pixels = px(5.0);
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const TILE_GLYPH_SIZE: f32 = 13.0;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const TILE_GLYPH: u32 = 0xffffff;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const TILE_SHADE: u32 = 0x000000;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const TILE_HIGHLIGHT: u32 = 0xffffff40;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const TILE_GRADIENT_LIFT: f32 = 0.08;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const TILE_GRADIENT_SINK: f32 = 0.05;
+
+/// A tile's colour: the dark-mode system colours.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TileColor {
+    Gray,
+    Purple,
+    Blue,
+    Orange,
+    Teal,
+    Green,
+    Pink,
+    Red,
+    Indigo,
+}
+
+impl TileColor {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) const fn base(self) -> u32 {
+        match self {
+            Self::Gray => 0x8e8e93,
+            Self::Purple => 0xbf5af2,
+            Self::Blue => 0x0a84ff,
+            Self::Orange => 0xff9f0a,
+            Self::Teal => 0x30b0c7,
+            Self::Green => 0x30d158,
+            Self::Pink => 0xff375f,
+            Self::Red => 0xff453a,
+            Self::Indigo => 0x5e5ce6,
+        }
+    }
+}
+
 pub(crate) const NAV_ITEM_HEIGHT: f32 = 32.0;
 pub(crate) const MULTILINE_INPUT_HEIGHT: f32 = 76.0;
 pub(crate) const DISCLOSURE_WIDTH: f32 = 220.0;

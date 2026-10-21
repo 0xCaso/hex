@@ -1917,6 +1917,9 @@ impl AppWindow {
         let searching = !self.meeting_query(cx).is_empty();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut current_day = None;
+        // The `meeting-copy` tweak: only the selected finished meeting offers
+        // Copy, as a glyph, instead of a button on every row.
+        let compact_copy = crate::desktop_ui::tweak(crate::desktop_ui::Tweak::MeetingCopy);
         for (index, meeting) in visible.iter().enumerate() {
             let day = meeting::day_label(meeting.created_at_ms, now);
             if current_day.as_ref() != Some(&day) {
@@ -1944,6 +1947,7 @@ impl AppWindow {
                     .child(
                         div()
                             .w_full()
+                            .when(compact_copy, |row| row.min_h(px(CONTROL_HEIGHT_SMALL)))
                             .flex()
                             .items_center()
                             .gap_2()
@@ -1958,15 +1962,23 @@ impl AppWindow {
                                 ),
                                 |row, chip| row.child(chip),
                             )
-                            .when(can_copy_row, |row| {
+                            .when(can_copy_row && (selected || !compact_copy), |row| {
                                 row.child(
-                                    small_button(
-                                        ButtonKind::Secondary,
-                                        if row_copied { tr("Copied") } else { tr("Copy") },
-                                    )
+                                    if compact_copy {
+                                        icon_button(
+                                            ButtonKind::Secondary,
+                                            if row_copied { Icon::Check } else { Icon::Copy },
+                                        )
+                                        .size(px(CONTROL_HEIGHT_SMALL))
+                                    } else {
+                                        small_button(
+                                            ButtonKind::Secondary,
+                                            if row_copied { tr("Copied") } else { tr("Copy") },
+                                        )
+                                        .w(px(MEETING_ROW_COPY_WIDTH))
+                                        .justify_center()
+                                    }
                                     .id(("meeting-row-copy", index))
-                                    .w(px(MEETING_ROW_COPY_WIDTH))
-                                    .justify_center()
                                     .on_click(cx.listener(
                                         move |this, _, _, cx| {
                                             cx.stop_propagation();
