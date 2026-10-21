@@ -2,7 +2,11 @@
 
 set -euo pipefail
 
-destination="${1:-$HOME/Library/Application Support/voice-control/test-fixtures/dictation-protocol}"
+support="$HOME/Library/Application Support/hex"
+if [ ! -e "$support" ] && [ -d "$HOME/Library/Application Support/voice-control" ]; then
+  support="$HOME/Library/Application Support/voice-control"
+fi
+destination="${1:-$support/test-fixtures/dictation-protocol}"
 recording_pid=""
 
 names=(

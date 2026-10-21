@@ -48,7 +48,8 @@ with a website-only informational item to install the new app manually, with no
 data import or automatic replacement.
 Follow [`docs/plans/swift-app-handoff.md`](docs/plans/swift-app-handoff.md).
 The new app uses identity `com.kitlangton.hex2`, display name `Hex`, and filename
-`Hex.app`, while retaining the Rust `voice-control` data root. Use Kit's approved
+`Hex.app`, while retaining the Rust data root (renamed on macOS from `voice-control` to
+`hex`, with a compatibility symlink). Use Kit's approved
 Developer ID signing team and validate the new identity before release. The legacy
 S3 feed must never install a Rust payload. Publish
 the updated Rust artifact first, then the separately validated legacy feed notice.

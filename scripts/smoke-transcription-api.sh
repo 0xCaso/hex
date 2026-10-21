@@ -2,7 +2,10 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-support="$HOME/Library/Application Support/voice-control"
+support="$HOME/Library/Application Support/hex"
+if [ ! -e "$support" ] && [ -d "$HOME/Library/Application Support/voice-control" ]; then
+  support="$HOME/Library/Application Support/voice-control"
+fi
 discovery="$support/local-api.json"
 model=${HEX_SMOKE_MODEL:-parakeet_unified_en}
 audio="${TMPDIR:-/tmp}/hex-transcription-smoke.wav"

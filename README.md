@@ -191,7 +191,8 @@ redact any attachments; do not upload private dictation, recordings, or full log
 
 Diagnostics are stored at:
 
-- macOS: `~/Library/Application Support/voice-control/logs/`
+- macOS: `~/Library/Application Support/hex/logs/` (older versions used
+  `voice-control`; Hex moves it once and leaves a `voice-control` symlink)
 - Windows: `%APPDATA%\voice-control\logs\`
 - Linux: `~/.local/share/voice-control/logs/`, or under `XDG_DATA_HOME`
 

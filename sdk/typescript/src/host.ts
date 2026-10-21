@@ -204,13 +204,26 @@ export async function create(options: CreateOptions | TranscriberOptions = {}): 
 }
 
 export const connect = async (options: ConnectOptions = {}): Promise<HexClient> => {
-  const discoveryPath = options.discoveryPath
-    ?? join(process.env.HEX_APPLICATION_SUPPORT_DIR ?? join(homedir(), "Library", "Application Support", "voice-control"), "local-api.json")
+  const support = join(homedir(), "Library", "Application Support")
+  // Older Hex versions keep `voice-control`; newer ones move it to `hex`.
+  const discoveryPaths = options.discoveryPath !== undefined
+    ? [options.discoveryPath]
+    : process.env.HEX_APPLICATION_SUPPORT_DIR !== undefined
+      ? [join(process.env.HEX_APPLICATION_SUPPORT_DIR, "local-api.json")]
+      : [join(support, "hex", "local-api.json"), join(support, "voice-control", "local-api.json")]
   let value: unknown
-  try {
-    value = JSON.parse(await readFile(discoveryPath, "utf8"))
-  } catch (cause) {
-    throw new HexError("startup-failed", "Could not read the running HEX endpoint", { cause })
+  let failure: unknown
+  for (const discoveryPath of discoveryPaths) {
+    try {
+      value = JSON.parse(await readFile(discoveryPath, "utf8"))
+      failure = undefined
+      break
+    } catch (cause) {
+      failure ??= cause
+    }
+  }
+  if (failure !== undefined) {
+    throw new HexError("startup-failed", "Could not read the running HEX endpoint", { cause: failure })
   }
   if (typeof value !== "object" || value === null) {
     throw new HexError("invalid-handshake", "HEX discovery contained an invalid endpoint")

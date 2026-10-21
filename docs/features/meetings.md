@@ -462,7 +462,7 @@ hex mcp [--meetings-dir <path>]                     // meetings.mcp; release bui
 ├── MCP over stdio; independent of the Meetings opt-in (read-only)
 ├── Dispatches before process logging, the instance lock, GUI, and permissions
 │   └── Safe beside the running app; logs only to stderr (HEX_MCP_LOG)
-├── Default folder: Application Support/voice-control/meetings
+├── Default folder: Application Support/hex/meetings (voice-control on older builds)
 │   └── --meetings-dir -> any mirrored copy (rsync of that folder)
 ├── A copy named hex-meetings-mcp -> always `hex mcp` with the same flags
 │   (no subcommand never falls back to listening)
@@ -542,7 +542,7 @@ Do: one periodic pull, then local servers               // meetings.mcp.mirror
 scripts/sync-meetings-mirror.sh (LaunchAgent template, every 120 s,
   ProcessType Background, Nice 10, LowPriorityIO)
 ├── ONE rsync over ssh (BatchMode, ConnectTimeout 5, --timeout 60)
-│   pro:Library/Application Support/voice-control/meetings/
+│   pro:Library/Application Support/voice-control/meetings/ (symlink to hex/ once migrated)
 │   -> ~/Library/Caches/hex-meetings-mirror/ (0700)
 ├── Skips *.wav, *.lock, *.tmp; --delay-updates (files land together at the
 │   end); --delete-delay (meetings trashed on the Pro disappear)

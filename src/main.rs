@@ -599,7 +599,11 @@ fn main() -> Result<()> {
         );
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let data_folder = app_paths::migrate_data_folder();
     let log_dir = app_paths::init_process_logging(&SHUTDOWN)?;
+    if let Some(outcome) = &data_folder {
+        app_paths::log_data_folder_migration(outcome);
+    }
 
     let event_path = log_dir.join("live.ndjson");
     let executable_name = std::env::current_exe()
