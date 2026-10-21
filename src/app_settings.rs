@@ -885,15 +885,10 @@ impl Default for AppSettings {
     }
 }
 
-/// A new Windows install starts with the model recommended for the system
-/// language; macOS and Linux start with the default model.
+/// A new install starts with the model recommended for the person's
+/// language, so first-run setup can download it without asking.
 fn default_transcription() -> TranscriptionSelection {
-    #[cfg(target_os = "windows")]
-    let selection =
-        crate::transcription_models::recommended_selection(&crate::desktop_i18n::system_language());
-    #[cfg(not(target_os = "windows"))]
-    let selection = TranscriptionSelection::default();
-    selection
+    crate::transcription_models::recommended_selection(&crate::desktop_i18n::preferred_language())
 }
 
 impl AppSettings {

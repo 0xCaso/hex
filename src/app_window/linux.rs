@@ -132,6 +132,11 @@ pub(super) fn sidebar(sidebar: Div) -> Div {
 }
 
 /// Empty sidebar space moves the window.
+/// Only macOS asks for Accessibility; the tour names it there.
+pub(super) fn accessibility_title() -> &'static str {
+    tr("Accessibility")
+}
+
 pub(super) fn window_drag_region(region: Div) -> Div {
     region.on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
 }
