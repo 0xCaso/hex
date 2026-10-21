@@ -88,7 +88,7 @@ fn canonical_bundle_id_for(bundle_id: &str, name: Option<&str>) -> Option<&'stat
     })
 }
 
-fn canonical_application_name(canonical_bundle_id: &str) -> Option<&'static str> {
+pub(crate) fn canonical_application_name(canonical_bundle_id: &str) -> Option<&'static str> {
     match canonical_bundle_id {
         "us.zoom.xos" => Some("zoom.us"),
         "com.microsoft.teams2" => Some("Microsoft Teams"),

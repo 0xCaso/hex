@@ -481,6 +481,8 @@ enum AppPreviewTarget {
 #[derive(Clone, Copy, ValueEnum)]
 enum MeetingPanelPreview {
     Offer,
+    OfferMore,
+    OfferDismissed,
     Recording,
     RecordingExpanded,
     RecordingCopied,
@@ -668,6 +670,10 @@ fn main() -> Result<()> {
                     &SHUTDOWN,
                     meeting_watcher::Launch::MeetingPanelPreview(match meeting_panel {
                         MeetingPanelPreview::Offer => meeting_watcher::PanelPreview::Offer,
+                        MeetingPanelPreview::OfferMore => meeting_watcher::PanelPreview::OfferMore,
+                        MeetingPanelPreview::OfferDismissed => {
+                            meeting_watcher::PanelPreview::OfferDismissed
+                        }
                         MeetingPanelPreview::Recording => meeting_watcher::PanelPreview::Recording,
                         MeetingPanelPreview::RecordingExpanded => {
                             meeting_watcher::PanelPreview::RecordingExpanded

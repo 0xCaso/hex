@@ -214,9 +214,12 @@ substitute for source inspection or a second roadmap.
   Dictation, meeting recording state and Stop & Transcribe, update checks, and
   orderly application shutdown.
 - `dictation_indicator`: the click-through Metal/GPUI capture and processing HUD.
-- `meeting`: explicit ScreenCaptureKit capture, owner-only WAV and transcript
+- `meeting`: explicit capture through `meeting_capture`, owner-only WAV and transcript
   artifacts, Screen Recording permission checks, final local-model publication,
   the user-facing Markdown copy, and recovery.
+- `meeting_capture`: independent self-healing microphone (cpal) and system
+  audio (Core Audio process tap, ScreenCaptureKit fallback) sources; one
+  failing never stops the other, and resumed audio is padded onto the timeline.
 - `meeting_transcript`: streaming 16 kHz resampling, pause-aware overlapping
   chunks, the utility-QoS rolling transcriber that yields to dictation, seam
   deduplication, echo suppression, and Markdown rendering.
@@ -429,6 +432,11 @@ CoreAudio formats, AppleScript details, or event serialization.
   inference is active, and keeps its queue (one-second audio blocks) and chunk
   backlog bounded; a source that falls behind keeps what it transcribed and is
   rebuilt from its WAV after Stop.
+- Meeting system audio uses a Core Audio process tap (System Audio Recording
+  consent), never requiring a display; ScreenCaptureKit is only the fallback.
+  Losing either source never stops the other or the meeting: it retries until
+  Stop, and resumed audio is padded with silence so WAV positions stay on the
+  shared capture clock.
 - Meeting recording prevents idle sleep but does not apply dictation mute or
   pause-media behavior.
 - Apple Intelligence meeting notes run only after final publication, on a

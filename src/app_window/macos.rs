@@ -179,7 +179,7 @@ impl Platform {
             ),
             screen_recording_permitted: match preview {
                 Some(preview) => !preview.screen_recording_missing,
-                None => crate::meeting::screen_recording_permitted(),
+                None => crate::meeting::system_audio_ready(),
             },
             meeting_folder_error: None,
             meetings: Vec::new(),
@@ -405,7 +405,7 @@ impl AppWindow {
         if !self.settings.meetings.available() {
             return false;
         }
-        let permitted = crate::meeting::screen_recording_permitted();
+        let permitted = crate::meeting::system_audio_ready();
         let changed = permitted != self.platform.screen_recording_permitted;
         self.platform.screen_recording_permitted = permitted;
         changed
@@ -1275,6 +1275,25 @@ impl AppWindow {
         }
     }
 
+    /// Records a "Never offer" choice from the offer capsule.
+    pub fn never_offer_meeting(
+        &mut self,
+        entry: crate::app_settings::NeverOfferMeeting,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .settings
+            .meetings
+            .never_offer
+            .iter()
+            .any(|known| known.key == entry.key)
+        {
+            self.update_settings(cx, |settings| {
+                crate::app_settings::insert_never_offer(&mut settings.meetings, entry);
+            });
+        }
+    }
+
     pub fn meeting_starting(&mut self, cx: &mut Context<Self>) {
         self.platform.meeting_runtime_error = None;
         self.platform.meeting_refresh_started_ms = Some(now_ms());
@@ -1696,8 +1715,8 @@ impl AppWindow {
             button(ButtonKind::Secondary, tr("Open settings"))
                 .id("meeting-screen-recording")
                 .on_click(cx.listener(|this, _, _, cx| {
-                    if !crate::meeting::request_screen_recording() {
-                        crate::meeting::open_screen_recording_settings();
+                    if !crate::meeting::request_system_audio_access() {
+                        crate::meeting::open_system_audio_settings();
                     }
                     this.permission_refresh_at = Instant::now();
                     cx.notify();
@@ -1719,7 +1738,7 @@ impl AppWindow {
                         this.platform.meetings_toggle.set_enabled(enabled);
                         if enabled {
                             this.platform.screen_recording_permitted =
-                                this.preview || crate::meeting::screen_recording_permitted();
+                                this.preview || crate::meeting::system_audio_ready();
                             if !this.preview {
                                 this.reload_meetings();
                             }
@@ -1736,7 +1755,7 @@ impl AppWindow {
                         if self.platform.screen_recording_permitted {
                             tr("Captures the other participants' audio")
                         } else {
-                            tr("Required to hear the other participants. Allow Hex, then reopen it.")
+                            tr("Required to hear the other participants.")
                         },
                         permission_control,
                     ))
@@ -1787,6 +1806,46 @@ impl AppWindow {
                                     })),
                             ),
                     ))
+                    .when(!self.settings.meetings.never_offer.is_empty(), |panel| {
+                        panel.child(settings_row(
+                            tr("Never offer"),
+                            tr("No recording offers for these sites and apps"),
+                            div().flex().flex_col().items_end().gap_1().children(
+                                self.settings.meetings.never_offer.iter().enumerate().map(
+                                    |(index, entry)| {
+                                        let key = entry.key.clone();
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_footnote()
+                                                    .text_color(rgb(TEXT_SECONDARY))
+                                                    .child(entry.label.clone()),
+                                            )
+                                            .child(
+                                                small_button(ButtonKind::Secondary, tr("Remove"))
+                                                    .id(("never-offer-remove", index))
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            let key = key.clone();
+                                                            this.update_settings(cx, |settings| {
+                                                                settings
+                                                                    .meetings
+                                                                    .never_offer
+                                                                    .retain(|entry| {
+                                                                        entry.key != key
+                                                                    })
+                                                            });
+                                                        },
+                                                    )),
+                                            )
+                                    },
+                                ),
+                            ),
+                        ))
+                    })
                     .child(
                         settings_row(
                             tr("Summarize with Apple Intelligence"),

@@ -22,6 +22,7 @@ static MEETING_NOTES_ENABLED: AtomicBool = AtomicBool::new(true);
 static MEETING_INDICATOR_ENABLED: AtomicBool = AtomicBool::new(true);
 static MEETING_INDICATOR_CORNER: AtomicU8 = AtomicU8::new(0);
 static MEETING_OUTPUT_FOLDER: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+static MEETING_NEVER_OFFER: OnceLock<RwLock<Vec<String>>> = OnceLock::new();
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 static INDICATOR_POSITION: AtomicU8 = AtomicU8::new(0);
@@ -592,6 +593,16 @@ pub struct MeetingSettings {
     pub show_recording_indicator: bool,
     /// Screen corner the floating recording indicator snaps to after dragging.
     pub recording_indicator_corner: MeetingIndicatorCorner,
+    /// Websites and apps Hex never offers to record.
+    pub never_offer: Vec<NeverOfferMeeting>,
+}
+
+/// A website host or an app's canonical bundle ID that never gets a
+/// recording offer, with the name shown in Settings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NeverOfferMeeting {
+    pub key: String,
+    pub label: String,
 }
 
 impl Default for MeetingSettings {
@@ -602,6 +613,7 @@ impl Default for MeetingSettings {
             summarize_with_apple_intelligence: true,
             show_recording_indicator: true,
             recording_indicator_corner: MeetingIndicatorCorner::TopRight,
+            never_offer: Vec::new(),
         }
     }
 }
@@ -1110,6 +1122,15 @@ impl AppSettings {
             .write()
             .unwrap_or_else(|error| error.into_inner()) =
             Some(self.meetings.resolved_output_folder());
+        *MEETING_NEVER_OFFER
+            .get_or_init(Default::default)
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = self
+            .meetings
+            .never_offer
+            .iter()
+            .map(|entry| entry.key.clone())
+            .collect();
         *HOTKEYS
             .get_or_init(Default::default)
             .write()
@@ -1434,6 +1455,45 @@ pub fn save_meeting_indicator_corner(corner: MeetingIndicatorCorner) {
         if let Err(error) = settings.save() {
             tracing::warn!(%error, "could not persist meeting recording indicator corner");
         }
+    }
+}
+
+/// Keys of the websites and apps that never get a recording offer.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn meeting_never_offer_keys() -> Vec<String> {
+    MEETING_NEVER_OFFER
+        .get_or_init(Default::default)
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+/// Adds `entry` once; returns whether the settings changed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn insert_never_offer(meetings: &mut MeetingSettings, entry: NeverOfferMeeting) -> bool {
+    if meetings
+        .never_offer
+        .iter()
+        .any(|known| known.key == entry.key)
+    {
+        return false;
+    }
+    meetings.never_offer.push(entry);
+    true
+}
+
+/// Saves a "Never offer" choice made while the Settings window is closed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn save_never_offer_meeting(entry: NeverOfferMeeting) {
+    match AppSettings::load() {
+        Ok(mut settings) => {
+            if insert_never_offer(&mut settings.meetings, entry)
+                && let Err(error) = settings.save()
+            {
+                tracing::warn!(%error, "could not save never-offer meeting choice");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not load settings to save never-offer choice"),
     }
 }
 

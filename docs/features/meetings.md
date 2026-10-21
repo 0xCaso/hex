@@ -12,7 +12,7 @@ Linked checks are locators unless an executed result is recorded below.
 ```ts
 Settings > Meetings > Meetings (beta)               // meetings.opt-in; off by default
 ├── On -> Meetings pane, menu-bar items, call detection, Option-Control-V
-│   ├── Screen & System Audio Recording missing -> "Open settings" row
+│   ├── System Audio Recording not granted -> "Open settings" row (prompts once)
 │   ├── Show recording indicator -> on by default; corner-snapping floating capsule
 │   ├── Transcript folder -> ~/Documents/Hex Meetings by default; Reveal / choose
 │   └── Summarize with Apple Intelligence -> on by default; one-line availability
@@ -22,12 +22,14 @@ Debug builds -> Always available (DEVELOPER_FEATURES_ENABLED)
 Agents -> hex mcp (read-only MCP server; works whether or not Meetings is on)
 ```
 
-Requires the selected local dictation model, Microphone, and Screen & System
-Audio Recording. The opt-in is `meetings.enabled` in `settings.json`, alongside
+Requires the selected local dictation model, Microphone, and System Audio
+Recording (the "System Audio Recording Only" list under Privacy & Security ›
+Screen & System Audio Recording; `NSAudioCaptureUsageDescription`). Screen
+Recording alone still works through the ScreenCaptureKit fallback. The opt-in is `meetings.enabled` in `settings.json`, alongside
 `meetings.show_recording_indicator` (default `true`) and
 `meetings.recording_indicator_corner` (default `top_right`)
 ([app_settings.rs](../../src/app_settings.rs) `MeetingSettings`). Recording
-refuses to start without Screen Recording and asks macOS to list HEX.
+refuses to start without either grant and asks macOS for System Audio Recording.
 
 ## Sub-features
 
@@ -37,9 +39,17 @@ refuses to start without Screen Recording and asks macOS to list HEX.
 Zoom / Teams / Slack huddle / FaceTime / browser call uses the microphone
   -> CoreAudio input process -> canonical host app   // parent PID + bundle ID
   -> 4 stable observations (about 2 s)              // meetings.detect
+     └── Browser on a page that is not a known call site -> 40 (about 20 s),
+         so voice notes and dictation fields are not offered
+  -> Site or app in Settings › Meetings › Never offer -> no offer
   -> Capsule below the menu bar, focus-free          // meetings.offer
+     ├── Title: "Google Meet call detected", "Call on meet.jit.si",
+     │   "Call in Brave Browser" (site unknown), or the meeting's name
      ├── Record -> Start recording
      ├── Not now -> Close
+     ├── … -> "Never offer for <site or app>?" -> Never offer / Cancel
+     │   └── site from the Brave tab adapter, else the app; saved in
+     │       settings.json meetings.never_offer; Remove in Settings › Meetings
      └── 20 s timeout -> Close                       // never records on timeout
   -> Same call is snoozed by key and app until off the microphone for about 60 s
 ```
@@ -55,6 +65,14 @@ process to its canonical host app via parent PID lineage, CoreAudio's
 microphone and is not snoozed, `ContextSnapshot::capture_for_meeting` in
 [context.rs](../../src/context.rs) inspects Brave's active and open tabs for a
 `meet.google.com` call even if Brave is behind another window or tab.
+
+On 2026-10-21 Brave opened the microphone for 3-6 s at a time on
+problems.kitlangton.com (board voice notes) and each burst got a "Browser call
+call detected" offer; that is what the 20 s browser threshold prevents.
+Checks: `a_browser_voice_note_is_not_offered_but_a_sustained_browser_call_is`,
+`offer_titles_name_the_service_site_or_browser_without_repeating_call`, and
+`never_offer_silences_the_site_when_known_and_the_app_otherwise` in
+[meeting_detection.rs](../../src/meeting_detection.rs).
 
 Sources: [meeting_detection.rs](../../src/meeting_detection.rs),
 [microphone_activity.rs](../../src/microphone_activity.rs),
@@ -78,7 +96,7 @@ Brave WebRTC `getUserMedia({audio: true})` reproduction on Pro confirmed
 `NSRunningApplication == nil` before parent/bundle resolution and resolved to
 `com.brave.Browser` and `com.tinyspeck.slackmacgap` afterward.
 
-Preview: `scripts/capture-preview.sh OUT meeting-offer [--meeting-panel recording|recording-expanded|recording-copied|call-ended|ready]` (alias `meeting-capsule`).
+Preview: `scripts/capture-preview.sh OUT meeting-offer [--meeting-panel offer-more|offer-dismissed|recording|recording-expanded|recording-copied|call-ended|ready]` (alias `meeting-capsule`).
 
 ### Record
 
@@ -108,11 +126,19 @@ Detected app leaves the microphone for about 3 s     // meetings.call-ended
   -> "Zoom left the call" capsule: Keep recording / Stop & transcribe
   -> No timeout; nothing stops automatically
 
-SCStream loses its display mid-recording (monitor unplug / display sleep)
-  -> Audio delivered before error -> restart SCStream on current display once
-     ├── Display available -> keep recording into the same tracks
-     └── No display (e.g. display sleep) -> stop capture and transcribe recorded audio
-```
+Capture sources (meeting_capture.rs)                // meetings.capture
+├── Microphone -> selected input via cpal, resampled to 16 kHz
+└── System audio -> Core Audio process tap (global, excluding Hex) on a private
+    aggregate device; no display dependency
+    └── Tap not authorized + Screen Recording granted -> ScreenCaptureKit fallback
+
+A source fails (display sleep ends SCStream, device unplugged, tap stalls 3 s)
+  -> Only that source stops; the other keeps recording
+  -> Retried every 0.5-5 s until it reopens or the meeting stops
+  -> Resumes into the same track; silence fills the gap (>= 1 s) on the
+     shared capture clock, recorded in the manifest as track `gaps`
+  -> Rolling transcription drops that source; the final pass rebuilds it from WAV
+``````
 
 Starting a recording no longer opens the Settings window; failures still do.
 Checks: `call_end_is_reported_once_per_sustained_absence`,
@@ -122,9 +148,16 @@ Checks: `call_end_is_reported_once_per_sustained_absence`,
 [parakeet.rs](../../src/parakeet.rs), and
 `meeting_menu_offers_one_action_per_state` in
 [status_item.rs](../../src/status_item.rs), and
-`mid_meeting_capture_loss_proceeds_to_transcription_when_audio_was_recorded` in
+`mid_meeting_capture_loss_proceeds_to_transcription_when_audio_was_recorded`,
+`writer_fills_a_capture_gap_with_silence_and_records_it`, and
+`a_source_that_resumes_after_an_outage_is_padded_back_onto_the_timeline` in
 [meeting_tests.rs](../../src/meeting_tests.rs). Native menu-bar and capsule clicks
 are unverified.
+
+Capsule windows are borderless, shadowless, clear NSPanels (GPUI creates
+frameless pop-ups as titled panels whose window shadow outlined the full
+548 px window beneath the compact pill); only the pill draws a small shadow
+that fits its 4 px inset.
 
 ### Transcribe
 
@@ -539,6 +572,12 @@ Granola import: see [granola-import.md](../plans/granola-import.md).
 
 - No executed end-to-end recording with a real call, Screen Recording grant, or
   speakers echo in this change; see the test script in the handoff.
+- The process tap, its System Audio Recording prompt, and display-sleep
+  recovery have not run in a recorded meeting. TCC status comes from the
+  private `TCCAccessPreflight`; a denied tap would otherwise record silence.
+- Microphone and system audio now run on separate device clocks aligned by
+  arrival time; drift below the 1 s gap threshold is uncorrected and echo
+  thresholds were tuned on ScreenCaptureKit's shared clock.
 - Calendar titles (EventKit) are not implemented.
 - The live Moonshine draft needs the command model; without it, the pane shows
   rolling chunks only as they complete (about every 20–30 s).

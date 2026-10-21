@@ -468,6 +468,8 @@ struct RollingTrack {
     transcript: TrackTranscript,
     /// 16 kHz samples fed to the chunker.
     fed: usize,
+    /// Track position, in source samples, expected of the next packet.
+    next_position: u64,
     pending: usize,
     failed: bool,
 }
@@ -497,10 +499,10 @@ impl RollingFeed {
         if self.lost[index].load(Ordering::Relaxed) {
             return;
         }
-        if self.blocks[index]
-            .as_ref()
-            .is_some_and(|block| block.sample_rate != packet.sample_rate)
-        {
+        if self.blocks[index].as_ref().is_some_and(|block| {
+            block.sample_rate != packet.sample_rate
+                || block.position + block.samples.len() as u64 != packet.position
+        }) {
             self.send(index);
         }
         let block = self.blocks[index].get_or_insert_with(|| AudioPacket {
@@ -685,9 +687,18 @@ fn ingest(
             chunker: Chunker::default(),
             transcript: TrackTranscript::new(packet.source, packet.arrival_us / 1_000),
             fed: 0,
+            next_position: packet.position,
             pending: 0,
         }
     });
+    if !track.failed && packet.position != track.next_position {
+        // A capture gap was padded in the WAV; the final pass rebuilds this
+        // source from the file rather than misplacing later rolling chunks.
+        tracing::warn!(source = ?packet.source, "rolling meeting transcription skipped a capture gap");
+        track.failed = true;
+        pending.retain(|(source, _)| *source != index);
+    }
+    track.next_position = packet.position + packet.samples.len() as u64;
     if track.failed
         || lost[index].load(Ordering::Relaxed)
         || track.sample_rate != packet.sample_rate
