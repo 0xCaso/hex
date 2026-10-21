@@ -1024,7 +1024,9 @@ fn download_progress(progress: f32) -> AnyElement {
         .flex()
         .items_center()
         .gap_2()
-        .child(progress_track(div().w(gpui::relative(progress))))
+        // The tour sits on the canvas the track is drawn in, so the track
+        // takes the line colour to stay visible.
+        .child(progress_track(div().w(gpui::relative(progress))).bg(rgb(LINE)))
         .child(
             div()
                 .text_caption()
