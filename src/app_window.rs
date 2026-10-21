@@ -881,7 +881,10 @@ impl Render for NavigationSidebar {
             navigation_item(pane.icon(), selected)
                 .id(("app-nav", index))
                 .child(pane.label())
-                .on_click(move |_, _, cx| {
+                // Like an AppKit source list, a row selects on press, not
+                // release, so the pane is already showing as the button lifts.
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    crate::motion::mark_pane_input();
                     let _ = window_entity.update(cx, |this, cx| {
                         this.select_pane(pane, cx);
                     });
@@ -1933,6 +1936,7 @@ impl AppWindow {
     fn select_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
         if self.pane != pane {
             crate::motion::log_pane_summary(self.pane.label(), "pane_switched");
+            crate::motion::mark_pane_switch(pane.label());
         }
         if self.pane == Pane::Fun && pane != Pane::Fun {
             crate::hex_microphone::stop_demo_playback();
@@ -7382,6 +7386,7 @@ impl TranscriptionPickerDelegate for AppWindow {
 impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _frame_guard = crate::motion::begin_frame(self.pane.label());
+        crate::motion::pane_switch_rendered(self.pane.label(), window);
         let model_notice = self.render_model_notice(cx);
         let content = match self.pane {
             Pane::HudLab | Pane::Meetings | Pane::Commands => {

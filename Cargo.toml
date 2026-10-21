@@ -56,6 +56,7 @@ core-video = "0.4.3"
 crossterm = "0.29.0"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 gpui-symbols = { version = "0.6.1", default-features = false, features = ["component", "cache"] }
+image = { version = "0.25.10", default-features = false }
 metal = "0.29.0"
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
