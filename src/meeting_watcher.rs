@@ -2381,13 +2381,9 @@ pub fn probe() -> Result<()> {
     Ok(())
 }
 
-/// The pill's own paint over its native glass. Liquid Glass brings its rim,
-/// shadow, and depth, so the pill adds only a light tint for legible text;
-/// the older HUD material needs the painted rim, shadow, and a denser tint.
+/// The pill's own paint over its HUD material: a rim, a shadow, and a dense
+/// graphite so its text holds on a light, busy wallpaper.
 fn capsule_chrome<E: Styled>(pill: E, has_material: bool) -> E {
-    if has_material && crate::window_material::has_glass() {
-        return pill.bg(rgba(GLASS_OVER_LIQUID));
-    }
     pill.capsule_shadow()
         .border(HAIRLINE)
         .border_color(rgba(GLASS_RIM))

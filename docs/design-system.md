@@ -72,11 +72,24 @@ LINE_STRONG       #4a4a4a  // floating-surface outlines
 SCRIM             #00000099 // modal backdrops
 ```
 
-Over a material (RGBA): `SIDEBAR_SELECTED` / `SIDEBAR_SELECTED_INACTIVE` for
-the sidebar selection in key and non-key windows, `GLASS_FILL`, `GLASS_RIM`,
-`GLASS_OVER_LIQUID` (the light graphite over Liquid Glass capsules),
-`GLASS_OVER_MATERIAL` (the denser graphite over pre-26 HUD glass), and
-`GLASS_TINT` where no material exists.
+Over a material (RGBA): `SIDEBAR_GLASS_TINT` (the graphite on the sidebar's
+Liquid Glass; its alpha is the one translucency knob, `HEX_SIDEBAR_TINT_ALPHA`
+overrides it for captures), `SIDEBAR_SELECTED_INACTIVE` for the selection in a
+non-key window (a key window selects with the accent fill), `GLASS_FILL`,
+`GLASS_RIM`, `GLASS_OVER_MATERIAL` (the graphite over the capsules' HUD
+material), and `GLASS_TINT` where no material exists.
+
+### Icon tiles
+
+System Settings' coloured squares, measured on macOS 27: `TILE_SIZE` 20 pt,
+`TILE_RADIUS` 5 pt, a white `TILE_GLYPH_SIZE` 13 pt SF Symbol, a top-lit
+gradient (`TILE_GRADIENT_LIFT` / `TILE_GRADIENT_SINK` around the base colour),
+a `TILE_HIGHLIGHT` hairline along the top, and `TILE_CONTRAST_EDGE` under
+Increase Contrast. `TileColor` holds the dark-mode system colours; each
+`NavigationIcon` has one (Settings gray, Modes purple, Commands blue, Voice
+Action orange, History teal, Meetings green, Fun pink). Tiles keep their colour
+on a selected row and in an inactive window. `settings_section_tile` leads a
+Settings group with one when `HEX_SETTINGS_TILES=1` (the variant under review).
 
 ### Text
 
@@ -147,7 +160,7 @@ CONTROL_HEIGHT 24            // macOS regular controls: buttons, inputs, pop-ups
 CONTROL_HEIGHT_SMALL 20      // small buttons, keycaps
 CONTROL_HEIGHT_LARGE 28      // toolbar main action and search field
 TOGGLE 36×20                 // capsule switch, accent when on
-TAG_HEIGHT 18 · MENU_ITEM_HEIGHT 22 · NAV_ITEM_HEIGHT 28
+TAG_HEIGHT 18 · MENU_ITEM_HEIGHT 22 · NAV_ITEM_HEIGHT 30
 MENU_WIDTH 200 · MENU_OFFSET 4
 PANE_HEADER_HEIGHT 52        // toolbar row, level with the traffic lights (= TITLEBAR_INSET)
 PANEL_HEADER_HEIGHT 36 · SETTINGS_ROW_MIN_HEIGHT 48
@@ -196,8 +209,9 @@ while unsettled, and honours `accessibilityDisplayShouldReduceMotion` (or
 [`src/window_material.rs`](../src/window_material.rs) puts real AppKit
 materials behind GPUI's transparent Metal layer:
 
-- **Sidebar:** on macOS 26+ an edge-to-edge `NSGlassEffectView` under the
-  navigation column, which paints nothing itself. Glass samples whatever is
+- **Sidebar:** on macOS 26+ an edge-to-edge `NSGlassEffectView`, tinted with
+  `SIDEBAR_GLASS_TINT`, under the navigation column, which paints nothing
+  itself. Glass samples whatever is
   beneath it, so nothing opaque may sit under the sidebar inside the window;
   it stays translucent in a non-key window (as Finder's does) and turns opaque
   under Reduce Transparency. `navigation_item(…, window_active)` dims the
@@ -206,12 +220,12 @@ materials behind GPUI's transparent Metal layer:
   material renders flat grey, which is why v1 of this design looked opaque.
 - **Toolbar:** an empty unified `NSToolbar` places the traffic lights in the
   52 pt toolbar row, with their native hit areas and full-screen behaviour.
-- **Capsules:** Liquid Glass behind each meeting capsule, its corner radius
-  half the pill height and resized with it; the pill adds only
-  `GLASS_OVER_LIQUID`, since glass brings its own rim and depth. The panel's
-  window-server shadow is off (it would outline the whole transparent panel).
-  Before macOS 26 the capsules use HUD glass and the pill draws its rim and
-  `capsule_shadow()` inside its 8 pt margin.
+- **Capsules:** the dark HUD material behind each meeting capsule, masked to
+  the pill and resized with it, under `GLASS_OVER_MATERIAL`, so text holds at
+  over 8:1 on a light, busy wallpaper. Liquid Glass was tried and washed the
+  text out. The panel's window-server shadow is off (it would outline the
+  whole transparent panel); the pill draws its rim and `capsule_shadow()`
+  inside its 8 pt margin.
 
 GPUI's `WindowBackgroundAppearance::Blurred` is not used: it strips the
 material's tint and saturation.

@@ -35,14 +35,12 @@ pub(crate) const SCRIM: u32 = 0x00000099;
 
 // Translucent tokens (RGBA, used with `rgba`) for content over a material:
 // the macOS sidebar and the floating capsules.
-/// The selected sidebar row over the sidebar material.
-pub(crate) const SIDEBAR_SELECTED: u32 = 0xffffff1c;
 /// The selected sidebar row while the window is inactive.
 pub(crate) const SIDEBAR_SELECTED_INACTIVE: u32 = 0xffffff10;
 /// The sidebar's trailing edge over its material.
 pub(crate) const SIDEBAR_EDGE: u32 = 0x00000080;
 /// A button fill on HUD glass.
-pub(crate) const GLASS_FILL: u32 = 0xffffff1c;
+pub(crate) const GLASS_FILL: u32 = 0xffffff2b;
 /// The inner highlight that rims HUD glass.
 pub(crate) const GLASS_RIM: u32 = 0xffffff2e;
 /// The recording capsule's Stop button: system red at 18%.
@@ -50,9 +48,9 @@ pub(crate) const RECORDING_STOP_FILL: u32 = 0xff453a2e;
 /// The graphite laid over the HUD material so capsules stay legible over
 /// bright windows.
 pub(crate) const GLASS_OVER_MATERIAL: u32 = 0x1c1c1eb3;
-/// The light graphite over Liquid Glass capsules (macOS 26+), which carry
-/// their own depth: enough for white text over a bright window, no more.
-pub(crate) const GLASS_OVER_LIQUID: u32 = 0x1c1c1e47;
+/// The graphite tint on the sidebar's Liquid Glass (macOS 26+), as
+/// `0xRRGGBBAA`. Its alpha is the one translucency knob: higher is calmer.
+pub(crate) const SIDEBAR_GLASS_TINT: u32 = 0x1e1e20b0;
 /// The graphite that tints HUD glass where no material is available.
 pub(crate) const GLASS_TINT: u32 = 0x1c1c1eeb;
 
@@ -90,6 +88,56 @@ pub(crate) const SUCCESS_SURFACE: u32 = 0x16261b;
 /// Destructive and failed text: a lighter red that stays readable.
 pub(crate) const DANGER: u32 = 0xff6961;
 pub(crate) const DANGER_SURFACE: u32 = 0x33191a;
+
+// Icon tiles: System Settings' coloured rounded squares, measured on
+// macOS 27 (20 pt tile, ~5 pt corners, a faint top-lit gradient, a one-pixel
+// highlight along the top, and a white glyph). Tiles keep their colour in
+// an inactive window and on a selected row.
+pub(crate) const TILE_SIZE: f32 = 20.0;
+pub(crate) const TILE_RADIUS: Pixels = px(5.0);
+pub(crate) const TILE_GLYPH_SIZE: f32 = 13.0;
+/// The glyph on every tile.
+pub(crate) const TILE_GLYPH: u32 = 0xffffff;
+/// What a tile's gradient sinks toward at the bottom.
+pub(crate) const TILE_SHADE: u32 = 0x000000;
+/// The one-pixel highlight along a tile's top edge.
+pub(crate) const TILE_HIGHLIGHT: u32 = 0xffffff40;
+/// The edge Increase Contrast adds so a tile holds against any row.
+pub(crate) const TILE_CONTRAST_EDGE: u32 = 0x00000099;
+/// How far the gradient lifts the top toward white and sinks the bottom
+/// toward black (System Settings' green runs #42cf63 → #36c659).
+pub(crate) const TILE_GRADIENT_LIFT: f32 = 0.08;
+pub(crate) const TILE_GRADIENT_SINK: f32 = 0.05;
+
+/// A tile's colour: the dark-mode system colours.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TileColor {
+    Gray,
+    Purple,
+    Blue,
+    Orange,
+    Teal,
+    Green,
+    Pink,
+    Red,
+    Indigo,
+}
+
+impl TileColor {
+    pub(crate) const fn base(self) -> u32 {
+        match self {
+            Self::Gray => 0x8e8e93,
+            Self::Purple => 0xbf5af2,
+            Self::Blue => 0x0a84ff,
+            Self::Orange => 0xff9f0a,
+            Self::Teal => 0x30b0c7,
+            Self::Green => 0x30d158,
+            Self::Pink => 0xff375f,
+            Self::Red => 0xff453a,
+            Self::Indigo => 0x5e5ce6,
+        }
+    }
+}
 
 /// The user's accent colour (`controlAccentColor`): the toggle's "on" state
 /// and progress. Read once at launch; `#007AFF` elsewhere.
@@ -356,7 +404,8 @@ pub(crate) const MENU_ITEM_HEIGHT: f32 = 22.0;
 pub(crate) const MENU_WIDTH: f32 = 200.0;
 /// The gap between a control and the menu it opens.
 pub(crate) const MENU_OFFSET: f32 = 4.0;
-pub(crate) const NAV_ITEM_HEIGHT: f32 = 28.0;
+/// System Settings' sidebar rows on macOS 27 are 30 pt apart.
+pub(crate) const NAV_ITEM_HEIGHT: f32 = 30.0;
 pub(crate) const MULTILINE_INPUT_HEIGHT: f32 = 76.0;
 pub(crate) const DISCLOSURE_WIDTH: f32 = 220.0;
 /// The narrowest pop-up button, so one-word choices are still easy targets.

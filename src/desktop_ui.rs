@@ -61,13 +61,6 @@ impl NavigationIcon {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn navigation_icon(icon: NavigationIcon, _selected: bool) -> AnyElement {
-    // Sidebar symbols match their labels, as Finder's do over glass; grey
-    // strokes wash out against the backdrop.
-    sf_symbol(icon.sf_symbol(), ICON_SIZE, TEXT_PRIMARY)
-}
-
 /// An SF Symbol rasterized by AppKit at medium weight.
 ///
 /// AppKit draws into a premultiplied bitmap while GPUI's sprite pipeline
@@ -353,37 +346,92 @@ pub(crate) fn sidebar_frame() -> Div {
         })
 }
 
-/// A sidebar row. Selection is instant and rows never highlight on hover;
-/// the selected row dims while the window is inactive, as AppKit's does.
+/// A sidebar row: a coloured [`icon_tile`] and its label. Selection is
+/// instant and rows never highlight on hover. On macOS the selected row
+/// fills with the accent colour like System Settings', and turns grey while
+/// the window is inactive; the tile keeps its colour either way.
 pub(crate) fn navigation_item(icon: NavigationIcon, selected: bool, window_active: bool) -> Div {
-    let selection = if cfg!(target_os = "macos") {
-        rgba(if window_active {
-            SIDEBAR_SELECTED
+    let (selection, ink) = if cfg!(target_os = "macos") {
+        if window_active {
+            (rgb(accent()), rgb(TILE_GLYPH))
         } else {
-            SIDEBAR_SELECTED_INACTIVE
-        })
+            (rgba(SIDEBAR_SELECTED_INACTIVE), rgb(TEXT_PRIMARY))
+        }
     } else {
-        rgb(SURFACE_SELECTED)
+        (rgb(SURFACE_SELECTED), rgb(TEXT_PRIMARY))
     };
     div()
         .h(px(NAV_ITEM_HEIGHT))
-        .px_2()
+        .px(px(6.0))
         .flex()
         .items_center()
         .gap_2()
         .rounded(RADIUS_CONTROL)
         .text_body()
         .text_color(rgb(TEXT_PRIMARY))
-        .when(selected, |item| item.bg(selection))
-        .child(
-            div()
-                .size(px(ICON_SIZE + 4.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(navigation_icon(icon, selected)),
-        )
+        .when(selected, |item| item.bg(selection).text_color(ink))
+        .child(navigation_tile(icon, selected))
+}
+
+impl NavigationIcon {
+    pub(crate) const fn tile_color(self) -> TileColor {
+        match self {
+            Self::Settings => TileColor::Gray,
+            Self::Modes => TileColor::Purple,
+            Self::Commands => TileColor::Blue,
+            Self::VoiceAction => TileColor::Orange,
+            Self::History => TileColor::Teal,
+            Self::Meetings => TileColor::Green,
+            Self::Fun => TileColor::Pink,
+            Self::Activity => TileColor::Indigo,
+            Self::HudLab => TileColor::Red,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn navigation_tile(icon: NavigationIcon, _selected: bool) -> AnyElement {
+    icon_tile(icon.sf_symbol(), icon.tile_color())
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn navigation_tile(icon: NavigationIcon, selected: bool) -> AnyElement {
+    div()
+        .size(px(ICON_SIZE + 4.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(navigation_icon(icon, selected))
+        .into_any_element()
+}
+
+/// System Settings' icon tile: a white SF Symbol on a top-lit rounded
+/// square of a system colour, with a one-pixel highlight along its top.
+#[cfg(target_os = "macos")]
+pub(crate) fn icon_tile(symbol: &'static str, color: TileColor) -> AnyElement {
+    let base = rgb(color.base());
+    let top = mix_color(base, rgb(TILE_GLYPH), TILE_GRADIENT_LIFT);
+    let bottom = mix_color(base, rgb(TILE_SHADE), TILE_GRADIENT_SINK);
+    div()
+        .size(px(TILE_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(TILE_RADIUS)
+        .bg(gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(top, 0.0),
+            gpui::linear_color_stop(bottom, 1.0),
+        ))
+        .border_t(HAIRLINE)
+        .border_color(rgba(TILE_HIGHLIGHT))
+        .when(crate::window_material::increase_contrast(), |tile| {
+            tile.border(HAIRLINE).border_color(rgba(TILE_CONTRAST_EDGE))
+        })
+        .child(sf_symbol(symbol, TILE_GLYPH_SIZE, TILE_GLYPH))
+        .into_any_element()
 }
 
 pub(crate) fn pane_header(title: &'static str) -> AnyElement {
@@ -617,6 +665,38 @@ pub(crate) fn settings_section_label(label: &'static str) -> AnyElement {
         .font_weight(FontWeight::SEMIBOLD)
         .child(label)
         .into_any_element()
+}
+
+/// A Settings group title with a leading [`icon_tile`], as System Settings'
+/// detail panes lead with one. Previews show the tile only with
+/// `HEX_SETTINGS_TILES=1`, so both variants stay comparable.
+pub(crate) fn settings_section_tile(
+    label: &'static str,
+    symbol: &'static str,
+    color: TileColor,
+) -> AnyElement {
+    #[cfg(target_os = "macos")]
+    if settings_tiles() {
+        return div()
+            .pt_6()
+            .pb_1p5()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_body()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(icon_tile(symbol, color))
+            .child(label)
+            .into_any_element();
+    }
+    let _ = (symbol, color);
+    settings_section_label(label)
+}
+
+#[cfg(target_os = "macos")]
+fn settings_tiles() -> bool {
+    static TILES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TILES.get_or_init(|| std::env::var_os("HEX_SETTINGS_TILES").is_some_and(|value| value == "1"))
 }
 
 /// The fixed top of a detail column: a [`detail_title`] with its actions on

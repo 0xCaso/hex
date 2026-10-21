@@ -34,9 +34,9 @@ use crate::desktop_ui::{
     list_row_meta, list_row_title, listener_status, menu_item, menu_separator, menu_with_progress,
     mix_color, navigation_item, pane_content, pane_detail, pane_header, pane_header_with_action,
     pane_list, pane_scroll_body, panel, panel_header, progress_track, section_label, settings_copy,
-    settings_row, settings_section_label, sidebar_frame, sliding_segmented_control,
-    sliding_segmented_for, sliding_segmented_item, small_button, split_body, status_dot, tag,
-    toggle, truncated_line, window_frame,
+    settings_row, settings_section_label, settings_section_tile, sidebar_frame,
+    sliding_segmented_control, sliding_segmented_for, sliding_segmented_item, small_button,
+    split_body, status_dot, tag, toggle, truncated_line, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
@@ -4076,7 +4076,7 @@ impl AppWindow {
                 .children(platform_notice)
                 .children(listener_card)
                 .children(top_platform_section)
-                .child(settings_section_label(tr("Dictation")))
+                .child(settings_section_tile(tr("Dictation"), "mic.fill", TileColor::Blue))
                 .child(
                     panel()
                         .child(
@@ -4137,7 +4137,7 @@ impl AppWindow {
                             .id("paste-last-hotkey-setting"),
                         )),
                 )
-                .child(settings_section_label(tr("Local transcription")))
+                .child(settings_section_tile(tr("Local transcription"), "waveform", TileColor::Indigo))
                 .child(
                     panel()
                         .child(settings_row(
@@ -4196,7 +4196,7 @@ impl AppWindow {
                                 .children(microphone_confirmation)
                         }),
                 )
-                .child(settings_section_label(tr("Behavior")))
+                .child(settings_section_tile(tr("Behavior"), "gearshape.fill", TileColor::Gray))
                 .child(
                     panel()
                         .when(capabilities.recording_audio, |panel| {
@@ -4239,7 +4239,7 @@ impl AppWindow {
                         }),
                 )
                 .children(bottom_platform_section)
-                .child(settings_section_label(tr("Application")))
+                .child(settings_section_tile(tr("Application"), "macwindow", TileColor::Teal))
                 .child(
                     panel()
                         .when(capabilities.launch_at_login, |panel| panel.child(
@@ -4382,7 +4382,7 @@ impl AppWindow {
                                 this.select_pane(Pane::Fun, cx);
                             }));
                         column
-                            .child(settings_section_label(tr("Experimental: Hex microphone")))
+                            .child(settings_section_tile(tr("Experimental: Hex microphone"), "wand.and.stars", TileColor::Pink))
                             .child(
                                 panel()
                                     .id("experimental-hex-microphone-panel")

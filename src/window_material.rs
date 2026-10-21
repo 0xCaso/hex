@@ -5,9 +5,12 @@
 //! shows through wherever GPUI paints nothing, and WindowServer composites
 //! it off-process, without a GPUI fork change.
 //!
-//! On macOS 26 and later the sidebar column and the capsules are Liquid
-//! Glass (`NSGlassEffectView`). Glass samples whatever lies beneath it, so
-//! nothing opaque may sit under the sidebar inside the window. Glass stays translucent
+//! On macOS 26 and later the sidebar column is Liquid Glass
+//! (`NSGlassEffectView`) under a graphite tint (`design_tokens::SIDEBAR_GLASS_TINT`), so
+//! the wallpaper shows only as a soft hue. Glass samples whatever lies
+//! beneath it, so nothing opaque may sit under the sidebar inside the window.
+//! The floating capsules stay on the dark HUD material on every release:
+//! clear glass washed their text out over light wallpapers. Glass stays translucent
 //! while the window is inactive and turns opaque under Reduce Transparency.
 //! Earlier releases fall back to `NSVisualEffectView` with the `.sidebar` and
 //! HUD materials; the `.sidebar` material looks flat grey on macOS 26+
@@ -50,11 +53,38 @@ fn force_dark(ns_window: &objc2_app_kit::NSWindow) {
     objc2_app_kit::NSAppearanceCustomization::setAppearance(ns_window, appearance.as_deref());
 }
 
+/// Accessibility › Display › Increase contrast. Read once per call; cheap.
+pub(crate) fn increase_contrast() -> bool {
+    MainThreadMarker::new().is_some()
+        && objc2_app_kit::NSWorkspace::sharedWorkspace()
+            .accessibilityDisplayShouldIncreaseContrast()
+}
+
 /// Whether this macOS has Liquid Glass. Checked once at runtime, since the
 /// class is missing before macOS 26 and allocating it there would crash.
 pub(crate) fn has_glass() -> bool {
     static GLASS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *GLASS.get_or_init(|| objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some())
+}
+
+/// The sidebar glass tint, `0xRRGGBBAA`. `HEX_SIDEBAR_TINT_ALPHA` (0–255)
+/// overrides the alpha so captures can compare strengths.
+fn sidebar_glass_tint() -> u32 {
+    let tint = crate::design_tokens::SIDEBAR_GLASS_TINT;
+    std::env::var("HEX_SIDEBAR_TINT_ALPHA")
+        .ok()
+        .and_then(|alpha| alpha.parse::<u8>().ok())
+        .map_or(tint, |alpha| (tint & 0xffffff00) | u32::from(alpha))
+}
+
+fn ns_color(rgba: u32) -> Retained<objc2_app_kit::NSColor> {
+    let channel = |shift: u32| f64::from((rgba >> shift) & 0xff) / 255.0;
+    objc2_app_kit::NSColor::colorWithSRGBRed_green_blue_alpha(
+        channel(24),
+        channel(16),
+        channel(8),
+        channel(0),
+    )
 }
 
 fn glass_view(mtm: MainThreadMarker, frame: NSRect, radius: f64) -> Retained<NSGlassEffectView> {
@@ -99,6 +129,7 @@ pub(crate) fn install_sidebar_material(window: &Window, sidebar_width: f32) {
     if has_glass() {
         // Edge to edge; the window's own corners round it.
         let glass = glass_view(mtm, column, 0.0);
+        glass.setTintColor(Some(&ns_color(sidebar_glass_tint())));
         glass.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
         content.addSubview_positioned_relativeTo(&glass, NSWindowOrderingMode::Below, None);
     } else {
@@ -136,18 +167,14 @@ pub(crate) fn install_capsule_glass(
     if let Some(ns_window) = content.window() {
         ns_window.setHasShadow(false);
     }
-    let glass: Retained<NSView> = if has_glass() {
-        Retained::into_super(glass_view(mtm, NSRect::default(), 0.0))
-    } else {
-        let hud = effect_view(
-            mtm,
-            NSRect::default(),
-            NSVisualEffectMaterial::HUDWindow,
-            NSVisualEffectState::Active,
-        );
-        hud.setWantsLayer(true);
-        Retained::into_super(hud)
-    };
+    let hud = effect_view(
+        mtm,
+        NSRect::default(),
+        NSVisualEffectMaterial::HUDWindow,
+        NSVisualEffectState::Active,
+    );
+    hud.setWantsLayer(true);
+    let glass: Retained<NSView> = Retained::into_super(hud);
     if let Some(ns_window) = content.window() {
         force_dark(&ns_window);
     }
@@ -173,9 +200,7 @@ pub(crate) fn set_capsule_glass_frame(glass: &NSView, origin: (f32, f32), size: 
     CATransaction::begin();
     CATransaction::setDisableActions(true);
     glass.setFrame(frame);
-    if let Some(liquid) = glass.downcast_ref::<NSGlassEffectView>() {
-        liquid.setCornerRadius(f64::from(size.1) / 2.0);
-    } else if let Some(layer) = glass.layer() {
+    if let Some(layer) = glass.layer() {
         layer.setCornerRadius(f64::from(size.1) / 2.0);
         layer.setMasksToBounds(true);
     }

@@ -398,7 +398,11 @@ impl AppWindow {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         vec![
-            settings_section_label(tr("Meetings")).into_any_element(),
+            crate::desktop_ui::settings_section_tile(
+                tr("Meetings"),
+                "calendar",
+                crate::design_tokens::TileColor::Green,
+            ),
             self.render_meeting_settings(window, cx).into_any_element(),
         ]
     }
