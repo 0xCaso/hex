@@ -109,8 +109,10 @@ impl Portal {
             .message()
             .contains("org.freedesktop.DBus.Error.Unknown")
         {
+            // The portal finds the app id through hex.desktop and the caller's
+            // /proc entry, which setgid wrappers such as newgrp make unreadable.
             return Err(eyre!(
-                "the shortcuts portal did not accept Hex ({error}); reinstall Hex so hex.desktop is installed"
+                "the shortcuts portal could not identify Hex ({error}); install Hex with its hex.desktop entry and run it without setuid or setgid wrappers such as newgrp"
             ));
         }
         let sender = connection

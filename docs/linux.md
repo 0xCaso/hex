@@ -179,7 +179,10 @@ dictation rules:
   another key, or refuse one that it or another binding already uses. Settings
   lists what the desktop granted under **Desktop shortcuts**, with an error for
   any it refused. The portal identifies Hex by its installed `hex.desktop`
-  entry. The desktop delivers the keys to Hex, not to the focused application.
+  entry and by inspecting the service process, so run `hex service` directly:
+  a setgid wrapper such as `newgrp`, once used to grant input-device access,
+  makes the portal refuse Hex. The desktop delivers the keys to Hex, not to the
+  focused application.
 - **Wayland without the portal** (for example Sway): nothing registers global
   shortcuts. Settings lists these commands; bind them in your desktop's own
   keyboard configuration:
