@@ -101,6 +101,10 @@ Brave WebRTC `getUserMedia({audio: true})` reproduction on Pro confirmed
 `com.brave.Browser` and `com.tinyspeck.slackmacgap` afterward.
 
 Preview: `scripts/capture-preview.sh OUT meeting-offer [--meeting-panel offer-more|offer-dismissed|recording|recording-expanded|recording-copied|call-ended|ready]` (alias `meeting-capsule`).
+In the live preview, the recording capsule's Open opens a Meetings preview
+window through the app's open path; on Pro, clicking it with cua-driver while
+the preview is inactive reproduced the deadlock before the fix and opens the
+window after it.
 
 ### Record
 
@@ -115,14 +119,15 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      └── Stop & Transcribe
      (Idle menu bar: "Record Meeting" + "Copy Last Meeting Transcript")
   -> Floating recording indicator (when Show recording indicator is on) // meetings.indicator
-     ├── Focus-free GPUI capsule; click-through outside the visible pill
+     ├── Focus-free GPUI capsule that never becomes key; click-through outside the visible pill
      ├── Drag anywhere -> snaps to nearest corner and saves recording_indicator_corner
      ├── Compact pill: pulsing red dot (static under Reduce Motion) · tabular mm:ss · title
      └── Hover expands actions (fixed-width inline "Copied" feedback):
          ├── Copy new (N) -> copies turns since last Copy new or Option-Control-V;
          │                   disabled when 0; advances shared cursor only on success
          ├── Copy all -> echo-filtered live transcript as You/Them Markdown turns
-         ├── Open -> opens the active meeting in the Meetings pane
+         ├── Open -> activates Hex, then opens the active meeting in the Meetings pane
+         │           (opening while inactive deadlocked GPUI before gpui 2e52b98)
          └── Stop -> Stop & Transcribe
   -> Settings window may stay closed
 

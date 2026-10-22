@@ -127,5 +127,7 @@ transcribe-cpp = { version = "=0.2.4", features = ["vulkan"] }
 # 1. Wayland XKB early-return when key/modifier events arrive before any keymap (from Hona/gpui a0c6474).
 # 2. macOS CAMetalLayer sRGB colorspace tag, triangular gradient/shadow dithering,
 #    luminance glyph dilation (Zed #54886), and CVDisplayLinkCreateWithCGDisplay fallback.
+# 3. macOS: release the window-state lock before resignKeyWindow (opening a window
+#    while inactive deadlocked the main thread), and focus-free pop-ups never become key.
 [patch.crates-io]
-gpui = { git = "https://github.com/kitlangton/gpui", rev = "2582af8ad01dc39ae6500e872e8e994b0a9b8a6e" }
+gpui = { git = "https://github.com/kitlangton/gpui", rev = "2e52b98886063ddfa828312c83415a14208dfe87" }

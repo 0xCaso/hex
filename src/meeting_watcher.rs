@@ -250,7 +250,7 @@ fn run_panel_preview(preview: PanelPreview) -> Result<()> {
             PanelKind::Ready(Box::new(manifest))
         }
     };
-    let (commands, _receiver) = mpsc::sync_channel(8);
+    let (commands, receiver) = mpsc::sync_channel(8);
     Application::new().run(move |cx| {
         cx.bind_keys([KeyBinding::new(
             "cmd-q",
@@ -258,6 +258,38 @@ fn run_panel_preview(preview: PanelPreview) -> Result<()> {
             None,
         )]);
         cx.on_action(|_: &crate::app_window::QuitApplication, cx| cx.quit());
+        // Open and Reveal take the same cross-thread path to the app window as
+        // the live capsules, so the preview exercises opening it from a panel.
+        cx.spawn(async move |cx| {
+            let app_window = Rc::new(RefCell::new(None));
+            let (meeting_requests, _meeting_receiver) = mpsc::sync_channel(8);
+            let (indicator, _indicator_receiver) = dictation_indicator::channel();
+            loop {
+                while let Ok(command) = receiver.try_recv() {
+                    if !matches!(command, ControllerCommand::Open(_)) {
+                        continue;
+                    }
+                    let result = cx.update(|cx| {
+                        crate::app_window::open_preview(
+                            &app_window,
+                            std::env::temp_dir().join("hex-panel-preview.ndjson"),
+                            config::voice_control(),
+                            meeting_requests.clone(),
+                            indicator.clone(),
+                            crate::app_window::AppWindowPreview::pane(
+                                crate::developer_control::DeveloperPane::Meetings,
+                            ),
+                            cx,
+                        )
+                    });
+                    if let Ok(Err(error)) = result {
+                        tracing::error!(%error, "could not open Hex from the panel preview");
+                    }
+                }
+                Timer::after(Duration::from_millis(16)).await;
+            }
+        })
+        .detach();
         let deadline = match preview {
             PanelPreview::Offer | PanelPreview::OfferMore => Some(OFFER_TIMEOUT * 30),
             PanelPreview::OfferDismissed => Some(Duration::from_secs(3)),

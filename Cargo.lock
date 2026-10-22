@@ -3210,7 +3210,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/kitlangton/gpui?rev=2582af8ad01dc39ae6500e872e8e994b0a9b8a6e#2582af8ad01dc39ae6500e872e8e994b0a9b8a6e"
+source = "git+https://github.com/kitlangton/gpui?rev=2e52b98886063ddfa828312c83415a14208dfe87#2e52b98886063ddfa828312c83415a14208dfe87"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",

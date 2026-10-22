@@ -219,6 +219,10 @@ fn open_new(
 ) -> gpui::Result<WindowHandle<AppWindow>> {
     let preview_mode = preview.is_some();
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+    // Activate first: opening a window while Hex is inactive (after a click on
+    // a non-activating capsule or the menu bar) makes AppKit report a spurious
+    // key change that GPUI answers by resigning key status.
+    cx.activate(true);
     let handle = cx.open_window(
         platform::window_options(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -235,7 +239,9 @@ fn open_new(
         }),
         |window, cx| cx.new(|cx| AppWindow::new(event_path, history, preview, args, window, cx)),
     )?;
-    cx.activate(true);
+    // Activation can land after the window opens; key it again on the next turn.
+    #[cfg(target_os = "macos")]
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
     Ok(handle)
 }
 
@@ -421,6 +427,37 @@ pub struct AppWindowPreview {
     pub experimental_mic: bool,
     pub fun_mode: Option<crate::voice_filter::VoiceFilterMode>,
     pub fun_driver_missing: bool,
+}
+
+impl AppWindowPreview {
+    pub fn pane(pane: DeveloperPane) -> Self {
+        AppWindowPreview {
+            pane,
+            transcription_picker: None,
+            onboarding: None,
+            confirm_model_deletion: false,
+            collapse_mode_processing: false,
+            open_transformation_picker: false,
+            select_global_mode: false,
+            voice_action_enabled: false,
+            opencode_unavailable: false,
+            permissions_missing: false,
+            model_missing: false,
+            command_model_missing: false,
+            open_history_retention: false,
+            confirm_release_microphone: false,
+            update_available: false,
+            meetings_enabled: true,
+            screen_recording_missing: false,
+            meeting_recording: false,
+            confirm_meeting_delete: false,
+            open_meeting_actions: false,
+            meetings_empty: false,
+            experimental_mic: false,
+            fun_mode: None,
+            fun_driver_missing: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -8384,32 +8421,7 @@ mod tests {
     }
 
     fn pane_preview(pane: DeveloperPane) -> AppWindowPreview {
-        AppWindowPreview {
-            pane,
-            transcription_picker: None,
-            onboarding: None,
-            confirm_model_deletion: false,
-            collapse_mode_processing: false,
-            open_transformation_picker: false,
-            select_global_mode: false,
-            voice_action_enabled: false,
-            opencode_unavailable: false,
-            permissions_missing: false,
-            model_missing: false,
-            command_model_missing: false,
-            open_history_retention: false,
-            confirm_release_microphone: false,
-            update_available: false,
-            meetings_enabled: true,
-            screen_recording_missing: false,
-            meeting_recording: false,
-            confirm_meeting_delete: false,
-            open_meeting_actions: false,
-            meetings_empty: false,
-            experimental_mic: false,
-            fun_mode: None,
-            fun_driver_missing: false,
-        }
+        AppWindowPreview::pane(pane)
     }
 
     fn editor_fixture(window: &mut Window, cx: &mut Context<AppWindow>) -> AppWindow {
