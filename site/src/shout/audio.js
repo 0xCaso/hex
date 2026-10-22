@@ -21,7 +21,7 @@ export class AudioEngine {
   // The context is created by the caller inside the start gesture (or later, on unmute).
   attach(context, { muted }) {
     this.muted = muted
-    if (context) this.build(context)
+    if (context && this.ctx !== context) this.build(context)
   }
 
   // Resolves once the first replies and the interface sounds are decoded.

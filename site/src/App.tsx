@@ -1,7 +1,9 @@
-import { useLayoutEffect, useRef, useState } from "react"
+import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react"
 import Download, { PLATFORM_NAMES, SHORTCUTS } from "./Download"
 import { guessPlatform, refinePlatform, type Platform } from "./platform"
-import { OptionKey, SoundToggle, useShout } from "./Shout"
+import { OptionKey, SoundToggle, useShout, VoiceButton } from "./Shout"
+
+const VoiceGame = lazy(() => import("./VoiceGame"))
 
 function HexMark() {
   return (
@@ -43,7 +45,7 @@ export default function App() {
   const shout = useShout(root, canvas, head)
 
   return (
-    <main className="page" ref={root} data-phase={shout.phase}>
+    <main className="page" ref={root} data-phase={shout.phase} data-voice={shout.voice ? "" : undefined}>
       <canvas ref={canvas} className="stage" aria-hidden="true" />
       <header className="header">
         <a className="wordmark" href="/" aria-label="Hex home" data-avoid>
@@ -51,7 +53,7 @@ export default function App() {
           <span>HEX</span>
         </a>
         <div className="header__tools" data-avoid>
-          {shout.phase === "started" && <SoundToggle muted={shout.muted} onToggle={shout.toggleMuted} />}
+          {(shout.phase === "started" || shout.voice) && <SoundToggle muted={shout.muted} onToggle={shout.toggleMuted} />}
           <a className="header__github" href="https://github.com/anomalyco/hex">
             <GitHubMark />
             <span>GitHub</span>
@@ -64,6 +66,7 @@ export default function App() {
           <img src="/shout-idle.webp" alt="" width="640" height="640" decoding="async" fetchPriority="high" />
         </div>
         <OptionKey phase={shout.phase} onStart={shout.start} onIntent={shout.load} onPress={shout.pressKey} />
+        <VoiceButton onPlay={shout.playVoice} onIntent={shout.load} hidden={shout.phase === "starting" || shout.phase === "started" || !!shout.voice} />
       </div>
 
       <section className="hero">
@@ -87,6 +90,11 @@ export default function App() {
 
         <Download platform={platform} />
       </section>
+      {shout.voice && (
+        <Suspense fallback={null}>
+          <VoiceGame session={shout.voice} onClose={shout.endVoice} />
+        </Suspense>
+      )}
     </main>
   )
 }

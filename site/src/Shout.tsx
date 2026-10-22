@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
+import type { VoiceSession } from "./VoiceGame"
 
 // The hero show lives in ./shout (plain JS, WebGPU with a Canvas 2D fallback). The prerendered
 // page shows a still of the idle head; the engine loads when the browser is idle or the visitor
@@ -105,6 +106,22 @@ export function useShout(root: RefObject<HTMLElement | null>, canvas: RefObject<
     [phase, load, root],
   )
 
+  // PROTOTYPE: "Play with your voice". The microphone prompt and both audio contexts belong to
+  // this click; the game, the recognizer and the model load after it.
+  const [voice, setVoice] = useState<VoiceSession | null>(null)
+  const playVoice = useCallback(() => {
+    if (voice || phase === "starting" || phase === "started") return
+    const quiet = readMuted()
+    if (!quiet) context.current ??= newContext()
+    void context.current?.resume()
+    const micContext = new AudioContext({ latencyHint: "interactive" })
+    const mic = navigator.mediaDevices
+      .getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      .catch(() => null)
+    setVoice({ engine: load(), mic, micContext, sfx: context.current, muted: quiet, reduced: reduced.current })
+  }, [voice, phase, load])
+  const endVoice = useCallback(() => setVoice(null), [])
+
   const toggleMuted = useCallback(() => {
     const next = !muted
     setMutedState(next)
@@ -118,7 +135,7 @@ export function useShout(root: RefObject<HTMLElement | null>, canvas: RefObject<
     live.current?.setMuted(next, context.current)
   }, [muted])
 
-  return { phase, muted, start, load, pressKey, toggleMuted }
+  return { phase, muted, start, load, pressKey, toggleMuted, voice, playVoice, endVoice }
 }
 
 export function OptionKey({
@@ -201,6 +218,25 @@ export function SoundToggle({ muted, onToggle }: { muted: boolean; onToggle(): v
         <path d="M3 8v4h3l4 3V5L6 8z" />
         {muted ? <path d="m13.5 8 4 4m0-4-4 4" fill="none" /> : <path d="M13 7.5a3.5 3.5 0 0 1 0 5M15.2 5.5a6.5 6.5 0 0 1 0 9" fill="none" />}
       </svg>
+    </button>
+  )
+}
+
+// PROTOTYPE: offered only where a microphone, an audio worklet and a secure page are available,
+// and not on touch screens until it's been tried on a phone.
+export function VoiceButton({ onPlay, onIntent, hidden }: { onPlay(): void; onIntent(): void; hidden: boolean }) {
+  const [ok, setOk] = useState(false)
+  useEffect(() => {
+    setOk(!!(typeof navigator.mediaDevices?.getUserMedia === "function" && "AudioWorkletNode" in window && isSecureContext && !matchMedia("(pointer: coarse)").matches))
+  }, [])
+  if (!ok) return null
+  return (
+    <button type="button" className="voice-start" data-hidden={hidden || undefined} tabIndex={hidden ? -1 : undefined} onPointerEnter={onIntent} onFocus={onIntent} onClick={onPlay}>
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <rect x="7" y="2.5" width="6" height="10" rx="3" />
+        <path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v2.5" fill="none" />
+      </svg>
+      Play with your voice
     </button>
   )
 }

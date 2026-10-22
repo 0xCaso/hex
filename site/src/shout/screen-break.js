@@ -493,7 +493,7 @@ export class ScreenBreak {
   }
 
   // Adds a photorealistic ballistic impact fracture at (x, y) that propagates outward over 95–165 ms.
-  addCrack(x, y, power = 1, hitsDownload = false) {
+  addCrack(x, y, power = 1, hitsDownload = false, size = 1) {
     if (this.state === "idle") this.state = "cracking"
     if (hitsDownload) {
       const dl = this.root.querySelector(".hero .download")
@@ -522,8 +522,8 @@ export class ScreenBreak {
     const growDur = 0.135 * lerp(0.88, 1.22, clamp(power, 0.7, 1.4))
 
     // 1. Primary, medium & dense inner crater rays (42-52 rays per impact, matching target-cracks.png)
-    const rayCount = Math.round(lerp(40, 50, clamp(power, 0.7, 1.4)))
-    const maxRunnerLen = Math.min(this.W, this.H) * lerp(0.4, 0.66, clamp(power, 0.7, 1.4))
+    const rayCount = Math.round(lerp(40, 50, clamp(power, 0.7, 1.4)) * lerp(0.6, 1, size))
+    const maxRunnerLen = Math.min(this.W, this.H) * lerp(0.4, 0.66, clamp(power, 0.7, 1.4)) * size
     const primaryRays = []
 
     for (let i = 0; i < rayCount; i++) {

@@ -174,6 +174,7 @@ const LAYOUT = {
   discord: { w: 340, h: 118 },
   opencode: { w: 360, h: 200 },
   keycap: { w: 124, h: 102 },
+  note: { w: 340, h: 108 },
 }
 
 function rr(ctx, x, y, w, h, r) {
@@ -888,6 +889,72 @@ Object.assign(DRAW, {
   },
 })
 
+// PROTOTYPE (voice game): a note whose ghosted words the visitor says out loud. `reply` holds every
+// word's typeset position (planNote); `lw[i]` fills a target word in, like a landed reply word.
+DRAW.note = function note(ctx, c, w, h) {
+  panel(ctx, w, h, 16)
+  avatar(ctx, c.from, 14, 13, 22, true)
+  ctx.textBaseline = "middle"
+  ctx.font = `600 12px ${SANS}`
+  ctx.fillStyle = "#c4c4c9"
+  ctx.fillText(c.from, 44, 24.5)
+  const nw = ctx.measureText(c.from).width
+  ctx.font = `400 11px ${SANS}`
+  ctx.fillStyle = "#6a6a70"
+  ctx.fillText("· now", 50 + nw, 24.5)
+  const r = c.reply
+  if (!r) return
+  ctx.font = r.font
+  ctx.textBaseline = "alphabetic"
+  for (let i = 0; i < r.words.length; i++) {
+    const word = r.words[i]
+    const target = c.targets.includes(i)
+    const st = c.lw?.[i]
+    const fill = st ? Math.min(1, st.fade) : 0
+    if (target) {
+      // The blank: a dashed well that the spoken word drops into.
+      const padX = 5
+      rr(ctx, word.x - padX, word.y - r.size * 0.86, word.w + padX * 2, r.size * 1.18, 6)
+      ctx.fillStyle = `rgba(255,255,255,${0.04 + 0.04 * fill})`
+      ctx.fill()
+      ctx.setLineDash(fill > 0 ? [] : [4, 3])
+      ctx.strokeStyle = fill > 0 ? `rgba(255,190,120,${0.25 + 0.5 * (st.heat ?? 0)})` : "rgba(170,190,255,0.42)"
+      ctx.lineWidth = 1.2
+      ctx.stroke()
+      ctx.setLineDash([])
+      if (fill < 1) {
+        ctx.fillStyle = `rgba(170,190,255,${0.5 * (1 - fill)})`
+        ctx.fillText(word.text, word.x, word.y)
+      }
+      if (fill > 0) {
+        const hh = st.heat ?? 0
+        const col = FINAL.map((v, k) => Math.round(v + (HOT[k] - v) * hh))
+        ctx.globalAlpha = fill
+        ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`
+        if (hh > 0.02) {
+          ctx.shadowColor = `rgba(255,${Math.round(120 + 90 * (1 - hh))},60,${(0.9 * hh).toFixed(3)})`
+          ctx.shadowBlur = 2 + 12 * hh
+        }
+        ctx.fillText(word.text, word.x, word.y)
+        ctx.shadowBlur = 0
+        ctx.shadowColor = "transparent"
+        ctx.globalAlpha = 1
+      }
+    } else {
+      ctx.fillStyle = "#8e8e94"
+      ctx.fillText(word.text, word.x, word.y)
+    }
+  }
+  if (c.timer != null) {
+    rr(ctx, 14, h - 9, w - 28, 3, 1.5)
+    ctx.fillStyle = "rgba(255,255,255,0.06)"
+    ctx.fill()
+    rr(ctx, 14, h - 9, (w - 28) * Math.max(0, 1 - c.timer), 3, 1.5)
+    ctx.fillStyle = c.timer > 0.7 ? "#f2553e" : "#7aa7ff"
+    ctx.fill()
+  }
+}
+
 // A complaint that OpenCode fixed: green edge and a resolution bar over the reply field.
 function resolvedOverlay(ctx, c, w, h) {
   rr(ctx, 0.5, 0.5, w - 1, h - 1, 14)
@@ -972,6 +1039,7 @@ export class Cards {
     else if (kind === "tweet") Object.assign(c, { from: item[0], handle: item[1], body: item[2], layout: "tweet" })
     else if (kind === "discord") Object.assign(c, { channel: item[0], from: item[1], body: item[2], layout: "discord" })
     else if (kind === "opencode") Object.assign(c, { from: "OpenCode", layout: "opencode", agents: 0, pulse: 0, glow: 0, agentFlash: 0 })
+    else if (kind === "note") Object.assign(c, { from: item[0], layout: "note" })
     else Object.assign(c, { from: item[0], body: item[1], layout: "dm" })
     c.item = item
     if (c.layout === "banner") c.title = `${c.from}: ${c.title}`
@@ -1055,6 +1123,50 @@ export class Cards {
     card.caretX = words[0].x
     card.caretY = words[0].y
     card.caretTo = { x: words[0].x, y: words[0].y }
+    return card.reply
+  }
+
+  // PROTOTYPE (voice game): `[ship] the [fix]` → every word placed on one line, bracketed ones
+  // become targets. Words fly into these slots exactly like typeset reply words.
+  planNote(card, phrase) {
+    const ctx = this.ctx
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    const texts = []
+    const targets = []
+    for (const raw of phrase.split(" ")) {
+      const t = raw.match(/^\[(.+)\](.*)$/)
+      if (t) targets.push(texts.length)
+      texts.push(t ? t[1] : raw)
+    }
+    const weight = 680
+    const fontAt = (s) => `${weight} ${s}px ${SANS}`
+    const maxW = card.w - 40
+    let size = 28
+    for (; size > 15; size -= 1) {
+      ctx.font = fontAt(size)
+      // Wells add a little width around each target word.
+      if (ctx.measureText(texts.join("  ")).width + targets.length * 10 <= maxW) break
+    }
+    ctx.font = fontAt(size)
+    const words = []
+    let x = 20
+    const y = card.h - 30
+    texts.forEach((text, i) => {
+      if (targets.includes(i) && i > 0) x += 5
+      const w = ctx.measureText(text).width
+      words.push({ text, x, y, w })
+      x += w + ctx.measureText(" ").width * 1.15 + (targets.includes(i) ? 5 : 0)
+    })
+    ctx.restore()
+    card.reply = { words, size, weight, font: fontAt(size), loud: true, bubbleW: 0 }
+    card.targets = targets
+    card.lw = []
+    card.typed = ""
+    card.caretX = words[0].x
+    card.caretY = y
+    card.caretTo = { x: words[0].x, y }
+    this.draw(card)
     return card.reply
   }
 

@@ -307,6 +307,7 @@ let saiyan = 0 // 0..1, drives renderer.setSaiyan
 let powerStage = null // null | charge | on
 let beatIndex = 0
 function targetIntensity() {
+  if (game) return reduced ? 0.06 : game.intensity()
   if (reduced) return 0.06
   if (v.intensity >= 0) return v.intensity
   if (blastStage) return blastStage === "after" ? 0 : 1
@@ -382,6 +383,7 @@ const cam = { trauma: 0, kx: S(0), ky: S(0) }
 let spawnAcc = 0
 let recentKinds = []
 let userRage = false
+let game = null // PROTOTYPE: the voice game, while it runs (see play())
 
 // Plays a voice clip and lets its amplitude envelope drive the mouth.
 function say(take, opts = {}) {
@@ -392,6 +394,7 @@ function say(take, opts = {}) {
 // Envelopes are normalized per clip; calm lines shouldn't open the mouth as wide as screams.
 const LEVEL = { 1: 0.22, 2: 0.3, 3: 0.8, 4: 0.9, 5: 1 }
 function mouthOpen() {
+  if (game) return game.level()
   const h = head.voice
   if (!h?.env) return 0
   const k = Math.floor((rtime - h.start) * h.rate * 50)
@@ -542,6 +545,17 @@ function land(c, word) {
 
 function finish(c, word) {
   c.typing = false
+  if (c.game) {
+    // Voice game: a filled note always blows up.
+    c.state = "dying"
+    c.dieAt = time + 0.1 + (v.hitStop / 1000) * 0.6
+    c.hitDir = { x: word.vx, y: word.vy }
+    c.flash = 1
+    hitStop.remaining = Math.max(hitStop.remaining, (v.hitStop / 1000) * 0.7)
+    audio.sfx("thump", { bus: "impacts", gain: 0.8, rate: rnd(0.85, 1) })
+    game?.broke(c, word)
+    return
+  }
   if (c.kind === "opencode") return submitPrompt(c)
   if (c.hold) {
     Object.assign(c, { state: "wait", pinned: true, hold: false })
@@ -1469,6 +1483,17 @@ function updateHead(dt) {
     }
   }
 
+  // Voice game: the visitor's own voice drives the mouth.
+  if (game && !blastStage) {
+    const talk = mouthOpen()
+    mouth = Math.max(mouth, 0.04 + talk * lerp(0.75, 1.15, i))
+    mouthW = lerp(0.8, 1.12, talk)
+    stretch += 0.1 * talk
+    lean += 10 * talk
+    anger = Math.max(anger, 0.55 * smooth(0.15, 0.7, talk))
+    if (talk > 0.12) smile = Math.min(smile, -0.5)
+    browUp += 0.3 * talk
+  }
   // Power-up: crouch, tremble and scream; the mouth rides the scream clip.
   if (powerStage === "charge") {
     const k = clamp(head.t / (3.6 * k80()), 0, 1)
@@ -2196,6 +2221,15 @@ function updateCards(dt) {
       explode(c, 1.3)
       continue
     }
+    if (c.game) {
+      // The voice game places its notes; only the blow-up runs here.
+      if (c.state === "dying" && time >= c.dieAt) {
+        explode(c, 1.1)
+        continue
+      }
+      c.flash = c.state === "dying" ? 1 : Math.max(0, c.flash - dt / 0.08)
+      continue
+    }
     const age = time - c.born
     spring(c.pop, 1, lerp(3.2, 5, I), lerp(0.55, 0.4, I), dt)
     spring(c.ox, 0, lerp(3.4, 6, I), 0.75, dt)
@@ -2327,6 +2361,7 @@ function step(realDt) {
   baseShift += (shiftTarget() - baseShift) * (1 - Math.exp(-realDt * 4))
   audio.setIntensity(I)
   director(dt)
+  game?.update(dt, realDt)
   const target = userRage ? Math.max(targetIntensity(), 0.9) : targetIntensity()
   I += (target - I) * (1 - Math.exp(-dt * (blastStage === "after" ? 0.9 : 2.5)))
   runTimers()
@@ -2447,7 +2482,7 @@ const frame = (now) => {
   raf = 0
   const dt = (now - last) / 1000
   last = now
-  if (started || reduced) step(dt)
+  if (started || reduced || game) step(dt)
   else {
     // Idle: 30 fps is plenty for a breathing head and halves the GPU work before the click.
     idleAcc += dt
@@ -2456,10 +2491,10 @@ const frame = (now) => {
       idleAcc = 0
     }
   }
-  if (visible && !document.hidden && !(reduced && !started)) raf = requestAnimationFrame(frame)
+  if (visible && !document.hidden && !(reduced && !started && !game)) raf = requestAnimationFrame(frame)
 }
 const wake = () => {
-  if (raf || !visible || document.hidden || (reduced && !started) || capture) return
+  if (raf || !visible || document.hidden || (reduced && !started && !game) || capture) return
   last = performance.now()
   raf = requestAnimationFrame(frame)
 }
@@ -2563,6 +2598,43 @@ return {
   },
   setMuted(muted, context) {
     audio.setMuted(muted, context)
+  },
+  // PROTOTYPE: "Play with your voice". Loads the game (and the interface sounds) on demand.
+  async play({ context, muted, onEvent }) {
+    if (started || game) return game
+    audio.attach(context, { muted })
+    const [{ createGame }, m] = await Promise.all([import("./game.js"), import("./audio/manifest.json").then((x) => x.default)])
+    if (!audio.manifest) void audio.load({ sfx: m.sfx, voice: {} })
+    game = createGame(
+      {
+        W: () => W,
+        H: () => H,
+        time: () => time,
+        rand,
+        rnd,
+        cards,
+        live,
+        launch,
+        explode,
+        retire,
+        screenBreak,
+        audio,
+        head,
+        headPos,
+        headR,
+        cam,
+        hitStop,
+        cardScale,
+        detach: () => {
+          game = null
+          head.target = null
+          I = 0
+        },
+      },
+      { reduced, onEvent },
+    )
+    wake()
+    return game
   },
   destroy() {
     off.abort()
