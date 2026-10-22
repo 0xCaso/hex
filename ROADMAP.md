@@ -91,6 +91,12 @@ may reset without affecting active capture. Physically smoke-test delayed
 shortcut boundaries, custom modifier and key chords, lock behavior,
 cancellation, foreground insertion, and both reserved paste shortcuts.
 
+macOS still plays the stop tone after the 200 ms post-release tail because the
+coordinator blocks in `DictationAudio::finish_with_tail`; Linux and Windows
+play it at the release. Announce a release that will transcribe from the audio
+owner before it drains the tail, ending the recording environment there so a
+muted output is restored before the tone, and verify it on a Mac.
+
 The first installed timestamped-timeline build regressed physical dictation:
 shortcut input arrived, but long captures discarded and one accepted job reached
 inference with zero milliseconds of audio. At the HID tap, physical timestamps

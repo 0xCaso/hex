@@ -132,6 +132,16 @@ Release or locked finishing press                     // dictate.release-tail
      (an X11 key release, a portal Deactivated, or `hex dictation stop`)
   -> A press inside the tail starts after the old clip finishes, with its own pre-roll
 
+Release that will transcribe                          // dictate.stop-tone
+  -> Linux, Windows: stop tone and mute/pause restore at the release, while the
+     tail is still captured; a muted Linux output unmutes first, then the tone
+     ├── Short tap or chord -> No stop tone; the start tone is retracted
+     ├── Clip later near-silent -> Tone already played; discard, nothing pasted
+     └── Escape after the release -> Not bound; the clip still transcribes
+  -> macOS: stop tone after the tail (up to 200 ms later; 300 ms on a stall)
+  -> The silence gate ignores the tail, so a tone the microphone hears there
+     never makes a silent clip transcribe
+
 Release when idle -> Press shortcut                   // dictate.cold-microphone
   -> Open microphone asynchronously, no pre-roll
      ├── Release before readiness -> Discard
@@ -173,9 +183,22 @@ and ownership transitions, not physical device startup latency. Tail checks ther
 drive the owner with a fake stream: `release_waits_for_its_tail_and_keeps_no_later_audio`,
 `a_press_inside_the_tail_starts_its_own_capture_after_the_old_one_finishes`,
 `a_stalled_or_failed_stream_bounds_the_tail_wait`, and
-`escape_and_short_taps_finish_without_waiting_for_a_tail`. The coordinator blocks
-on the tail, so the stop tone, HUD Transcribing, and submission follow the release
-by up to 200 ms (300 ms on a stalled stream); their order is unchanged.
+`escape_and_short_taps_finish_without_waiting_for_a_tail`. The macOS coordinator
+blocks on the tail, so the stop tone, HUD Transcribing, and submission follow the
+release by up to 200 ms (300 ms on a stalled stream); their order is unchanged.
+Linux and Windows play the stop tone at the release instead. On Linux this used
+to follow the tail too: on 2026-10-22, an isolated service on apollo (ALSA
+Loopback microphone and speaker, `hex dictation stop`) measured the stop tone
+requested 203 ms after the release was handled before the fix and within the same
+loop pass after it (about 40 ms after the CLI mark, mostly process start), with
+the tail still collected for 203 ms afterwards; the output was already open, so
+no device reopen was involved. Checks: `a_release_finishes_its_stream_with_the_complete_clip`
+(a release that transcribes is announced before its tail),
+`escape_and_short_taps_cancel_the_stream_and_submit_nothing` (a short tap is
+silent), `restoring_without_a_mute_runs_its_callback_first`, and
+`the_stop_tone_in_the_tail_does_not_make_silence_transcribe`. The mute ordering
+(unmute, then tone) is checked by reading the code, not on a muted device, and a
+physical F12 release has not been recorded.
 
 ### Streaming Finish
 

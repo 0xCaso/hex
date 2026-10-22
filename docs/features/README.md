@@ -843,7 +843,9 @@ Linux Settings > Sound volume             // dictate.feedback.linux; X11 + Wayla
 
 Capture                                  // hex app and hex dictate
 ├── Shortcut starts capture -> Queue start sound immediately, before audio arrives
-├── Finish retained recording -> Stop sound, before transcription/paste
+├── Finish retained recording -> Stop sound at the release, while the 200 ms
+│   tail is still captured; a muted output unmutes first   // dictate.stop-tone
+│   └── Clip turns out near-silent -> Stop sound already played, nothing pasted
 ├── Brief discarded tap -> Start sound, but no stop sound or transcription
 └── Cancel active capture -> Cancel sound; idle Escape stays silent
 ```

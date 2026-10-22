@@ -350,6 +350,9 @@ pub enum ShortcutMode {
 
 pub struct DictationClip {
     samples: Vec<f32>,
+    /// How many trailing samples were captured after the release. The stop
+    /// tone sounds during them, so the silence gate ignores them.
+    tail_samples: usize,
     /// The live stream fed with this clip's audio during capture, if any.
     stream: Option<LiveStream>,
 }
@@ -368,14 +371,17 @@ impl DictationClip {
     pub fn for_test(samples: Vec<f32>) -> Self {
         Self {
             samples,
+            tail_samples: 0,
             stream: None,
         }
     }
 
     /// The loudest 30 ms window's DC-removed RMS level in dBFS, over the
-    /// captured audio only (before any model padding).
+    /// captured audio through the release (before the tail and any model
+    /// padding).
     fn loudest_window_dbfs(&self) -> f32 {
-        loudest_window_dbfs(&self.samples)
+        let released = self.samples.len().saturating_sub(self.tail_samples);
+        loudest_window_dbfs(&self.samples[..released])
     }
 
     pub fn is_near_silent(&self) -> bool {
@@ -933,8 +939,16 @@ impl DictationCapture {
         };
 
         let stream = recording.stream.take();
+        let kept_tail = recording
+            .recorded_through
+            .and_then(|through| through.checked_duration_since(ended_at))
+            .map_or(Duration::ZERO, |after| after.min(tail));
         let samples = recording.finish(Some(ended_at + tail));
-        Finish::Transcribe(DictationClip { samples, stream })
+        Finish::Transcribe(DictationClip {
+            tail_samples: samples_for(kept_tail, PARAKEET_SAMPLE_RATE).min(samples.len()),
+            samples,
+            stream,
+        })
     }
 }
 
@@ -1142,6 +1156,25 @@ mod tests {
         assert_eq!(clip.duration_ms(), 1_650);
         assert_eq!(clip.samples.last(), Some(&12.0));
         assert!(!clip.samples.contains(&13.0));
+        assert_eq!(clip.tail_samples, 3_200);
+    }
+
+    #[test]
+    fn the_stop_tone_in_the_tail_does_not_make_silence_transcribe() {
+        let mut capture = DictationCapture::new(16_000);
+        let origin = capture_time();
+        capture.start_at(origin);
+        let released = origin + Duration::from_secs(1);
+        capture.ingest(&vec![0.0; 16_000], released);
+        capture.ingest(
+            &tone(0.1, 3_200).collect::<Vec<_>>(),
+            released + POST_RELEASE_TAIL,
+        );
+        let Finish::Transcribe(clip) = capture.finish_with_tail(released, POST_RELEASE_TAIL) else {
+            panic!("expected transcription")
+        };
+        assert_eq!(clip.duration_ms(), 1_200);
+        assert!(clip.is_near_silent());
     }
 
     #[test]
