@@ -139,7 +139,9 @@ substitute for source inspection or a second roadmap.
   `migrations` and migrates the Windows and Linux beta files once.
 - `login_item`: the native `SMAppService.mainAppService` adapter. macOS owns
   registration state; it is deliberately not duplicated in `settings.json`.
-- `app_paths`: the Application Support owner for runtime logs and shared state.
+- `app_paths`: the Application Support owner for runtime logs and shared state,
+  including the one-time macOS `voice-control` to `hex` folder rename, which runs
+  in `main` before logging, the instance lock, or any file in the folder opens.
 - `onboarding`: required permission health, selected dictation-model
   installation, the release startup gate, and opt-in command-model setup.
 - `sparkle`: packaged-app-only Sparkle lifecycle and manual update checks.
@@ -747,12 +749,17 @@ Tab to cycle, and `q`/Escape to quit.
 
 ## Diagnostics
 
-- `~/Library/Application Support/voice-control/logs/live.ndjson`: state,
+- `~/Library/Application Support/hex/logs/live.ndjson`: state,
   transcript, command decision, outcome, processing, and context.
-- `~/Library/Application Support/voice-control/logs/process.log`: Rust,
+- `~/Library/Application Support/hex/logs/process.log`: Rust,
   CoreAudio, Moonshine, and context-adapter diagnostics.
-- `~/Library/Application Support/voice-control/meetings/`: manifests, separate
+- `~/Library/Application Support/hex/meetings/`: manifests, separate
   tracks, recoverable live drafts, and atomically published final transcripts.
+
+Older macOS builds used `voice-control`; the first launch of a newer build
+renames it to `hex` and leaves a `voice-control -> hex` symlink. If the rename
+fails, Hex keeps using `voice-control` and logs why. Windows and Linux keep
+`voice-control`.
 
 When diagnosing a missed command, inspect both logs and distinguish microphone
 capture, transcription, command mode/dictation, context matching, command resolution,

@@ -842,6 +842,13 @@ pub struct AppSettings {
 
 /// Moves English dictation to the streaming English model once.
 const STREAMING_ENGLISH_MIGRATION: &str = "streaming-english-model";
+/// Hex's macOS data folder moved from `voice-control` to `hex`; recorded once
+/// Hex runs from the new folder. The rename itself is `app_paths`'s.
+#[cfg(target_os = "macos")]
+const DATA_FOLDER_MIGRATION: &str = "macos-data-folder-hex";
+#[cfg(target_os = "macos")]
+const MIGRATIONS: &[&str] = &[STREAMING_ENGLISH_MIGRATION, DATA_FOLDER_MIGRATION];
+#[cfg(not(target_os = "macos"))]
 const MIGRATIONS: &[&str] = &[STREAMING_ENGLISH_MIGRATION];
 
 fn deserialize_edit_hotkey<'de, D>(deserializer: D) -> std::result::Result<HotkeyBinding, D::Error>
@@ -1015,7 +1022,19 @@ impl AppSettings {
     pub fn load() -> Result<Self> {
         let path = path()?;
         migrate_legacy_settings(&path)?;
-        let settings = Self::load_from(&path)?;
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut settings = Self::load_from(&path)?;
+        #[cfg(target_os = "macos")]
+        if !settings.has_migration(DATA_FOLDER_MIGRATION)
+            && crate::app_paths::uses_hex_data_folder()
+        {
+            settings.migrations.push(DATA_FOLDER_MIGRATION.into());
+            if path.exists()
+                && let Err(error) = settings.write_to(&path)
+            {
+                tracing::warn!(%error, "could not record the data folder migration");
+            }
+        }
         settings.apply_runtime();
         Ok(settings)
     }
