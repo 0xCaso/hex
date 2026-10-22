@@ -536,6 +536,7 @@ to `hex` before logging, the instance lock, or any file there opens.
 ```ts
 launch (not `hex mcp`, no HEX_APPLICATION_SUPPORT_DIR)
   ├── no voice-control (fresh, or already a symlink to hex) -> use hex
+  │   └── hex exists, symlink missing -> re-create voice-control -> hex
   ├── voice-control only -> renamex_np(RENAME_EXCL) to hex
   │   ├── ok -> symlink voice-control -> hex; settings `migrations` +macos-data-folder-hex
   │   └── fails (busy, cross-volume) -> keep voice-control, log, retry next launch
@@ -545,6 +546,6 @@ launch (not `hex mcp`, no HEX_APPLICATION_SUPPORT_DIR)
 Windows (%APPDATA%\voice-control) and Linux -> unchanged
 ```
 Checks in [app_paths.rs](../../src/app_paths.rs) `data_folder::tests`: fresh,
-legacy only, both, symlink present, rename failure, concurrent rename, and
+legacy only, both, symlink present, symlink missing, rename failure, concurrent rename, and
 no-clobber rename. Proof limit: temp folders; the Studio upgrade is recorded in
 the change that introduced it.

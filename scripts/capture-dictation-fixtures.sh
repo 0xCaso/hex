@@ -2,9 +2,10 @@
 
 set -euo pipefail
 
-support="$HOME/Library/Application Support/hex"
-if [ ! -e "$support" ] && [ -d "$HOME/Library/Application Support/voice-control" ]; then
-  support="$HOME/Library/Application Support/voice-control"
+# Match Hex: an unmigrated voice-control folder (not its symlink to hex) stays in use.
+support="$HOME/Library/Application Support/voice-control"
+if [ ! -e "$support" ] || [ "$(readlink "$support" 2>/dev/null)" = hex ]; then
+  support="$HOME/Library/Application Support/hex"
 fi
 destination="${1:-$support/test-fixtures/dictation-protocol}"
 recording_pid=""

@@ -110,6 +110,10 @@ pub mod data_folder {
         let legacy = data.join(LEGACY);
         let current = data.join(CURRENT);
         if !legacy_in_use(data) {
+            // Retry a compatibility symlink an earlier launch could not create.
+            if current.is_dir() && legacy.symlink_metadata().is_err() {
+                let _ = link(&legacy);
+            }
             return Outcome::Current;
         }
         if current.symlink_metadata().is_ok() {
@@ -220,6 +224,18 @@ pub mod data_folder {
             );
             assert!(data.join(LEGACY).join("logs").is_dir());
             assert_eq!(resolve(&data), current);
+            fs::remove_dir_all(data).unwrap();
+        }
+
+        #[test]
+        fn a_missing_compat_symlink_is_recreated() {
+            let data = temp("relink");
+            fs::create_dir_all(data.join(CURRENT)).unwrap();
+            assert!(matches!(migrate(&data, rename), Outcome::Current));
+            assert_eq!(
+                fs::read_link(data.join(LEGACY)).unwrap(),
+                Path::new(CURRENT)
+            );
             fs::remove_dir_all(data).unwrap();
         }
 

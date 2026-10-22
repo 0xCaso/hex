@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { readFile } from "node:fs/promises"
+import { readFile, readlink, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { HexError } from "./errors.js"
@@ -203,27 +203,24 @@ export async function create(options: CreateOptions | TranscriberOptions = {}): 
   return startHost(options)
 }
 
-export const connect = async (options: ConnectOptions = {}): Promise<HexClient> => {
+/** Matches Hex: an unmigrated `voice-control` folder (not its symlink to `hex`) stays in use. */
+const defaultSupportDirectory = async (): Promise<string> => {
   const support = join(homedir(), "Library", "Application Support")
-  // Older Hex versions keep `voice-control`; newer ones move it to `hex`.
-  const discoveryPaths = options.discoveryPath !== undefined
-    ? [options.discoveryPath]
-    : process.env.HEX_APPLICATION_SUPPORT_DIR !== undefined
-      ? [join(process.env.HEX_APPLICATION_SUPPORT_DIR, "local-api.json")]
-      : [join(support, "hex", "local-api.json"), join(support, "voice-control", "local-api.json")]
+  const legacy = join(support, "voice-control")
+  const target = await readlink(legacy).catch(() => undefined)
+  if (target === "hex" || target === join(support, "hex")) return join(support, "hex")
+  const legacyExists = await stat(legacy).then(() => true, () => false)
+  return legacyExists ? legacy : join(support, "hex")
+}
+
+export const connect = async (options: ConnectOptions = {}): Promise<HexClient> => {
+  const discoveryPath = options.discoveryPath
+    ?? join(process.env.HEX_APPLICATION_SUPPORT_DIR ?? await defaultSupportDirectory(), "local-api.json")
   let value: unknown
-  let failure: unknown
-  for (const discoveryPath of discoveryPaths) {
-    try {
-      value = JSON.parse(await readFile(discoveryPath, "utf8"))
-      failure = undefined
-      break
-    } catch (cause) {
-      failure ??= cause
-    }
-  }
-  if (failure !== undefined) {
-    throw new HexError("startup-failed", "Could not read the running HEX endpoint", { cause: failure })
+  try {
+    value = JSON.parse(await readFile(discoveryPath, "utf8"))
+  } catch (cause) {
+    throw new HexError("startup-failed", "Could not read the running HEX endpoint", { cause })
   }
   if (typeof value !== "object" || value === null) {
     throw new HexError("invalid-handshake", "HEX discovery contained an invalid endpoint")

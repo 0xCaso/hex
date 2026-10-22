@@ -2,9 +2,10 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-support="$HOME/Library/Application Support/hex"
-if [ ! -e "$support" ] && [ -d "$HOME/Library/Application Support/voice-control" ]; then
-  support="$HOME/Library/Application Support/voice-control"
+# Match Hex: an unmigrated voice-control folder (not its symlink to hex) stays in use.
+support="$HOME/Library/Application Support/voice-control"
+if [ ! -e "$support" ] || [ "$(readlink "$support" 2>/dev/null)" = hex ]; then
+  support="$HOME/Library/Application Support/hex"
 fi
 discovery="$support/local-api.json"
 model=${HEX_SMOKE_MODEL:-parakeet_unified_en}
