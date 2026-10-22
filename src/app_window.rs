@@ -254,10 +254,12 @@ pub enum PreviewModelState {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum OnboardingPreview {
     Welcome,
-    HowItWorks,
     Setup,
     SetupProgress,
+    SetupDenied,
     SetupReady,
+    SetupDownloadFailed,
+    TryItDownloading,
     TryIt,
     TryItListening,
     TryItShort,
@@ -275,15 +277,24 @@ impl OnboardingPreview {
             accessibility: PermissionState::Ready,
             transcription_model: true,
         };
+        let fresh = SetupStatus {
+            microphone: PermissionState::NeedsRequest,
+            input_monitoring: PermissionState::NeedsSettings,
+            accessibility: PermissionState::NeedsSettings,
+            transcription_model: false,
+        };
         match self {
-            Self::Welcome | Self::HowItWorks | Self::Setup => SetupStatus {
-                microphone: PermissionState::NeedsRequest,
-                input_monitoring: PermissionState::NeedsSettings,
-                accessibility: PermissionState::NeedsSettings,
-                transcription_model: false,
-            },
+            Self::Welcome | Self::Setup | Self::SetupDownloadFailed => fresh,
             Self::SetupProgress => SetupStatus {
                 accessibility: PermissionState::NeedsSettings,
+                transcription_model: false,
+                ..ready
+            },
+            Self::SetupDenied => SetupStatus {
+                microphone: PermissionState::NeedsSettings,
+                ..fresh
+            },
+            Self::SetupReady | Self::TryItDownloading => SetupStatus {
                 transcription_model: false,
                 ..ready
             },
@@ -291,46 +302,70 @@ impl OnboardingPreview {
         }
     }
 
+    /// How far the background download has come by this state.
+    fn model(self) -> crate::onboarding::ModelProgress {
+        use crate::onboarding::ModelProgress;
+        let downloading = |progress| ModelProgress {
+            downloading: Some(progress),
+            ..ModelProgress::default()
+        };
+        match self {
+            Self::Welcome => downloading(0.08),
+            Self::Setup | Self::SetupDenied => downloading(0.31),
+            Self::SetupProgress => downloading(0.64),
+            Self::SetupReady => downloading(0.82),
+            Self::TryItDownloading => downloading(0.94),
+            Self::SetupDownloadFailed => ModelProgress {
+                failed: true,
+                ..ModelProgress::default()
+            },
+            _ => ModelProgress {
+                installed: true,
+                ..ModelProgress::default()
+            },
+        }
+    }
+
+    /// Walks a fresh first run to this state, as a person would, so the
+    /// page dots and the download match what they see.
     fn flow(self, permissions: bool, practice: bool) -> crate::onboarding::Flow {
-        use crate::onboarding::{Flow, Input, ModelProgress, Observation, SetupItem, Step};
+        use crate::onboarding::{Flow, Input, ModelProgress, Observation, SetupItem};
         let fresh = Self::Setup.status();
-        let start = match self {
-            Self::Welcome => Step::Welcome,
-            Self::HowItWorks => Step::HowItWorks,
-            _ => Step::Setup,
-        };
-        let initial = if self == Self::SetupProgress {
-            self.status()
-        } else {
-            fresh
-        };
-        // Later steps walk through setup, as a first run does, so the page
-        // dots match what a person sees.
-        let mut flow = Flow::new(start, initial, permissions, practice);
-        let status = self.status();
-        if self == Self::SetupProgress {
-            flow.on(Input::Grant(SetupItem::Accessibility));
-            flow.on(Input::Status(
-                status,
-                ModelProgress {
-                    downloading: Some(0.42),
-                    ..ModelProgress::default()
-                },
-            ));
-        } else if start == Step::Setup && self != Self::Setup {
-            flow.on(Input::Status(
-                status,
-                ModelProgress {
-                    installed: true,
-                    ..ModelProgress::default()
-                },
-            ));
-            if self != Self::SetupReady {
-                flow.on(Input::Continue);
+        let mut flow = Flow::new(
+            crate::onboarding::Step::Welcome,
+            fresh,
+            permissions,
+            practice,
+        );
+        flow.on(Input::Status(fresh, ModelProgress::default()));
+        if self != Self::Welcome {
+            flow.on(Input::Continue);
+        }
+        match self {
+            Self::SetupProgress => {
+                flow.on(Input::Grant(SetupItem::Microphone));
+                flow.on(Input::Grant(SetupItem::InputMonitoring));
+                flow.on(Input::Grant(SetupItem::Accessibility));
             }
-            if self == Self::Done {
-                flow.on(Input::Skip);
+            Self::SetupDenied => {
+                flow.on(Input::Status(self.status(), self.model()));
             }
+            _ => {}
+        }
+        flow.on(Input::Status(self.status(), self.model()));
+        if !matches!(
+            self,
+            Self::Welcome
+                | Self::Setup
+                | Self::SetupProgress
+                | Self::SetupDenied
+                | Self::SetupReady
+                | Self::SetupDownloadFailed
+        ) {
+            flow.on(Input::Continue);
+        }
+        if self == Self::Done {
+            flow.on(Input::Skip);
         }
         let observations: &[Observation] = match self {
             Self::TryItListening => &[Observation::Started],
@@ -1282,7 +1317,7 @@ impl AppWindow {
                         let history_changed = window.poll_history(cx);
                         let platform_changed = window.poll_platform(cx);
                         let hex_mic_changed = window.poll_hex_microphone(cx);
-                        let tour_changed = window.poll_tour();
+                        let tour_changed = window.poll_tour(cx);
                         if window.tour_quit_requested {
                             cx.quit();
                             return;

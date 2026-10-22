@@ -494,10 +494,12 @@ enum MeetingPanelPreview {
 #[derive(Clone, Copy, ValueEnum)]
 enum OnboardingPreviewStep {
     Welcome,
-    HowItWorks,
     Setup,
     SetupProgress,
+    SetupDenied,
     SetupReady,
+    SetupDownloadFailed,
+    TryItDownloading,
     TryIt,
     TryItListening,
     TryItShort,
@@ -739,15 +741,21 @@ fn main() -> Result<()> {
                             OnboardingPreviewStep::Welcome => {
                                 app_window::OnboardingPreview::Welcome
                             }
-                            OnboardingPreviewStep::HowItWorks => {
-                                app_window::OnboardingPreview::HowItWorks
-                            }
                             OnboardingPreviewStep::Setup => app_window::OnboardingPreview::Setup,
                             OnboardingPreviewStep::SetupProgress => {
                                 app_window::OnboardingPreview::SetupProgress
                             }
+                            OnboardingPreviewStep::SetupDenied => {
+                                app_window::OnboardingPreview::SetupDenied
+                            }
                             OnboardingPreviewStep::SetupReady => {
                                 app_window::OnboardingPreview::SetupReady
+                            }
+                            OnboardingPreviewStep::SetupDownloadFailed => {
+                                app_window::OnboardingPreview::SetupDownloadFailed
+                            }
+                            OnboardingPreviewStep::TryItDownloading => {
+                                app_window::OnboardingPreview::TryItDownloading
                             }
                             OnboardingPreviewStep::TryIt => app_window::OnboardingPreview::TryIt,
                             OnboardingPreviewStep::TryItListening => {

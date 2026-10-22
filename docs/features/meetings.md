@@ -12,7 +12,11 @@ Linked checks are locators unless an executed result is recorded below.
 ```ts
 Settings > Meetings > Meetings (beta)               // meetings.opt-in; off by default
 ├── On -> Meetings pane, menu-bar items, call detection, Option-Control-V
-│   ├── System Audio Recording not granted -> "Open settings" row (prompts once)
+│   ├── System Audio Recording                  // meetings.permission; asked only now
+│   │   ├── Allow -> macOS prompt the first time (tour's permission_control)
+│   │   ├── Decided before -> Privacy pane + drag guide ("System Audio Recording Only")
+│   │   ├── Asked -> pulse; TCC preflight re-read on each poll, no reopen needed
+│   │   └── Granted -> Allowed
 │   ├── Show recording indicator -> on by default; corner-snapping floating capsule
 │   ├── Transcript folder -> ~/Documents/Hex Meetings by default; Reveal / choose
 │   └── Summarize with Apple Intelligence -> on by default; one-line availability

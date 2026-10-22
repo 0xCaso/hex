@@ -149,6 +149,11 @@ pub(super) fn sidebar(sidebar: Div) -> Div {
 }
 
 /// Empty sidebar space moves the window like the caption, with snapping.
+/// Only macOS asks for Accessibility; the tour names it there.
+pub(super) fn accessibility_title() -> &'static str {
+    tr("Accessibility")
+}
+
 pub(super) fn window_drag_region(region: Div) -> Div {
     region
         .occlude()

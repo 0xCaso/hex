@@ -109,17 +109,23 @@ with 2.1.17; the initial 2.1.16 mirror preserves that release's original bytes.
 
 ```ts
 Launch Hex, setup incomplete              // setup.tour; full-window, own column
+├── Tour opens -> speech model download starts at once      // setup.background-download
+│   ├── Model -> the selection recommended for the system's first preferred
+│   │            language (English -> Parakeet Unified English; e.g. French ->
+│   │            Parakeet v3, Japanese -> Qwen3-ASR); no picker in the tour
+│   ├── Progress sits beside the step dots on every step; failure -> Retry
+│   └── Change or delete the model later in Settings      // setup.delete-model
 ├── Welcome -> Get started                // looping keycap + listening rings
-├── How Hex works -> hold, speak, release // follows the shortcut and Hold/Toggle mode
-├── Setup: one screen, every requirement  // setup.checklist
-│   ├── Microphone -> Allow -> macOS prompt; denied -> Open settings
-│   ├── Input Monitoring / Accessibility -> Allow -> Privacy pane + drag guide
-│   │   └── Asked -> "Waiting for macOS" + drag/switch hint; reopen the pane
-│   ├── Speech model -> Download (progress %) | Change -> picker; failure -> Retry
+├── Setup: one screen, every permission   // setup.checklist; skipped when granted
+│   ├── Every row -> Allow; asked -> pulse + Allow; granted -> Allowed  // setup.permission-control
+│   ├── Microphone -> macOS prompt; refused -> Privacy pane + "switch Hex on" guide
+│   ├── Input Monitoring / Accessibility -> Privacy pane + drag guide
+│   │   └── macOS 27 names the list "Device Control and Data Access"; row and guide follow
 │   ├── Rows re-read every 400 ms and flip to a check as macOS grants
 │   ├── The first unfinished row carries the screen's one accent
-│   └── All ready -> listener starts, completion recorded -> Continue
+│   └── Last grant -> 0.7 s beat -> Give it a try (Continue also works)
 ├── Give it a try                         // setup.practice; macOS only
+│   ├── Model still downloading -> "Hex starts listening once…" + footer progress
 │   ├── Focused practice field; hold the shortcut, speak, release
 │   ├── Started -> "Listening…" ; Transcribing -> "Transcribing…"
 │   ├── Discarded before transcribing -> quick-tap hint
@@ -130,6 +136,7 @@ Launch Hex, setup incomplete              // setup.tour; full-window, own column
 │   ├── First time -> Hex records a marker, reopens itself, resumes at Give it a try
 │   └── Within 2 min of that relaunch -> "Reopen Hex" button; dev binaries ask to reopen
 └── Done -> paste last, Voice Action, Modes tips -> Start using Hex
+    // Windows and Linux: Welcome -> Setup (the model row only) -> Done
 
 Settings > Local transcription
   -> Prepare candidate
@@ -137,7 +144,7 @@ Settings > Local transcription
      └── Failure -> Preserve previous selection and show error
 
 Permissions revoked later
-  -> Settings shows the missing access and repair action
+  -> Settings > Permissions needed: the same rows and Allow control as the tour
 ```
 
 Apple silicon, macOS 15+. Choices come from the compiled model/language catalog;
@@ -198,12 +205,20 @@ Checks start in [onboarding.rs](../../src/onboarding.rs),
 [transcription_models.rs](../../src/transcription_models.rs). Setup/picker previews
 prove rendering, not clean-account permission grants or model preparation.
 
-The tour is the pure `onboarding::Flow` (steps, row states, practice hints,
-one-relaunch guard) drawn by [tour.rs](../../src/app_window/tour.rs). Its unit
-tests (`onboarding::tests`) cover step order, live row flips, denied and failed
-recovery, platforms without permissions or practice, practice hints, resume, and
-the relaunch guard and resume marker. Every step is capturable with
-`voice-control preview onboarding --step <welcome|how-it-works|setup|setup-progress|setup-ready|try-it|try-it-listening|try-it-short|try-it-silent|try-it-landed|try-it-reopen|done>`.
+The tour is the pure `onboarding::Flow` (steps, row states, background
+download, practice hints, one-relaunch guard) drawn by
+[tour.rs](../../src/app_window/tour.rs), which also owns `permission_control`,
+the one Allow / pulse / Allowed control Settings and Meetings reuse. The guide
+beside System Settings is [permission_guide.m](../../native/permission_guide.m).
+Unit tests (`onboarding::tests`) cover step order, the download starting on the
+welcome screen and retrying from any step, permissions-only setup with the
+model waiting for practice, the auto-advance beat, live row flips, a refused
+microphone, platforms without permissions or practice, practice hints, resume,
+and the relaunch guard and resume marker. Every step is capturable with
+`voice-control preview onboarding --step <welcome|setup|setup-progress|setup-denied|setup-ready|setup-download-failed|try-it-downloading|try-it|try-it-listening|try-it-short|try-it-silent|try-it-landed|try-it-reopen|done>`.
+The default model comes from `desktop_i18n::preferred_language` (macOS:
+`NSLocale.preferredLanguages`) through `recommended_selection`; existing
+settings keep their saved model.
 Not yet observed: a clean-account run with real grants, a real practice paste
 into the field, or a real self-relaunch after an event-tap refusal. Windows and
 Linux show the model row only and skip the practice step.
