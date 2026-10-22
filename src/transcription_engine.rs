@@ -309,7 +309,7 @@ impl TranscriptionEngine {
             .map_err(|_| eyre!("transcription engine stopped"))
     }
 
-    /// Makes this the engine that meeting transcription shares.
+    /// Makes this the engine that meeting transcription and the local API share.
     #[cfg(target_os = "macos")]
     pub fn share(self: &Arc<Self>) {
         *SHARED.lock().unwrap_or_else(|error| error.into_inner()) = Arc::downgrade(self);
