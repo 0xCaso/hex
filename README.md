@@ -217,9 +217,12 @@ source.
 The Linux beta targets x86_64 Linux on i3/X11 and compatible wlroots Wayland
 compositors. It supports local hotkey dictation, a GPUI settings shell, and
 signed updates for direct installs. With a Vulkan graphics driver, dictation
-streams while you speak, as on macOS and Windows. Native Wayland requires explicit input-device
-access and compositor support for clipboard, virtual-keyboard, and layer-shell
-protocols. Voice commands and meetings are not included.
+streams while you speak, as on macOS and Windows. Native Wayland requires
+compositor support for clipboard, virtual-keyboard, and layer-shell protocols.
+Shortcuts come from the desktop's GlobalShortcuts portal, or you bind
+`hex dictation start` / `stop` / `toggle` in your compositor; see the
+[Linux guide](docs/linux.md#shortcuts). Voice commands and meetings are not
+included.
 
 Install the signed release on x86_64 Arch Linux (glibc 2.44 or later) with:
 

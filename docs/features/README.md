@@ -722,11 +722,23 @@ Linux beta                               // not macOS feature parity
 │   └── CPU or a model that cannot stream -> Transcribe the whole clip after release
 ├── hex app -> Settings client; closing it leaves the runtime running
 ├── Recording sounds -> Shortcut press / capture stop / active cancellation
-├── X11 -> No tray or recording HUD; service status and sounds remain available
-├── Wayland -> evdev + compositor protocols; keys observed, not suppressed
-│   └── Mouse-classified nodes excluded; live modifiers reused for paste
+├── Shortcuts -> One state machine, three sources        // linux.shortcuts
+│   ├── X11 -> Root-window key grabs; Settings records the chord
+│   ├── Wayland + GlobalShortcuts portal -> Desktop grants the triggers
+│   │   ├── Settings shows the granted trigger (GNOME/KDE may assign another)
+│   │   └── Refused shortcut -> "Not granted" + error; the rest keep working
+│   └── Wayland without the portal -> Bind `hex` commands in the desktop
+│       └── Settings hides shortcut rows and lists the commands
+├── hex dictation start|stop|toggle|cancel, hex voice-action start|stop|toggle,
+│   hex paste-last -> Same events as a shortcut       // linux.commands
+│   ├── Idempotent: start while recording / stop while idle -> Nothing
+│   └── Service missing or not listening -> Clear error, non-zero exit
 ├── Escape -> Cancel active capture, not newest accepted job
-│   └── X11 grab conflict -> Try plain Escape; otherwise warn without stopping dictation
+│   ├── Bound only while recording (portal: own session, also with held modifiers)
+│   └── X11 grab conflict / portal refusal -> Warn without stopping dictation
+├── Voice Action (opt-in) -> Hold its shortcut or `hex voice-action` -> Instruction
+│   └── Selected text from the primary selection -> OpenCode -> Paste the reply
+├── X11 -> No tray or recording HUD; service status and sounds remain available
 ├── Microphone failure -> Listener exits, not macOS automatic recovery
 │   └── Overload (Xrun) glitch -> Logged; not a failure
 └── Paste -> Retain transcript clipboard, not restore previous contents
@@ -749,24 +761,28 @@ release flow; [check-windows](../../.github/workflows/check-windows.yml) builds,
 lints, and tests x64 and builds and tests ARM64 on every pull request. Physical
 smoke tests on Windows 10 and on ARM64 hardware have not been run.
 
-No Linux Commands, Voice Action, Modes processing, retained History, or meetings.
-`hex listen` instead prints Moonshine transcripts. Wayland needs explicit broad
-input-device access; physical reconnect and click-through still need native
-evidence. Its [smoke](../../scripts/test-wayland-paste.sh) explicitly isolates
-`HEX_APPLICATION_SUPPORT_DIR` and checks that Settings can exit without stopping
-the service.
+No Linux voice Commands or meetings. `hex listen` instead prints Moonshine
+transcripts. Wayland shortcuts need either the desktop's GlobalShortcuts portal
+or the user's own keybindings for the `hex` commands; Hex reads no input
+devices. Click-through and a physical portal or keybinding press still need
+native evidence. Its [smoke](../../scripts/test-wayland-paste.sh) explicitly
+isolates `HEX_APPLICATION_SUPPORT_DIR`, pastes while another keyboard holds
+Ctrl and Alt, and checks that Settings can exit without stopping the service.
 
-Wayland discovery checks every event node for the required broad read access,
-then excludes udev mouse-classified nodes even when Logitech-style receivers
-advertise synthetic keyboard keys. Stable rejected nodes are cached until their
-device identity changes. The active keyboard monitor publishes aggregate
-modifier state to paste, avoiding two full device scans after every dictation.
-`mouse_nodes_are_not_monitored_even_when_the_receiver_advertises_keyboard_keys`
-and `live_modifier_snapshot_tracks_edges_and_device_loss` cover those policies;
-the nested-compositor smoke remains the native insertion check.
+Shortcut rules are pure and tested once for every source in
+[linux_input.rs](../../src/linux_input.rs): hold, double-tap lock, toggle,
+double-tap only, Escape, Paste Last, Voice Action, and command idempotence,
+plus X11 auto-repeat filtering. The X11 grab tests run on an isolated display in
+CI; `commands_and_grabs_share_the_x11_listener` drives grabs and commands
+through one listener. [scripts/test-linux-service.py](../../scripts/test-linux-service.py)
+checks that commands fail without a listening service.
+On 2026-10-22 the portal path was observed on niri with xdg-desktop-portal-gnome
+using synthetic uinput keys against an isolated service: granted triggers,
+hold and Escape while held, double-tap lock, Paste Last, and commands. A
+physical keyboard press has not been recorded.
 
 See the [Linux guide](../linux.md), [linux_app.rs](../../src/linux_app.rs),
-[linux_wayland_input.rs](../../src/linux_wayland_input.rs), and
+[linux_portal.rs](../../src/linux_portal.rs), and
 [Linux CI](../../.github/workflows/check-linux.yml) for existing checks.
 The [direct installer/updater](../../src/linux_updater.rs) and
 [installer tests](../../scripts/test-install-linux-release.sh) do not establish

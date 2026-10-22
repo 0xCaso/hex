@@ -259,8 +259,8 @@ fn side_keycap(side: Option<ModifierSide>, symbol: &'static str) -> &'static str
 /// A shortcut's non-modifier key. macOS identifies it by `code`, the virtual
 /// key code resolved through the active keyboard layout. Windows and Linux
 /// identify it by `label`, the key's name ("Space", "V", "F12", "PageUp"),
-/// which their input layers translate to virtual keys, X11 keysyms, or evdev
-/// codes; `code` is zero there. A settings file never moves between OSes.
+/// which their input layers translate to virtual keys, X11 keysyms, or the
+/// shortcuts portal's key names; `code` is zero there. A settings file never moves between OSes.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HotkeyKey {
     pub code: u16,

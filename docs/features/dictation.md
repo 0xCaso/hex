@@ -72,9 +72,17 @@ each platform's settings; files without it load as Hold. Checks:
 [suppression.rs](../../src/suppression.rs) (macOS reducer), the same names in
 [windows_input.rs](../../src/windows_input.rs), and
 `toggle_mode_starts_on_a_tap_and_finishes_on_the_next` in
-[linux_wayland_input.rs](../../src/linux_wayland_input.rs). The X11 path has no
-reducer test. Only the Windows build was compiled and tested locally
-(2026-10-19); macOS and Linux rely on CI. No physical keyboard check yet.
+[linux_input.rs](../../src/linux_input.rs), whose one state machine serves X11
+grabs, Wayland portal shortcuts, and the `hex dictation` commands alike. Only
+the Windows build was compiled and tested locally (2026-10-19); macOS relies on
+CI. The Linux state machine and X11 grab tests ran on 2026-10-22 (the grabs on
+an isolated Xwayland display). No physical keyboard check yet.
+
+On Linux, `hex dictation start` and `stop` bypass Hold, Toggle, and the
+double-tap rules: start records unless something already records, stop
+finishes, and `toggle` does whichever applies. Bound to a key's press and
+release they give hold-to-dictate; a shortcut press still finishes a capture a
+command started.
 
 The short-tap threshold belongs to ordinary hold activation. Voice-delimited
 and explicit programmatic capture have different intentional-start rules.
@@ -121,6 +129,7 @@ Release or locked finishing press                     // dictate.release-tail
   -> Same for Voice Action and promotion; not Escape, short taps, voice
      controls, programmatic stop, or meetings
   -> Linux and Windows wait the same tail; Linux ends at the release it observes
+     (an X11 key release, a portal Deactivated, or `hex dictation stop`)
   -> A press inside the tail starts after the old clip finishes, with its own pre-roll
 
 Release when idle -> Press shortcut                   // dictate.cold-microphone

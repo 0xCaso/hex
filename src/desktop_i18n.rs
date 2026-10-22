@@ -199,6 +199,17 @@ fn tables() -> &'static [HashMap<&'static str, &'static str>; 5] {
 /// Columns: Polish, Chinese (Simplified), Japanese, German, Spanish.
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, [&str; 5])] = &[
+    ("Desktop shortcuts", ["Skróty pulpitu", "桌面快捷键", "デスクトップのショートカット", "Desktop-Tastenkürzel", "Atajos del escritorio"]),
+    ("Granted by your desktop", ["Przyznany przez pulpit", "由桌面授予", "デスクトップが割り当て", "Vom Desktop vergeben", "Concedido por tu escritorio"]),
+    ("Not granted", ["Nie przyznano", "未授予", "未割り当て", "Nicht vergeben", "No concedido"]),
+    ("Your desktop did not grant every shortcut. Record another one, or free it in your desktop's keyboard settings.", ["Pulpit nie przyznał wszystkich skrótów. Nagraj inny albo zwolnij go w ustawieniach klawiatury pulpitu.", "桌面未授予所有快捷键。请录制其他快捷键，或在桌面的键盘设置中释放它。", "デスクトップがすべてのショートカットを割り当てませんでした。別のショートカットを記録するか、デスクトップのキーボード設定で空けてください。", "Der Desktop hat nicht jedes Tastenkürzel vergeben. Nimm ein anderes auf oder gib es in den Tastatureinstellungen des Desktops frei.", "Tu escritorio no concedió todos los atajos. Graba otro o libéralo en los ajustes de teclado del escritorio."]),
+    ("Your desktop has no shortcuts portal. Bind these commands in its keyboard settings.", ["Pulpit nie ma portalu skrótów. Przypisz te polecenia w jego ustawieniach klawiatury.", "你的桌面没有快捷键门户。请在其键盘设置中绑定这些命令。", "デスクトップにショートカットポータルがありません。キーボード設定でこれらのコマンドを割り当ててください。", "Dein Desktop hat kein Tastenkürzel-Portal. Weise diese Befehle in seinen Tastatureinstellungen zu.", "Tu escritorio no tiene portal de atajos. Asigna estos comandos en sus ajustes de teclado."]),
+    ("Hold to dictate", ["Przytrzymaj, aby dyktować", "按住听写", "押している間音声入力", "Halten zum Diktieren", "Mantén pulsado para dictar"]),
+    ("Bind start to the key press and stop to its release", ["Przypisz start do naciśnięcia klawisza, a stop do jego zwolnienia", "将 start 绑定到按下按键，将 stop 绑定到松开按键", "start をキーを押したとき、stop を離したときに割り当て", "start an das Drücken und stop an das Loslassen der Taste binden", "Asigna start al pulsar la tecla y stop al soltarla"]),
+    ("Toggle dictation", ["Przełącz dyktowanie", "切换听写", "音声入力を切り替え", "Diktat umschalten", "Alternar dictado"]),
+    ("Cancel dictation", ["Anuluj dyktowanie", "取消听写", "音声入力をキャンセル", "Diktat abbrechen", "Cancelar dictado"]),
+    ("Discard the current recording", ["Odrzuć bieżące nagranie", "丢弃当前录音", "現在の録音を破棄", "Aktuelle Aufnahme verwerfen", "Descartar la grabación actual"]),
+    ("Ready anywhere · Use your desktop's shortcuts to dictate", ["Gotowe wszędzie · Dyktuj skrótami pulpitu", "随处可用 · 使用桌面快捷键听写", "どこでも利用可能 · デスクトップのショートカットで音声入力", "Überall bereit · Diktiere mit den Tastenkürzeln des Desktops", "Listo en cualquier lugar · Dicta con los atajos del escritorio"]),
     ("Language", ["Język", "语言", "言語", "Sprache", "Idioma"]),
     ("The language you dictate in; Auto detects it", ["Język dyktowania; Auto wykrywa automatycznie", "听写语言；Auto 自动检测", "音声入力の言語。Auto は自動検出", "Diktatsprache; Auto erkennt automatisch", "Idioma del dictado; Auto lo detecta"]),
     ("Interface language", ["Język interfejsu", "界面语言", "表示言語", "Sprache der Oberfläche", "Idioma de la interfaz"]),

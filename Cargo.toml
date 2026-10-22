@@ -80,12 +80,10 @@ gpui = { version = "0.2.2", default-features = false, features = ["test-support"
 base64 = "0.23.1"
 ctrlc = { version = "3.5.2", features = ["termination"] }
 ed25519-dalek = "3.0.0"
-evdev = "0.13.2"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gtk = "0.18.2"
 gtk-layer-shell = { version = "0.8.2", features = ["v0_6"] }
 transcribe-cpp = { version = "=0.2.4", features = ["vulkan"] }
-udev = "0.9.3"
 x11-clipboard = "0.9.3"
 x11rb = { version = "0.14.0", features = ["xtest"] }
 

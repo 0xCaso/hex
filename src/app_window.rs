@@ -430,6 +430,7 @@ pub struct AppWindowPreview {
 }
 
 impl AppWindowPreview {
+    #[cfg(target_os = "macos")]
     pub fn pane(pane: DeveloperPane) -> Self {
         AppWindowPreview {
             pane,
@@ -3530,6 +3531,9 @@ impl AppWindow {
         let running = listener.running;
         let shortcut = self.settings.dictation_hotkey.keycaps().join("+");
         let hint = match (running, self.settings.shortcut_mode) {
+            _ if !self.platform_shortcut_rows() => {
+                tr("Ready anywhere · Use your desktop's shortcuts to dictate").into()
+            }
             (true, crate::dictation::ShortcutMode::Toggle) => tr_fill(
                 "Ready anywhere · Press {} to start and stop dictating",
                 &shortcut,
@@ -3729,6 +3733,8 @@ impl AppWindow {
             .listener_control
             .then(|| self.render_listener_card(cx))
             .flatten();
+        let shortcut_rows = self.platform_shortcut_rows();
+        let paste_last_row = capabilities.paste_last && shortcut_rows;
         let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
         let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
         let transcription_model = definition(self.settings.transcription.model);
@@ -4043,24 +4049,29 @@ impl AppWindow {
                                 ))
                             },
                         )
-                        .child(settings_row(
-                            tr("Shortcut mode"),
-                            if toggle_mode {
-                                tr("Press to start dictating, press again to transcribe")
-                            } else {
-                                tr("Hold to dictate, release to transcribe")
-                            },
-                            shortcut_mode,
-                        ))
                         .child(
                             settings_row(
-                                tr("Dictation shortcut"),
-                                tr("Click to record a new shortcut"),
-                                hotkey_control,
+                                tr("Shortcut mode"),
+                                if toggle_mode {
+                                    tr("Press to start dictating, press again to transcribe")
+                                } else {
+                                    tr("Hold to dictate, release to transcribe")
+                                },
+                                shortcut_mode,
                             )
-                            .border_b_0()
-                            .id("dictation-hotkey-setting"),
-                        ),
+                            .when(!shortcut_rows, |row| row.border_b_0()),
+                        )
+                        .when(shortcut_rows, |panel| {
+                            panel.child(
+                                settings_row(
+                                    tr("Dictation shortcut"),
+                                    tr("Click to record a new shortcut"),
+                                    hotkey_control,
+                                )
+                                .border_b_0()
+                                .id("dictation-hotkey-setting"),
+                            )
+                        }),
                 )
                 .child(settings_section_label(tr("Behavior")))
                 .child(
@@ -4127,7 +4138,7 @@ impl AppWindow {
                                     tr("Show the dictation pill at the top or bottom of the screen"),
                                     indicator_control,
                                 )
-                                .when(!capabilities.terminal_paste && !capabilities.paste_last, |row| {
+                                .when(!capabilities.terminal_paste && !paste_last_row, |row| {
                                     row.border_b_0()
                                 })
                                 .id("indicator-position-setting"),
@@ -4140,7 +4151,7 @@ impl AppWindow {
                                     tr("Paste with Ctrl+Shift+V so terminals accept it"),
                                     toggle(terminal_paste_position),
                                 )
-                                .when(!capabilities.paste_last, |row| row.border_b_0())
+                                .when(!paste_last_row, |row| row.border_b_0())
                                 .id("terminal-paste-setting")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let enabled = !this.settings.paste_with_shift;
@@ -4152,7 +4163,7 @@ impl AppWindow {
                                 })),
                             )
                         })
-                        .when(capabilities.paste_last, |panel| panel.child(
+                        .when(paste_last_row, |panel| panel.child(
                             settings_row(
                                 tr("Paste last dictation"),
                                 tr("Re-paste the most recent dictation"),
@@ -5353,22 +5364,23 @@ impl AppWindow {
                 .when_some(self.voice_action_inputs.error.clone(), |column, error| {
                     column.child(error_message(tr("Could not update Voice Action:"), error))
                 })
-                .child(settings_section_label(tr("Capture")))
-                .child(
-                    panel().child(
-                        settings_row(
-                            tr("Shortcut"),
-                            if enabled {
-                                tr("Hold to speak; selected text is included automatically")
-                            } else {
-                                tr("Saved for when Voice Action is enabled")
-                            },
-                            hotkey,
-                        )
-                        .border_b_0()
-                        .id("voice-action-hotkey-setting"),
-                    ),
-                )
+                .when(self.platform_shortcut_rows(), |column| {
+                    column.child(settings_section_label(tr("Capture"))).child(
+                        panel().child(
+                            settings_row(
+                                tr("Shortcut"),
+                                if enabled {
+                                    tr("Hold to speak; selected text is included automatically")
+                                } else {
+                                    tr("Saved for when Voice Action is enabled")
+                                },
+                                hotkey,
+                            )
+                            .border_b_0()
+                            .id("voice-action-hotkey-setting"),
+                        ),
+                    )
+                })
                 .when_some(processing, |column, processing| {
                     column
                         .child(settings_section_label(tr("Processing")))

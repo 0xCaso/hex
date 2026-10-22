@@ -272,6 +272,11 @@ impl AppWindow {
         None
     }
 
+    /// Settings records every shortcut this platform registers.
+    pub(super) fn platform_shortcut_rows(&self) -> bool {
+        true
+    }
+
     pub(super) fn platform_settings_section(
         &mut self,
         _: &mut Window,

@@ -308,7 +308,22 @@ Release the hold shortcut, or press the locked shortcut, to finish when Escape
 is unavailable. With the bare-Escape fallback, release other modifiers before
 pressing Escape. A failed fallback releases any partial grabs.
 
+On Wayland with the GlobalShortcuts portal, Escape follows the same rule
+through a second portal session that exists only while something records:
+
+```ts
+capture starts -> bind Escape, and Escape with the recording shortcut's modifiers
+  ├── granted -> Escape cancels, held shortcut or not
+  └── refused (the desktop or another binding owns Escape)
+        -> keep dictating without Escape-cancel; same listener warning
+capture ends -> close the Escape session -> Escape returns to applications
+desktop closes the main shortcuts session -> cancel active capture
+  -> listener stops with an error -> Retry / hex start binds again
+no portal -> bind `hex dictation cancel` in the desktop
+```
+
 Checks in [linux_input.rs](../../src/linux_input.rs):
+`escape_is_wanted_only_while_something_records`,
 `escape_grab_conflict_is_not_fatal`, `non_conflict_grab_errors_stay_fatal`,
 and `escape_warning_is_logged_once_per_episode_and_clears_on_recovery`.
 `listener_warning_is_nonfatal_and_round_trips_in_service_snapshots` in

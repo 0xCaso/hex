@@ -13,7 +13,7 @@ use crate::dictation::{DictationCapture, Finish, POST_RELEASE_TAIL};
 use crate::events::{DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms};
 use crate::feedback::{self, Tone};
 use crate::linux_desktop::LinuxIndicator;
-use crate::linux_input::{HotkeyEvent, HotkeyStatus, LinuxHotkeyMonitor};
+use crate::linux_input::{HotkeyEvent, HotkeyStatus, LinuxHotkeyMonitor, ShortcutCommand};
 use crate::linux_paste::LinuxPaster;
 use crate::local_transcriber::LocalTranscriber;
 use crate::transcription_engine::{PendingTranscript, TranscriptionEngine};
@@ -126,6 +126,7 @@ impl DictationOutput {
 
 /// Runs hotkey dictation until `shutdown`. A prepared transcriber skips the
 /// model load; otherwise the supplied transcription selection is loaded here.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     event_path: &Path,
     device: Option<&str>,
@@ -134,6 +135,7 @@ pub fn run(
     output_settings: DictationOutput,
     transcriber: Option<LocalTranscriber>,
     hotkey_status: HotkeyStatus,
+    commands: mpsc::Receiver<ShortcutCommand>,
 ) -> Result<()> {
     let transcriber =
         transcriber.map_or_else(|| LocalTranscriber::load(&settings.transcription), Ok)?;
@@ -174,8 +176,7 @@ pub fn run(
             .enabled
             .then(|| crate::linux_input::LinuxHotkey::from(&settings.edit_hotkey)),
     };
-    let hotkey = LinuxHotkeyMonitor::start_with(binding, options, hotkey_status)?;
-    let wayland_modifiers = hotkey.wayland_modifiers();
+    let hotkey = LinuxHotkeyMonitor::start(binding, options, hotkey_status, commands)?;
     let indicator = LinuxIndicator::new(settings.indicator_position);
     let suppressor =
         crate::linux_audio_control::AudioSuppressor::new(settings.recording_audio_behavior);
@@ -183,7 +184,7 @@ pub fn run(
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
     output.worker = Some(thread::spawn(move || {
-        let mut paster = LinuxPaster::new(worker_stop.clone(), paste_with_shift, wayland_modifiers);
+        let mut paster = LinuxPaster::new(worker_stop.clone(), paste_with_shift);
         let mut last_dictation: Option<String> = None;
         while let Ok(job) = job_receiver.recv() {
             if worker_stop.load(Ordering::Acquire) {

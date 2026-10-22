@@ -145,18 +145,25 @@ substitute for source inspection or a second roadmap.
 - `onboarding`: required permission health, selected dictation-model
   installation, the release startup gate, and opt-in command-model setup.
 - `sparkle`: packaged-app-only Sparkle lifecycle and manual update checks.
-- `linux`, `linux_app`, `linux_dictation`, `linux_input`, `linux_paste`,
-  `linux_migration`: the Linux beta CLI, the service host and Settings process,
-  the hotkey capture-transcribe-paste loop with Paste Last and Voice Action, the
-  X11 grabs and shortcut options, paste and primary-selection reads, and the
-  one-time `linux-settings.json` migration.
+- `linux`, `linux_app`, `linux_dictation`, `linux_paste`, `linux_migration`:
+  the Linux beta CLI (including the `hex dictation`, `hex voice-action`, and
+  `hex paste-last` keybinding commands), the service host and Settings process,
+  the hotkey capture-transcribe-paste loop with Paste Last and Voice Action,
+  paste and primary-selection reads, and the one-time `linux-settings.json`
+  migration.
+- `linux_input`: the one shortcut state machine (hold, double-tap lock, toggle,
+  double-tap only, Escape, Paste Last, Voice Action, and `hex` commands) and the
+  monitor that feeds it from X11 key grabs, the Wayland GlobalShortcuts portal,
+  or, without the portal, the `hex` commands alone.
+- `linux_portal`: the GlobalShortcuts portal client on a private bus
+  connection: `Register("hex")`, one session for Hex's shortcuts, a second
+  session binding Escape only while recording, granted-trigger descriptions,
+  and session-closed reporting.
 - `linux_context`: the frontmost X11 application for modes; Wayland has none.
 - `linux_audio_control`: While-dictating mute through `wpctl`/`pactl` and
   MPRIS pause over D-Bus, restoring only what it changed.
 - `linux_session`: display-backend selection matching GPUI's nonempty
   `WAYLAND_DISPLAY` rule, independent of persisted preferences.
-- `linux_wayland_input`: read-only evdev input, explicit physical key mappings,
-  cancellable shortcut capture, exact chord state, and bounded device rediscovery.
 - `linux_service`: owner-only, same-user Unix IPC, bounded service/client transport,
   and per-user systemd lifecycle. Settings and CLI are clients of one runtime.
 - `linux_desktop`: the service-owned GTK thread for the focus-free, click-through
@@ -497,26 +504,37 @@ CoreAudio formats, AppleScript details, or event serialization.
   artifact, and atomically switch the user-local `current` version. Never
   overwrite development, root, or package-manager-owned binaries.
 - The Wayland beta requires compatible clipboard, virtual-keyboard, and
-  layer-shell protocols plus explicit read access to all `/dev/input/event*`
-  nodes. Do not silently fall back to XWayland or privileged input injection.
-  Raw input observes, but does not suppress, physical US-labeled keys. Explain
-  the broad keystroke access; never grant device permissions automatically.
+  layer-shell protocols. Shortcuts come from the GlobalShortcuts portal when the
+  desktop offers it; otherwise the user binds the `hex dictation`,
+  `hex voice-action`, and `hex paste-last` commands in the desktop's own
+  keybindings. One general path: no compositor-specific code, no raw input
+  devices, no input-group requirement, and no silent fallback to XWayland or
+  privileged input injection. The desktop may grant a different trigger or
+  refuse one; Settings shows what it granted. Escape is bound only while
+  something records. Modifier-only shortcuts stay unsupported on Linux.
+- Every Linux shortcut source (X11 grabs, portal presses, `hex` commands) feeds
+  the same `linux_input` state machine and emits the same events. Commands are
+  idempotent: starting while recording or stopping while idle does nothing.
+  They talk only to a running, listening service and fail with a clear error
+  otherwise; they never start one.
 - Linux Settings owns no microphone, model workers, saved settings, or tray. The
   per-user `hex.service` owns these independently of GUI lifetime. Closing or
   crashing Settings must not stop capture or accepted work. Socket access is
   owner-only and peer-UID checked; framing, queues, and I/O remain bounded.
   Client disconnect cancels only its uncommitted shortcut capture, with a bounded
   lease fallback. Never replay uncertain mutation requests after reconnecting.
-- X11 shortcut capture uses focused GPUI input, not evdev permissions. Editing
+- Linux shortcut capture uses focused GPUI input in Settings. Editing
   shortcut/double-tap settings stops and restores only a previously running
   listener; cancellation restores the old binding unless its save already
   committed. Settings and the CLI must expose service state, recovery, and errors.
   Explicit service shutdown drains workers; closing Settings only disconnects its
   client. HUD teardown only hides that listener's HUD.
-- Linux paste keeps transcripts off helper argv, bounds helper I/O, and waits
-  for physical modifiers without discarding accepted output. Shutdown cancels
-  that wait. New installs use Ctrl-V; the terminal-paste preference selects
-  Ctrl-Shift-V and defaults on for persisted legacy X11 settings. The beta retains
+- Linux paste keeps transcripts off helper argv and bounds helper I/O. X11 waits
+  for physical modifiers without discarding accepted output, and shutdown
+  cancels that wait; on Wayland, `wtype`'s virtual keyboard carries its own
+  modifiers, so held keys never change its Ctrl+V. New installs use Ctrl-V;
+  the terminal-paste preference selects Ctrl-Shift-V and defaults on for
+  persisted legacy X11 settings. The beta retains
   the transcript clipboard; arbitrary MIME restoration and consumption
   acknowledgments remain unimplemented.
 
@@ -626,7 +644,8 @@ entry; only that managed layout participates in automatic updates.
 `nix flake check` checks modules, shell configuration, session readiness, and
 the display-free Rust suite. See `docs/nix.md`. Nix owns package updates and
 optional Home Manager autostart. Native Linux PR checks do not replace real
-X11/Wayland, keyboard hotplug, microphone, and target-application smoke tests.
+X11/Wayland, portal or keybinding shortcuts, microphone, and target-application
+smoke tests.
 
 Automatic microphone selection follows the compiled preference order in
 `src/config.rs`, then falls back to the macOS default. A saved microphone takes
@@ -777,7 +796,8 @@ seam once there are two real adapters or a current test requires substitution.
 - Validate public onboarding from a clean macOS account and signed Linux updates
   on the supported Arch/i3 host.
 - Validate native Wayland on a real compatible compositor, including physical
-  device reconnect, focus/click-through, target paste, and tray-less shutdown.
+  portal shortcuts, the `hex` commands from a desktop keybinding,
+  focus/click-through, target paste, and tray-less shutdown.
 - Add a second real browser adapter before generalizing browser context.
 - Do not turn concrete macOS, Linux X11, or command modules into hypothetical
   platform or plugin frameworks.
